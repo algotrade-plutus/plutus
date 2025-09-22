@@ -10,7 +10,7 @@
           ],
           "annualized_factor": 1.5,
           "risk_free_return": 0.03,
-          "minimal_acceptable_return": 0.7
+          "minimal_acceptable_return": 0.07
         },
         "output": {
           "expected_sharpe_ratio": 0.2640443,

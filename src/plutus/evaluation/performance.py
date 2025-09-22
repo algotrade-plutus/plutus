@@ -10,8 +10,8 @@ class HistoricalPerformance:
         self,
         returns: List[Decimal],
         annualized_factor: Decimal,
-        risk_free_return: Decimal,
-        minimal_acceptable_return: Decimal
+        risk_free_return: Decimal = Decimal('0.03'),
+        minimal_acceptable_return: Decimal = Decimal('0.07')
     ):
         """
         Init a performance history of an investment with a list of performance of consecutive periods
@@ -31,8 +31,12 @@ class HistoricalPerformance:
         self.return_mean = statistics.mean(self.returns)
         self.return_std = statistics.stdev(self.returns)
 
-        self.sharpe_ratio = self._get_sharpe_ratio(risk_free_return=self.risk_free_return)
-        self.sortino_ratio = self._get_sortino_ratio(minimal_acceptable_return=Decimal('0.07'))
+        self.sharpe_ratio = self._get_sharpe_ratio(
+            risk_free_return=self.risk_free_return
+        )
+        self.sortino_ratio = self._get_sortino_ratio(
+            minimal_acceptable_return=self.minimal_acceptable_return
+        )
         self.cumulative_performances = self._get_cumulative_performances()
         self.maximum_drawdown = self._get_maximum_drawdown()
         self.annual_return = self._get_annual_return()
