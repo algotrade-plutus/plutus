@@ -1,1 +1,2 @@
 # Plutus: A Framework for Algorithmic Trading
+Plutus is an opensource framework to develop a trading algorithm based on the [9-steps process](https://hub.algotrade.vn/knowledge-hub/steps-to-develop-a-trading-algorithm/) of ALGOTRADE.

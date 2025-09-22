@@ -18,5 +18,5 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/algotradevn/core-abstract"
-Issues = "https://github.com/algotradevn/core-abstract/issues"
+Homepage = "https://github.com/algotradevn/plutus"
+Issues = "https://github.com/algotradevn/plutus/issues"
