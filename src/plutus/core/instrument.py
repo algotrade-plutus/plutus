@@ -15,7 +15,7 @@ The classes in this module are:
 
 from typing import Type, TypeVar
 
-from plutus.core.environment import Exchange
+from plutus.core.constant import VietnamMarketConstant
 
 T = TypeVar("T")
 
@@ -54,7 +54,7 @@ class Instrument:
 
         self.ticker_symbol = ticker_symbol
         self.exchange_code_str = exchange_code_str
-        self.trading_unit = Exchange.TRADING_UNIT.get(exchange_code_str, None)
+        self.trading_unit = VietnamMarketConstant.TRADING_UNIT.get(exchange_code_str, None)
 
     @classmethod
     def from_id(cls: Type[T], instrument_id: str) -> T:
@@ -91,7 +91,7 @@ class Instrument:
     @property
     def currency_unit(self):
         """Return Instrument currency unit based on its exchange code"""
-        return Exchange.CURRENCY_UNIT.get(self.exchange_code_str, None)
+        return VietnamMarketConstant.CURRENCY_UNIT.get(self.exchange_code_str, None)
 
     def __hash__(self):
         """Return the hash of the object."""

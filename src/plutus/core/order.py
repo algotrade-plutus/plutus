@@ -8,7 +8,7 @@ from enum import Enum
 from typing import Optional
 
 from plutus import utils
-from plutus.core.environment import Environment
+from plutus.utils import Environment
 from plutus.core.instrument import Instrument
 
 

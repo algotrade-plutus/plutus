@@ -1,5 +1,6 @@
 import datetime
 import os
+import time
 from decimal import Decimal
 from functools import wraps
 from pathlib import Path
@@ -7,6 +8,7 @@ from typing import Any, Callable, List, TypeVar, Union, Optional
 
 import pytz
 
+from plutus.core.constant import VietnamMarketConstant
 
 def add_mins(tm, mins):
     full_date = datetime.datetime(100, 1, 1, tm.hour, tm.minute, tm.second)
@@ -35,7 +37,7 @@ def get_delivery_date(symbol: str, timestamp: float, special_dates: List[str] = 
     delivery_date = delivery_date.replace(hour=0, minute=0, second=0, microsecond=0)
 
     i = 1
-    normal_addition = 2
+    normal_addition = 1
     while i <= normal_addition:
         delivery_date = delivery_date + datetime.timedelta(days=1)
         if delivery_date.weekday() == 5 or delivery_date.weekday() == 6:
@@ -141,3 +143,18 @@ def get_file_path(root_dir, relative_file_path):
 
 def get_full_path_file(file_descriptor, relative_file_path):
     return os.path.join(Path(file_descriptor).parent, relative_file_path)
+
+
+class Environment:
+    """Defines the constants of the Vietnamese market"""
+    @staticmethod
+    def get_current_time() -> datetime.datetime:
+        return datetime.datetime.now(tz=VietnamMarketConstant.TIMEZONE)
+
+    @staticmethod
+    def sleep_until(until_time: datetime.time):
+        until_date_time = datetime.datetime.combine(
+            Environment.get_current_time().date(), until_time
+        ).astimezone(VietnamMarketConstant.TIMEZONE)
+        while until_date_time > Environment.get_current_time():
+            time.sleep(1)
