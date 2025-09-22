@@ -1,1 +1,1 @@
-# Plutus: A Framework for Algorithm Trading
+# Plutus: A Framework for Algorithmic Trading
