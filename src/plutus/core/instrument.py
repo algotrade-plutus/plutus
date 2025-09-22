@@ -15,7 +15,7 @@ The classes in this module are:
 
 from typing import Type, TypeVar
 
-from core.environment import Exchange
+from plutus.core.environment import Exchange
 
 T = TypeVar("T")
 

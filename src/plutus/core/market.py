@@ -14,9 +14,9 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import List, Union
 
-from core.instrument import Instrument
+from plutus.core.instrument import Instrument
 
-import utils
+from plutus import utils
 
 VN30FUTURE_QUOTE_CODE_MAPPING = {
     0: "instrument",

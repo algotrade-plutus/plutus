@@ -6,8 +6,8 @@ from typing import Callable
 
 import ujson
 
-from core.instrument import Instrument
-from core.market import InternalDataHubQuote
+from plutus.core.instrument import Instrument
+from plutus.core.market import InternalDataHubQuote
 
 
 @dataclass(init=True, repr=True, eq=True)

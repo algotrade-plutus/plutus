@@ -33,9 +33,9 @@ from typing import Callable, Optional, Tuple, Union
 # is a standard lib or third-parties just put on the second block
 
 # Block 3: import from internal code, still use the rule "import" first, "from" second
-from core.instrument import Instrument
-from core.market import CachedQuote, InternalDataHubQuote
-from core.order import OrderSide
+from plutus.core.instrument import Instrument
+from plutus.core.market import CachedQuote, InternalDataHubQuote
+from plutus.core.order import OrderSide
 
 
 # Block 4: something need to be run immediately from all those packages, by the import order

@@ -10,10 +10,10 @@ from typing import Tuple, Callable, Optional, List
 
 import redis
 
-from core.instrument import Instrument
-from core.market import CachedQuote
-from datahub.datahub import DataHub, InternalDataHubQuote
-from datahub.data_handler import RedisDataHandler
+from plutus.core.instrument import Instrument
+from plutus.core.market import CachedQuote
+from plutus.datahub.datahub import DataHub, InternalDataHubQuote
+from plutus.datahub.data_handler import RedisDataHandler
 
 
 class RedisDataHub(DataHub):
