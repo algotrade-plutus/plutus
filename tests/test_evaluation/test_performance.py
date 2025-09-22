@@ -29,6 +29,14 @@ class TestHistoricalPerformance:
         expected_sharpe_ratio, expected_sortino_ratio, expected_cumulative_performances,
         expected_maximum_drawdown, expected_annual_return, expected_longest_drawdown_period
     ):
+        """Tests the class Historical Performance class, including measurement such as:
+            - Sharpe Ratio
+            - Sortino Ratio
+            - Cumulative Performance
+            - Maximum Drawdown
+            - Annual Return
+            - Longest Drawdown Period
+        """
         historical_performance = HistoricalPerformance(
             returns=returns,
             # convert float params to Decimals
@@ -46,9 +54,7 @@ class TestHistoricalPerformance:
 
         assert historical_performance.sharpe_ratio == pytest.approx(expected_sharpe_ratio)
         assert historical_performance.sortino_ratio == pytest.approx(expected_sortino_ratio)
-        assert historical_performance.cumulative_performances == pytest.approx(
-            expected_cumulative_performances, rel=Decimal('1e-4')
-        )
+        assert historical_performance.cumulative_performances == pytest.approx(expected_cumulative_performances)
         assert historical_performance.maximum_drawdown == pytest.approx(expected_maximum_drawdown)
         assert historical_performance.annual_return == pytest.approx(expected_annual_return)
         assert historical_performance.longest_drawdown_period == expected_longest_drawdown_period

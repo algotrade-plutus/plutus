@@ -6,21 +6,22 @@
         "id": "test_historical_performance_case_1",
         "input": {
           "return_data": [
-            0.056, 0.034, 0.042, -0.043, 0.081, -0.012, 0.093, 0.045, -0.036, 0.012, 0.054
+            0.056, 0.034, 0.042, -0.043, 0.081, -0.012, 0.093, 0.045, -0.036, -0.018, 0.012, 0.054
           ],
-          "annualized_factor": 1.5,
+          "annualized_factor": 1,
           "risk_free_return": 0.03,
           "minimal_acceptable_return": 0.07
         },
         "output": {
-          "expected_sharpe_ratio": 0.2640443,
-          "expected_sortino_ratio": -0.4928381,
+          "expected_sharpe_ratio": -0.09676734,
+          "expected_sortino_ratio": -0.72400857,
           "expected_cumulative_performances": [
-            1, 1.0560, 1.0919, 1.1378, 1.0888, 1.1770, 1.1629, 1.2711, 1.3283, 1.2804, 1.2958, 1.3658
+            1, 1.056000000, 1.091904000, 1.137763968, 1.088840117, 1.177036166,
+            1.162911732, 1.271062524, 1.328260337, 1.280442965, 1.257394992, 1.272483731, 1.341197853
           ],
-          "expected_maximum_drawdown": -0.04299999,
-          "expected_annual_return": 0.04342466,
-          "expected_longest_drawdown_period": 1
+          "expected_maximum_drawdown": -0.053351999,
+          "expected_annual_return": 0.024765283,
+          "expected_longest_drawdown_period": 2
         }
       }
     ]
