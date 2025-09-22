@@ -1,0 +1,28 @@
+{
+  "test_historical_performance": {
+    "default_values": {},
+    "cases": [
+      {
+        "id": "test_historical_performance_case_1",
+        "input": {
+          "return_data": [
+            0.056, 0.034, 0.042, -0.043, 0.081, -0.012, 0.093, 0.045, -0.036, 0.012, 0.054
+          ],
+          "annualized_factor": 1.5,
+          "risk_free_return": 0.03,
+          "minimal_acceptable_return": 0.7
+        },
+        "output": {
+          "expected_sharpe_ratio": 0.2640443,
+          "expected_sortino_ratio": -0.4928381,
+          "expected_cumulative_performances": [
+            1, 1.0560, 1.0919, 1.1378, 1.0888, 1.1770, 1.1629, 1.2711, 1.3283, 1.2804, 1.2958, 1.3658
+          ],
+          "expected_maximum_drawdown": -0.04299999,
+          "expected_annual_return": 0.04342466,
+          "expected_longest_drawdown_period": 1
+        }
+      }
+    ]
+  }
+}
