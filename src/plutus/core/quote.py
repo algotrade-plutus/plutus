@@ -12,11 +12,73 @@ This module currently is not in used and incomplete
 
 from dataclasses import dataclass
 from decimal import Decimal
+from enum import Enum
 from typing import List, Union
 
 from plutus.core.instrument import Instrument
 
 from plutus import utils
+
+class QuoteType(Enum):
+    REFERENCE = 'REF'
+    CEILING = 'CEIL'
+    FLOOR = 'FLR'
+    OPEN = 'OPEN'
+    CLOSE = 'CLOSE'
+    BID_PRI_10 = 'BID_PRI_10'
+    BID_QTY_10 = 'BID_QTY_10'
+    BID_PRI_9 = 'BID_PRI_9'
+    BID_QTY_9 = 'BID_QTY_9'
+    BID_PRI_8 = 'BID_PRI_8'
+    BID_QTY_8 = 'BID_QTY_8'
+    BID_PRI_7 = 'BID_PRI_7'
+    BID_QTY_7 = 'BID_QTY_7'
+    BID_PRI_6 = 'BID_PRI_6'
+    BID_QTY_6 = 'BID_QTY_6'
+    BID_PRI_5 = 'BID_PRI_5'
+    BID_QTY_5 = 'BID_QTY_5'
+    BID_PRI_4 = 'BID_PRI_4'
+    BID_QTY_4 = 'BID_QTY_4'
+    BID_PRI_3 = 'BID_PRI_3'
+    BID_QTY_3 = 'BID_QTY_3'
+    BID_PRI_2 = 'BID_PRI_2'
+    BID_QTY_2 = 'BID_QTY_2'
+    BID_PRI_1 = 'BID_PRI_1'
+    BID_QTY_1 = 'BID_QTY_1'
+    LATEST_PRI = 'LATEST_PRI'
+    LATEST_QTY = 'LATEST_QTY'
+    REF_DIFF_ABS = 'REF_DIFF_ABS'
+    REF_DIFF_PCT = 'REF_DIFF_PCT'
+    ASK_PRI_1 = 'ASK_PRI_1'
+    ASK_QTY_1 = 'ASK_QTY_1'
+    ASK_PRI_2 = 'ASK_PRI_2'
+    ASK_QTY_2 = 'ASK_QTY_2'
+    ASK_PRI_3 = 'ASK_PRI_3'
+    ASK_QTY_3 = 'ASK_QTY_3'
+    ASK_PRI_4 = 'ASK_PRI_4'
+    ASK_QTY_4 = 'ASK_QTY_4'
+    ASK_PRI_5 = 'ASK_PRI_5'
+    ASK_QTY_5 = 'ASK_QTY_5'
+    ASK_PRI_6 = 'ASK_PRI_6'
+    ASK_QTY_6 = 'ASK_QTY_6'
+    ASK_PRI_7 = 'ASK_PRI_7'
+    ASK_QTY_7 = 'ASK_QTY_7'
+    ASK_PRI_8 = 'ASK_PRI_8'
+    ASK_QTY_8 = 'ASK_QTY_8'
+    ASK_PRI_9 = 'ASK_PRI_9'
+    ASK_QTY_9 = 'ASK_QTY_9'
+    ASK_PRI_10 = 'ASK_PRI_10'
+    ASK_QTY_10 = 'ASK_QTY_10'
+    TOTAL_MATCHED_QTY = 'TOTAL_MATCHED_QTY'
+    HIGHEST_PRICE = 'HIGHEST_PRICE'
+    LOWEST_PRICE = 'LOWEST_PRICE'
+    AVG_PRICE = 'AVG_PRICE'
+    FOREIGN_BUY_QTY = 'FOREIGN_BUY_QTY'
+    FOREIGN_SELL_QTY = 'FOREIGN_SELL_QTY'
+    FOREIGN_ROOM = 'FOREIGN_ROOM'
+    MATURITY_DATE = 'MATURITY_DATE'
+    LATEST_ESTIMATED_MATCHED_PRICE = 'LATEST_ESTIMATED_MATCHED_PRICE'
+
 
 VN30FUTURE_QUOTE_CODE_MAPPING = {
     0: "instrument",
@@ -364,6 +426,7 @@ class InternalDataHubQuote:
         return cls(**cached_quote_dict)
 
 
+# TODO: rename the class to QuoteElement
 @dataclass(init=True, repr=True, eq=True)
 class CachedQuoteElement:
     """Defines the cached quote element.
@@ -423,6 +486,7 @@ class CachedQuoteElement:
         return cls(**info_dict)
 
 
+# TODO: rename the class to Quote
 @dataclass(init=True, repr=True, eq=True)
 class CachedQuote:
     """Defines the cached quote in Algotrade system.
@@ -434,6 +498,8 @@ class CachedQuote:
     ref_price: CachedQuoteElement = None
     ceiling_price: CachedQuoteElement = None
     floor_price: CachedQuoteElement = None
+    open_price: CachedQuoteElement = None
+    close_price: CachedQuoteElement = None
     bid_price_10: CachedQuoteElement = None
     bid_quantity_10: CachedQuoteElement = None
     bid_price_9: CachedQuoteElement = None
@@ -479,7 +545,6 @@ class CachedQuote:
     ask_price_10: CachedQuoteElement = None
     ask_quantity_10: CachedQuoteElement = None
     total_matched_quantity: CachedQuoteElement = None
-    open_price: CachedQuoteElement = None
     highest_price: CachedQuoteElement = None
     lowest_price: CachedQuoteElement = None
     average_price: CachedQuoteElement = None
@@ -487,7 +552,6 @@ class CachedQuote:
     foreign_buy_quantity: CachedQuoteElement = None
     foreign_sell_quantity: CachedQuoteElement = None
     foreign_room: CachedQuoteElement = None
-    close_price: CachedQuoteElement = None
     maturity_date: CachedQuoteElement = None
     hidden_system_status: str = None
     datetime_str: str = None

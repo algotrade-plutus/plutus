@@ -34,7 +34,7 @@ from typing import Callable, Optional, Tuple, Union
 
 # Block 3: import from internal code, still use the rule "import" first, "from" second
 from plutus.core.instrument import Instrument
-from plutus.core.market import CachedQuote, InternalDataHubQuote
+from plutus.core.quote import CachedQuote, InternalDataHubQuote
 from plutus.core.order import OrderSide
 
 

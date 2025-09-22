@@ -5,11 +5,26 @@ from typing import List
 
 
 class HistoricalPerformance:
-    """Historical Performance calculator"""
+    """Historical Performance calculator
+
+    Attributes:
+        returns (List of Decimal): List of return in Decimal
+        annualized_factor (Decimal): The annualized factor
+        risk_free_return (Decimal): The risk-free return
+        minimal_acceptable_return (Decimal): The minimal acceptable return
+        return_mean (Decimal): The mean of the returns
+        return_std (Decimal): The standard deviation of the returns
+        sharpe_ratio (Decimal): The Sharpe Ratio
+        sortino_ratio (Decimal): The Sortino Ratio
+        cumulative_performances (Decimal): The cumulative performances
+        maximum_drawdown (Decimal): The maximum drawdown
+        annual_return (Decimal): The annual return
+        longest_drawdown_period: The longest period of drawdowns
+    """
     def __init__(
         self,
         returns: List[Decimal],
-        annualized_factor: Decimal,
+        annualized_factor: Decimal = Decimal('1.0'),
         risk_free_return: Decimal = Decimal('0.03'),
         minimal_acceptable_return: Decimal = Decimal('0.07')
     ):
@@ -18,7 +33,7 @@ class HistoricalPerformance:
 
         Args:
             returns (List of Decimal): List of returns
-            annualized_factor (Decimal): The number of periods in a year
+            annualized_factor (Decimal): The annualized factor
             risk_free_return (Decimal): The risk-free return
             minimal_acceptable_return (Decimal): The minimal acceptable return
         """

@@ -11,7 +11,7 @@ from typing import Tuple, Callable, Optional, List
 import redis
 
 from plutus.core.instrument import Instrument
-from plutus.core.market import CachedQuote
+from plutus.core.quote import CachedQuote
 from plutus.datahub.datahub import DataHub, InternalDataHubQuote
 from plutus.datahub.data_handler import RedisDataHandler
 

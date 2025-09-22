@@ -7,7 +7,7 @@ from typing import Callable
 import ujson
 
 from plutus.core.instrument import Instrument
-from plutus.core.market import InternalDataHubQuote
+from plutus.core.quote import InternalDataHubQuote
 
 
 @dataclass(init=True, repr=True, eq=True)
