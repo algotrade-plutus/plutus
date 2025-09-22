@@ -8,7 +8,7 @@ from typing import List
 
 from utils import pytest_generate_tests
 
-from src.plutus.evaluation.performance import Performance, HistoricalPerformance
+from src.plutus.evaluation.performance import HistoricalPerformance
 
 
 FIXTURE_FILE = os.path.join(Path(__file__).parent.parent, 'test_evaluation/fixtures/performance_test_data.json')
