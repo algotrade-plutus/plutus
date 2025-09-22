@@ -1,0 +1,22 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "plutus"
+version = "0.0.1"
+authors = [
+  { name="Dan", email="dan@algotrade.vn" },
+]
+description = "Algotrade Core: Abstract"
+readme = "README.md"
+requires-python = ">=3.12"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+
+[project.urls]
+Homepage = "https://github.com/algotradevn/core-abstract"
+Issues = "https://github.com/algotradevn/core-abstract/issues"
