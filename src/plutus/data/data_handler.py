@@ -7,7 +7,7 @@ from typing import Callable
 import ujson
 
 from plutus.core.instrument import Instrument
-from plutus.core.quote import InternalDataHubQuote
+from plutus.data.model.quote import InternalDataHubQuote
 
 
 @dataclass(init=True, repr=True, eq=True)
@@ -70,7 +70,7 @@ class RedisDataHandler(DataHandler):
 
         # Get the pricehub quote
         price_hub_quote_dict = ujson.loads(redis_sub_msg['data'])
-        price_hub_quote = InternalDataHubQuote.from_basic_dict(price_hub_quote_dict)
+        price_hub_quote = InternalDataHubQuote.from_dict(price_hub_quote_dict)
 
         # Pass into the data handler function
         if self.run_in_thread:

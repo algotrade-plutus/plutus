@@ -2,7 +2,7 @@
 
 from algorithm import Algorithm
 from portfolio import Portfolio
-from plutus.datahub.datahub import DataHub
+from plutus.data.datahub import DataHub
 
 
 class Bot:

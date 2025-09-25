@@ -1,0 +1,201 @@
+MEMORY BENCHMARK (medium density, 5,000 instances)
+======================================================================
+Implementation     | Avg Size (bytes) | Total (MB) | Creation (inst/s)
+--------------------------------------------------------------------------------
+SimpleNamedTuple   |           952 |     4.54 |       247,145
+Quote-Direct       |         3,276 |    15.62 |       134,981
+Quote+Validation   |         3,263 |    15.56 |        69,377
+Dynamic Dict       |         5,160 |    24.61 |       160,161
+All Slots          |         3,251 |    15.50 |       128,442
+Dataclass Full     |         7,533 |    35.92 |       222,739
+Normal Class Full  |         7,550 |    36.00 |       174,514
+NamedTuple Full    |         3,265 |    15.57 |       103,264
+
+
+CREATION SPEED BENCHMARK (medium density)
+======================================================================
+Implementation     | Time (μs)  | Speed (ops/s)   | Std Dev   
+-----------------------------------------------------------------
+SimpleNamedTuple   |     1.42 |       704,655 |     0.03
+Quote-Direct       |     3.87 |       258,716 |     0.02
+Quote+Validation   |     5.32 |       187,871 |     0.05
+Dynamic Dict       |     2.02 |       495,755 |     0.04
+All Slots          |     3.89 |       256,920 |     0.09
+Dataclass Full     |     1.94 |       515,153 |     0.04
+Normal Class Full  |     2.22 |       450,266 |     0.08
+NamedTuple Full    |     6.49 |       154,004 |     0.12
+
+
+ATTRIBUTE ACCESS BENCHMARK (medium density)
+======================================================================
+
+Core (instrument) Access:
+Implementation     | Time (μs)  | Speed (ops/s)  
+-------------------------------------------------------
+SimpleNamedTuple   |     0.03 |    31,715,406
+Quote-Direct       |     0.03 |    29,819,070
+Quote+Validation   |     0.03 |    31,181,626
+Dynamic Dict       |     0.04 |    26,654,404
+All Slots          |     0.03 |    30,905,535
+Dataclass Full     |     0.04 |    27,840,936
+Normal Class Full  |     0.04 |    27,644,100
+NamedTuple Full    |     0.03 |    31,731,592
+
+Core (timestamp) Access:
+Implementation     | Time (μs)  | Speed (ops/s)  
+-------------------------------------------------------
+SimpleNamedTuple   |     0.03 |    31,229,426
+Quote-Direct       |     0.03 |    31,198,410
+Quote+Validation   |     0.03 |    31,062,009
+Dynamic Dict       |     0.04 |    26,923,273
+All Slots          |     0.03 |    31,326,109
+Dataclass Full     |     0.04 |    27,886,871
+Normal Class Full  |     0.04 |    28,564,694
+NamedTuple Full    |     0.03 |    32,618,978
+
+Core (source) Access:
+Implementation     | Time (μs)  | Speed (ops/s)  
+-------------------------------------------------------
+SimpleNamedTuple   |     0.03 |    30,677,824
+Quote-Direct       |     0.03 |    31,777,981
+Quote+Validation   |     0.03 |    32,217,618
+Dynamic Dict       |     0.04 |    26,843,898
+All Slots          |     0.03 |    31,232,352
+Dataclass Full     |     0.03 |    28,584,092
+Normal Class Full  |     0.04 |    27,906,973
+NamedTuple Full    |     0.03 |    32,135,312
+
+Decimal (ref_price) Access:
+Implementation     | Time (μs)  | Speed (ops/s)  
+-------------------------------------------------------
+SimpleNamedTuple   |     0.03 |    32,677,603
+Quote-Direct       |     0.03 |    33,006,024
+Quote+Validation   |     0.03 |    32,955,898
+Dynamic Dict       |     4.92 |       203,387
+All Slots          |     0.03 |    30,330,909
+Dataclass Full     |     0.04 |    27,652,510
+Normal Class Full  |     0.04 |    26,665,245
+NamedTuple Full    |     0.03 |    31,048,353
+
+Decimal (latest_price) Access:
+Implementation     | Time (μs)  | Speed (ops/s)  
+-------------------------------------------------------
+SimpleNamedTuple   |     0.03 |    29,391,305
+Quote-Direct       |     0.03 |    30,547,331
+Quote+Validation   |     0.03 |    30,624,429
+Dynamic Dict       |     4.77 |       209,812
+All Slots          |     0.03 |    30,242,929
+Dataclass Full     |     0.04 |    25,453,659
+Normal Class Full  |     0.04 |    24,843,949
+NamedTuple Full    |     0.03 |    31,487,796
+
+Integer (latest_qty) Access:
+Implementation     | Time (μs)  | Speed (ops/s)  
+-------------------------------------------------------
+SimpleNamedTuple   |     0.03 |    32,519,623
+Quote-Direct       |     0.03 |    32,609,137
+Quote+Validation   |     0.03 |    30,667,321
+Dynamic Dict       |     4.82 |       207,280
+All Slots          |     0.03 |    29,792,199
+Dataclass Full     |     0.04 |    26,454,793
+Normal Class Full  |     0.04 |    27,696,354
+NamedTuple Full    |     0.03 |    30,436,769
+
+Decimal (ceiling_price) Access:
+Implementation     | Time (μs)  | Speed (ops/s)  
+-------------------------------------------------------
+SimpleNamedTuple   |     0.03 |    30,462,885
+Quote-Direct       |     0.04 |    28,492,194
+Quote+Validation   |     0.03 |    31,521,463
+Dynamic Dict       |     4.87 |       205,388
+All Slots          |     0.03 |    30,462,577
+Dataclass Full     |     0.04 |    26,669,271
+Normal Class Full  |     0.04 |    26,937,660
+NamedTuple Full    |     0.03 |    30,830,811
+
+Decimal (bid_price_1) Access:
+Implementation     | Time (μs)  | Speed (ops/s)  
+-------------------------------------------------------
+SimpleNamedTuple   |     0.03 |    30,871,978
+Quote-Direct       |     0.03 |    30,770,969
+Quote+Validation   |     0.03 |    30,045,748
+Dynamic Dict       |     4.78 |       209,190
+All Slots          |     0.03 |    30,591,411
+Dataclass Full     |     0.04 |    27,800,944
+Normal Class Full  |     0.04 |    27,132,074
+NamedTuple Full    |     0.03 |    32,337,080
+
+Integer (bid_qty_1) Access:
+Implementation     | Time (μs)  | Speed (ops/s)  
+-------------------------------------------------------
+SimpleNamedTuple   |     0.03 |    32,172,794
+Quote-Direct       |     0.03 |    30,991,095
+Quote+Validation   |     0.03 |    31,225,687
+Dynamic Dict       |     4.74 |       210,927
+All Slots          |     0.03 |    30,552,080
+Dataclass Full     |     0.04 |    27,776,554
+Normal Class Full  |     0.04 |    26,991,403
+NamedTuple Full    |     0.03 |    30,924,648
+
+
+ATTRIBUTE MODIFICATION BENCHMARK
+======================================================================
+
+Decimal Update (ref_price):
+Implementation     | Time (μs)  | Speed (ops/s)  
+-------------------------------------------------------
+SimpleNamedTuple   | N/A (immutable)
+Quote-Direct       | N/A (immutable)
+Quote+Validation   | N/A (immutable)
+Dynamic Dict       |     0.16 |     6,262,803
+All Slots          |     0.04 |    27,430,778
+Dataclass Full     |     0.04 |    24,052,182
+Normal Class Full  |     0.04 |    23,371,088
+NamedTuple Full    | N/A (immutable)
+
+Integer Update (latest_qty):
+Implementation     | Time (μs)  | Speed (ops/s)  
+-------------------------------------------------------
+SimpleNamedTuple   | N/A (immutable)
+Quote-Direct       | N/A (immutable)
+Quote+Validation   | N/A (immutable)
+Dynamic Dict       |     0.18 |     5,588,986
+All Slots          |     0.04 |    27,609,063
+Dataclass Full     |     0.04 |    23,467,287
+Normal Class Full  |     0.04 |    23,860,420
+NamedTuple Full    | N/A (immutable)
+
+String Update (maturity_date):
+Implementation     | Time (μs)  | Speed (ops/s)  
+-------------------------------------------------------
+SimpleNamedTuple   | N/A (immutable)
+Quote-Direct       | N/A (immutable)
+Quote+Validation   | N/A (immutable)
+Dynamic Dict       |     0.20 |     4,887,536
+All Slots          |     0.04 |    26,092,915
+Dataclass Full     |     0.05 |    20,198,964
+Normal Class Full  |     0.05 |    19,571,858
+NamedTuple Full    | N/A (immutable)
+
+
+SERIALIZATION BENCHMARK
+======================================================================
+Implementation     | Time (μs)  | Speed (ops/s)  
+-------------------------------------------------------
+SimpleNamedTuple   |     0.35 |     2,873,646
+Quote-Direct       |     2.68 |       373,057
+Quote+Validation   |     2.69 |       372,187
+Dynamic Dict       |     1.69 |       590,814
+All Slots          |     4.06 |       246,060
+Dataclass Full     |     0.05 |    21,869,482
+Normal Class Full  |     0.05 |    21,778,189
+NamedTuple Full    |     1.40 |       714,209
+
+
+VALIDATION OVERHEAD ANALYSIS
+======================================================================
+Case     | Simple NT (μs) | Quote Direct (μs) | Quote+Valid (μs) | Validation OH
+-------------------------------------------------------------------------------------
+Sparse   |       1.05 |           3.79 |           4.21 |       10.8%
+Medium   |       1.24 |           3.91 |           4.71 |       20.5%
+Dense    |       1.78 |           3.95 |           6.59 |       67.0%

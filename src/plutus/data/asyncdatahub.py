@@ -3,8 +3,8 @@ import aiofiles
 from abc import ABC, abstractmethod
 from typing import List, Optional
 
-from src.plutus.core.quote import CachedQuote
-from src.plutus.datahub.filter import DataFilter
+from plutus.data.model.quote import CachedQuote
+from src.plutus.data.filter import DataFilter
 
 class AsyncDataHubAbstract(ABC):
 

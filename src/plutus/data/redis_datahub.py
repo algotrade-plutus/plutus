@@ -11,9 +11,9 @@ from typing import Tuple, Callable, Optional, List
 import redis
 
 from plutus.core.instrument import Instrument
-from plutus.core.quote import CachedQuote
-from plutus.datahub.datahub import DataHub, InternalDataHubQuote
-from plutus.datahub.data_handler import RedisDataHandler
+from plutus.data.model.quote import CachedQuote
+from plutus.data.datahub import DataHub, InternalDataHubQuote
+from plutus.data.data_handler import RedisDataHandler
 
 
 class RedisDataHub(DataHub):
@@ -95,7 +95,7 @@ class RedisDataHub(DataHub):
                 logging.warning('InvalidCachedQuoteDataStructure: %s', data)
                 return None
 
-            return CachedQuote.from_basic_dict(data)
+            return CachedQuote.from_dict(data)
 
         except ujson.JSONDecodeError:
             logging.error('JSONDecodeError: %s', message)
