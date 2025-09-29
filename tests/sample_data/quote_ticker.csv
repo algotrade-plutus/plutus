@@ -1,0 +1,10 @@
+tickersymbol,exchangeid,lastupdated,instrumenttype,startdate,expdate
+VIC,HSX,2023-06-15,stock,,
+HPG,HSX,2023-06-15,stock,,
+VJC,HSX,2023-06-15,stock,,
+ACB,HSX,2023-06-15,stock,,
+CTG,HSX,2023-06-15,stock,,
+VCB,HSX,2023-06-15,stock,,
+VN30F2306,HSX,2023-06-15,futures,2023-06-15,2023-06-30
+VN30F2309,HSX,2023-06-15,futures,2023-06-15,2023-09-30
+VN30F2312,HSX,2023-06-15,futures,2023-06-15,2023-12-30
