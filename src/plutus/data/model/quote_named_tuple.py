@@ -17,16 +17,18 @@ Ideal Use Cases:
     - Read-only data pipelines and transformations
 
 Usage:
-    >>> from plutus.core.instrument import Instrument
     >>> from decimal import Decimal
     >>>
     >>> quote = create_quote_nt(
-    ...     instrument=Instrument.from_id("NASDAQ:AAPL"),
+    ...     ticker_symbol="AAPL",
     ...     timestamp=1640995200.0,
     ...     source="NASDAQ",
+    ...     exchange_code="NASDAQ",
     ...     ref_price=Decimal("150.50"),
     ...     bid_price_1=Decimal("150.25")
     ... )
+    >>> quote.ticker_symbol
+    'AAPL'
     >>> quote.ref_price  # Direct attribute access
     Decimal('150.50')
     >>> quote[QuoteType.REFERENCE]  # Enum-based access
@@ -36,7 +38,6 @@ Usage:
 from typing import NamedTuple, Dict, Any, List, Optional
 from decimal import Decimal, InvalidOperation
 
-from plutus.core.instrument import Instrument
 from plutus.data.model.enums import QuoteType, QUOTE_DECIMAL_ATTRIBUTES
 
 
@@ -77,7 +78,7 @@ def _validate_and_convert_value(field_name: str, value: Any) -> Any:
             raise TypeError(f"Field {field_name} expects Decimal, str, int, or float, got {type(value)}")
 
     # Check if this should be an int field (quantities)
-    elif 'qty' in field_name or field_name in ['total_matched_qty', 'foreign_buy_qty', 'foreign_sell_qty', 'foreign_room']:
+    elif 'qty' in field_name or field_name in ['total_matched_qty', 'foreign_buy_qty', 'foreign_sell_qty', 'foreign_room', 'open_interest']:
         if isinstance(value, int):
             return value
         elif isinstance(value, (str, float)):
@@ -105,16 +106,17 @@ class _QuoteBase(NamedTuple):
     memory usage for sparse market data.
 
     Field Categories:
-        - Core fields: instrument, timestamp, source (required)
+        - Core fields: ticker_symbol, timestamp, source, exchange_code
         - Price fields: Various price levels with Decimal precision
         - Quantity fields: Integer quantities for different price levels
         - Derived fields: Calculated values like differences and averages
         - Special fields: Foreign trading data and maturity information
     """
     # Core required fields
-    instrument: Instrument
+    ticker_symbol: str
     timestamp: float
     source: str
+    exchange_code: Optional[str] = None
 
     # All market data fields from QuoteType enum
     ref_price: Optional[Decimal] = None
@@ -175,6 +177,8 @@ class _QuoteBase(NamedTuple):
     foreign_room: Optional[int] = None
     maturity_date: Optional[str] = None
     latest_est_matched_price: Optional[Decimal] = None
+    settlement_price: Optional[Decimal] = None
+    open_interest: Optional[int] = None
 
 
 class QuoteNamedTuple(_QuoteBase):
@@ -217,7 +221,7 @@ class QuoteNamedTuple(_QuoteBase):
     def available_quote_types(self) -> List[str]:
         """Return list of quote types that have non-None values."""
         available = []
-        for field_name in self._fields[3:]:  # Skip the 3 required fields
+        for field_name in self._fields[4:]:  # Skip the 4 required fields (ticker_symbol, timestamp, source, exchange_code)
             if getattr(self, field_name) is not None:
                 available.append(field_name)
         return available
@@ -226,13 +230,17 @@ class QuoteNamedTuple(_QuoteBase):
         """Convert to dictionary format compatible with original Quote API."""
         # Start with core fields
         result = {
-            'instrument': self.instrument.id,
+            'ticker_symbol': self.ticker_symbol,
             'timestamp': self.timestamp,
             'source': self.source
         }
 
+        # Add exchange_code if present
+        if self.exchange_code is not None:
+            result['exchange_code'] = self.exchange_code
+
         # Add non-None market data fields
-        for field_name in self._fields[3:]:  # Skip the 3 required fields
+        for field_name in self._fields[4:]:  # Skip the 4 required fields
             value = getattr(self, field_name)
             if value is not None:
                 if isinstance(value, Decimal):
@@ -245,24 +253,18 @@ class QuoteNamedTuple(_QuoteBase):
     @classmethod
     def from_dict(cls, info_dict: Dict[str, Any]) -> 'QuoteNamedTuple':
         """Create QuoteNT instance from dictionary without mutating input."""
-        # Make a copy to avoid side effects (fixing the bug in original implementation)
-        data_copy = info_dict.copy()
-
-        # Convert instrument ID to Instrument object
-        if isinstance(data_copy.get('instrument'), str):
-            data_copy['instrument'] = Instrument.from_id(data_copy['instrument'])
-
         # Use the factory function to get proper validation
-        return create_quote_nt(**data_copy)
+        return create_quote_nt(**info_dict)
 
     def __repr__(self) -> str:
         """String representation showing non-None fields count."""
         non_none_fields = len(self.available_quote_types())
-        return f"QuoteNT(instrument={self.instrument}, timestamp={self.timestamp}, source='{self.source}', market_data_fields={non_none_fields})"
+        exchange_str = f", exchange_code='{self.exchange_code}'" if self.exchange_code else ""
+        return f"QuoteNT(ticker_symbol='{self.ticker_symbol}'{exchange_str}, timestamp={self.timestamp}, source='{self.source}', market_data_fields={non_none_fields})"
 
 
 # Factory function for convenient creation
-def create_quote_nt(instrument: Instrument, timestamp: float, source: str, **market_data) -> QuoteNamedTuple:
+def create_quote_nt(ticker_symbol: str, timestamp: float, source: str, exchange_code: Optional[str] = None, **market_data) -> QuoteNamedTuple:
     """Factory function to create QuoteNamedTuple with validation and type conversion.
 
     This function provides convenient creation of QuoteNamedTuple instances with automatic
@@ -270,9 +272,10 @@ def create_quote_nt(instrument: Instrument, timestamp: float, source: str, **mar
     preparing all optional fields and ensures data integrity before instantiation.
 
     Args:
-        instrument: Trading instrument (must be Instrument instance)
+        ticker_symbol: Ticker symbol (e.g., 'AAPL', 'VIC')
         timestamp: Unix timestamp as float (will be converted if int)
         source: Data source identifier (must be string)
+        exchange_code: Optional exchange code (e.g., 'HSX', 'NASDAQ'), None if not provided
         **market_data: Optional market data fields with automatic type conversion
 
     Returns:
@@ -280,14 +283,15 @@ def create_quote_nt(instrument: Instrument, timestamp: float, source: str, **mar
 
     Raises:
         TypeError: If required parameters are wrong type
-        ValueError: If market data values cannot be converted to expected types
+        ValueError: If ticker_symbol is empty or market data values cannot be converted
 
     Examples:
         Basic quote with price data:
         >>> quote = create_quote_nt(
-        ...     instrument=Instrument.from_id("NASDAQ:AAPL"),
+        ...     ticker_symbol="AAPL",
         ...     timestamp=time.time(),
         ...     source="NASDAQ",
+        ...     exchange_code="NASDAQ",
         ...     ref_price="150.50",  # Auto-converted to Decimal
         ...     bid_price_1="150.25",
         ...     bid_qty_1=1000  # Auto-validated as int
@@ -295,9 +299,10 @@ def create_quote_nt(instrument: Instrument, timestamp: float, source: str, **mar
 
         Full order book quote:
         >>> quote = create_quote_nt(
-        ...     instrument=instrument,
+        ...     ticker_symbol="VIC",
         ...     timestamp=timestamp,
-        ...     source="NYSE",
+        ...     source="CSV",
+        ...     exchange_code="HSX",
         ...     **{
         ...         "ref_price": "100.00",
         ...         "bid_price_1": "99.95", "bid_qty_1": 500,
@@ -305,19 +310,32 @@ def create_quote_nt(instrument: Instrument, timestamp: float, source: str, **mar
         ...     }
         ... )
     """
-    # Validate required fields
-    if not isinstance(instrument, Instrument):
-        raise TypeError(f"instrument must be an Instrument, got {type(instrument)}")
+    # Validate ticker_symbol
+    if not isinstance(ticker_symbol, str):
+        raise TypeError(f"ticker_symbol must be a string, got {type(ticker_symbol)}")
+    if not ticker_symbol or not ticker_symbol.strip():
+        raise ValueError("ticker_symbol cannot be empty")
+
+    # Validate timestamp
     if not isinstance(timestamp, (int, float)):
         raise TypeError(f"timestamp must be a number, got {type(timestamp)}")
+
+    # Validate source
     if not isinstance(source, str):
         raise TypeError(f"source must be a string, got {type(source)}")
 
+    # Validate exchange_code (no inference, store as-is)
+    if exchange_code is not None and not isinstance(exchange_code, str):
+        raise TypeError(f"exchange_code must be a string or None, got {type(exchange_code)}")
+    if exchange_code is not None:
+        exchange_code = exchange_code.strip() or None
+
     # Prepare field values with validation
     validated_data = {
-        'instrument': instrument,
+        'ticker_symbol': ticker_symbol.strip(),
         'timestamp': float(timestamp),
-        'source': source
+        'source': source,
+        'exchange_code': exchange_code
     }
 
     # Process market data fields with type validation
@@ -328,7 +346,7 @@ def create_quote_nt(instrument: Instrument, timestamp: float, source: str, **mar
             validated_data[field_name] = None
 
     # Fill in None for any missing optional fields
-    for field_name in QuoteNamedTuple._fields[3:]:  # Skip the 3 required fields
+    for field_name in QuoteNamedTuple._fields[4:]:  # Skip the 4 required fields (ticker_symbol, timestamp, source, exchange_code)
         if field_name not in validated_data:
             validated_data[field_name] = None
 

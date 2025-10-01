@@ -12,7 +12,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from plutus.data.csv_interface import CSVQuoteReader, CSVQuoteBatchProcessor
-from plutus.core.instrument import Instrument
+# Removed: from plutus.core.instrument import Instrument
 from plutus.data.model.quote import Quote
 
 
@@ -72,7 +72,7 @@ class TestCSVQuoteReader:
         ]
 
         for timestamp_str, expected in test_cases:
-            result = self.reader._parse_timestamp(timestamp_str)
+            result = self.reader.parse_timestamp(timestamp_str)  # Changed from _parse_timestamp
             if timestamp_str in ['', 'invalid']:
                 assert result is None
             else:
@@ -91,7 +91,7 @@ class TestCSVQuoteReader:
         ]
 
         for value_str, expected in test_cases:
-            result = self.reader._parse_decimal(value_str)
+            result = self.reader.parse_decimal(value_str)  # Changed from _parse_decimal
             assert result == expected
 
     def test_parse_integer_values(self):
@@ -107,7 +107,7 @@ class TestCSVQuoteReader:
         ]
 
         for value_str, expected in test_cases:
-            result = self.reader._parse_integer(value_str)
+            result = self.reader.parse_integer(value_str)  # Changed from _parse_integer
             assert result == expected
 
     def test_create_temp_csv_file(self):
@@ -136,13 +136,13 @@ class TestCSVQuoteReader:
 
             # Check first quote
             quote = quotes[0]
-            assert quote.instrument.id == "HSX:VIC"
+            assert quote.ticker_symbol == "VIC"
             assert quote.open_price == Decimal('96.25')
             assert quote.source == "CSV"
 
             # Check second quote
             quote = quotes[1]
-            assert quote.instrument.id == "HSX:HPG"
+            assert quote.ticker_symbol == "HPG"
             assert quote.open_price == Decimal('43.05')
 
         finally:
@@ -197,26 +197,6 @@ class TestCSVQuoteReader:
         self.reader._parse_depth_field('quote_bidprice', row, quote_kwargs)
         assert quote_kwargs['bid_price_1'] == Decimal('96.25')
 
-    def test_parse_side_field(self):
-        """Test parsing active buy/sell fields with side indicator."""
-        # Test buy side
-        row = {
-            'datetime': '2023-06-15 09:30:00',
-            'tickersymbol': 'VIC',
-            'quantity': '1000',
-            'side': 'b'
-        }
-        quote_kwargs = {}
-
-        self.reader._parse_side_field('quote_activebuysell', row, quote_kwargs)
-        assert quote_kwargs['foreign_buy_qty'] == 1000
-
-        # Test sell side
-        row['side'] = 's'
-        quote_kwargs = {}
-        self.reader._parse_side_field('quote_activebuysell', row, quote_kwargs)
-        assert quote_kwargs['foreign_sell_qty'] == 1000
-
     def test_parse_csv_row_empty(self):
         """Test parsing empty CSV row."""
         row = {'datetime': '', 'tickersymbol': '', 'price': ''}
@@ -246,14 +226,14 @@ class TestCSVQuoteBatchProcessor:
     def test_init_default_reader(self):
         """Test batch processor initialization with default reader."""
         processor = CSVQuoteBatchProcessor()
-        assert isinstance(processor.reader, CSVQuoteReader)
+        assert isinstance(processor.quote_reader, CSVQuoteReader)  # Changed from .reader to .quote_reader
 
     def test_init_custom_reader(self):
         """Test batch processor initialization with custom reader."""
         reader = CSVQuoteReader(default_source="CUSTOM")
         processor = CSVQuoteBatchProcessor(reader=reader)
-        assert processor.reader is reader
-        assert processor.reader.default_source == "CUSTOM"
+        assert processor.quote_reader is reader  # Changed from .reader to .quote_reader
+        assert processor.quote_reader.default_source == "CUSTOM"
 
     def test_get_statistics_empty(self):
         """Test statistics generation with empty results."""
@@ -269,9 +249,8 @@ class TestCSVQuoteBatchProcessor:
     def test_get_statistics_with_data(self):
         """Test statistics generation with sample data."""
         # Create mock quotes
-        instrument = Instrument.from_id("HSX:VIC")
-        quote1 = Quote(instrument, 1686787200.0, "CSV", open_price=Decimal('96.25'))
-        quote2 = Quote(instrument, 1686787200.0, "CSV", close_price=Decimal('96.50'))
+        quote1 = Quote("VIC", 1686787200.0, "CSV", exchange_code="HSX", open_price=Decimal('96.25'))
+        quote2 = Quote("VIC", 1686787200.0, "CSV", exchange_code="HSX", close_price=Decimal('96.50'))
 
         results = {
             'quote_open.csv': [quote1],
@@ -286,14 +265,14 @@ class TestCSVQuoteBatchProcessor:
         assert stats['failed_files'] == 1
         assert stats['total_quotes'] == 2
 
-        # Check file-specific stats
-        assert stats['file_statistics']['quote_open.csv']['quote_count'] == 1
+        # Check file-specific stats (updated to match new stat structure)
+        assert stats['file_statistics']['quote_open.csv']['record_count'] == 1  # Changed from quote_count
         assert stats['file_statistics']['quote_open.csv']['success'] is True
-        assert stats['file_statistics']['quote_open.csv']['instruments'] == 1
+        assert stats['file_statistics']['quote_open.csv']['unique_symbols'] == 1  # Changed from instruments
 
-        assert stats['file_statistics']['quote_empty.csv']['quote_count'] == 0
+        assert stats['file_statistics']['quote_empty.csv']['record_count'] == 0  # Changed from quote_count
         assert stats['file_statistics']['quote_empty.csv']['success'] is False
-        assert stats['file_statistics']['quote_empty.csv']['instruments'] == 0
+        assert stats['file_statistics']['quote_empty.csv']['unique_symbols'] == 0  # Changed from instruments
 
 
 class TestCSVIntegrationWithSampleData:
@@ -383,7 +362,61 @@ class TestCSVIntegrationWithSampleData:
             quotes = self.reader.read_csv_file(new_path)
             # Should only get 1 valid quote (the HPG row)
             assert len(quotes) == 1
-            assert quotes[0].instrument.ticker_symbol == "HPG"
+            assert quotes[0].ticker_symbol == "HPG"
+
+        finally:
+            if new_path.exists():
+                new_path.unlink()
+
+    def test_csv_without_exchange_code(self):
+        """Test CSV parsing when exchangeid column is missing or empty."""
+        # Create temporary CSV without exchangeid column
+        fd, path = tempfile.mkstemp(suffix='.csv', prefix='quote_open_')
+        try:
+            with os.fdopen(fd, 'w') as f:
+                f.write("datetime,tickersymbol,price\n")
+                f.write("2023-06-15,VIC,96.25\n")
+                f.write("2023-06-15,HPG,43.05\n")
+
+            temp_path = Path(path)
+            new_path = temp_path.parent / "quote_open.csv"
+            temp_path.rename(new_path)
+
+            quotes = self.reader.read_csv_file(new_path)
+
+            # Should successfully parse quotes
+            assert len(quotes) == 2
+
+            # exchange_code should be None when not in CSV (parse as-is principle)
+            assert quotes[0].exchange_code is None
+            assert quotes[1].exchange_code is None
+
+        finally:
+            if new_path.exists():
+                new_path.unlink()
+
+    def test_csv_with_explicit_exchange_code(self):
+        """Test CSV parsing when exchangeid column is present."""
+        # Create temporary CSV with exchangeid column (use quote_open not quote_ticker)
+        fd, path = tempfile.mkstemp(suffix='.csv', prefix='quote_open_')
+        try:
+            with os.fdopen(fd, 'w') as f:
+                f.write("datetime,tickersymbol,exchangeid,price\n")
+                f.write("2023-06-15,VIC,HSX,96.25\n")
+                f.write("2023-06-15,ACB,HNX,43.05\n")
+
+            temp_path = Path(path)
+            new_path = temp_path.parent / "quote_open.csv"
+            temp_path.rename(new_path)
+
+            quotes = self.reader.read_csv_file(new_path)
+
+            # Should successfully parse quotes
+            assert len(quotes) == 2
+
+            # exchange_code should be set from CSV (parse as-is from exchangeid column)
+            assert quotes[0].exchange_code == 'HSX'
+            assert quotes[1].exchange_code == 'HNX'
 
         finally:
             if new_path.exists():

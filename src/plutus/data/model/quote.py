@@ -10,19 +10,21 @@ Key Features:
     - Dictionary-style access via QuoteType enums
     - Serialization support with to_dict/from_dict methods
     - Memory efficient storage (no dynamic attribute dictionary)
+    - Primitive types (ticker_symbol as string) for simplicity
 
 Usage:
-    >>> from plutus.core.instrument import Instrument
     >>> from decimal import Decimal
     >>>
-    >>> instrument = Instrument.from_id("NASDAQ:AAPL")
     >>> quote = Quote(
-    ...     instrument=instrument,
+    ...     ticker_symbol="AAPL",
     ...     timestamp=1640995200.0,
     ...     source="NASDAQ",
+    ...     exchange_code="NASDAQ",
     ...     ref_price=Decimal("150.50"),
     ...     bid_price_1=Decimal("150.25")
     ... )
+    >>> quote.ticker_symbol
+    'AAPL'
     >>> quote.ref_price
     Decimal('150.50')
     >>> quote[QuoteType.REFERENCE]
@@ -30,9 +32,8 @@ Usage:
 """
 
 from decimal import Decimal, InvalidOperation
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
-from plutus.core.instrument import Instrument
 from plutus.data.model.enums import QuoteType, QUOTE_DECIMAL_ATTRIBUTES
 
 
@@ -44,9 +45,10 @@ class Quote:
     All market data fields are initialized to None and only populated when data is available.
 
     Attributes:
-        instrument (Instrument): The trading instrument this quote represents
+        ticker_symbol (str): Ticker symbol (e.g., "AAPL", "VIC")
         timestamp (float): Unix timestamp when the quote was generated
-        source (str): Data source identifier (e.g., "NASDAQ", "NYSE")
+        source (str): Data source identifier (e.g., "NASDAQ", "CSV")
+        exchange_code (Optional[str]): Exchange code (e.g., "HSX", "NASDAQ"), None if not provided
 
     Market Data Fields:
         All fields from the QuoteType enum are available as attributes, including:
@@ -56,8 +58,9 @@ class Quote:
         - Special fields: foreign_buy_qty, foreign_sell_qty, maturity_date
 
     Examples:
-        >>> instrument = Instrument.from_id("NASDAQ:AAPL")
-        >>> quote = Quote(instrument, 1640995200.0, "NASDAQ", ref_price="150.50")
+        >>> quote = Quote(ticker_symbol="AAPL", timestamp=1640995200.0, source="NASDAQ", exchange_code="NASDAQ", ref_price="150.50")
+        >>> quote.ticker_symbol
+        'AAPL'
         >>> quote.ref_price
         Decimal('150.50')
         >>> quote[QuoteType.REFERENCE]  # Dictionary-style access
@@ -67,7 +70,7 @@ class Quote:
     """
     __slots__ = [
         # Core fields
-        'instrument', 'timestamp', 'source',
+        'ticker_symbol', 'timestamp', 'source', 'exchange_code',
         # All QuoteType fields
         'ref_price', 'ceiling_price', 'floor_price', 'open_price', 'close_price',
         'bid_price_10', 'bid_qty_10', 'bid_price_9', 'bid_qty_9',
@@ -83,34 +86,49 @@ class Quote:
         'ask_price_9', 'ask_qty_9', 'ask_price_10', 'ask_qty_10',
         'total_matched_qty', 'highest_price', 'lowest_price', 'avg_price',
         'foreign_buy_qty', 'foreign_sell_qty', 'foreign_room',
-        'maturity_date', 'latest_est_matched_price'
+        'maturity_date', 'latest_est_matched_price',
+        'settlement_price', 'open_interest'
     ]
 
-    def __init__(self, instrument: Instrument, timestamp: float, source: str, **kwargs):
-        """Initialize QuoteSlots with required fields and optional market data.
+    def __init__(self, ticker_symbol: str, timestamp: float, source: str, exchange_code: Optional[str] = None, **kwargs):
+        """Initialize Quote with required fields and optional market data.
 
         Args:
-            instrument: The trading instrument
+            ticker_symbol: Ticker symbol (e.g., 'AAPL', 'VIC')
             timestamp: Unix timestamp
             source: Data source identifier
+            exchange_code: Optional exchange code (e.g., 'HSX', 'NASDAQ'), None if not provided
             **kwargs: Optional market data fields (by field name)
         """
-        # Validate required fields
-        if not isinstance(instrument, Instrument):
-            raise TypeError(f"instrument must be an Instrument, got {type(instrument)}")
+        # Validate ticker_symbol
+        if not isinstance(ticker_symbol, str):
+            raise TypeError(f"ticker_symbol must be a string, got {type(ticker_symbol)}")
+        if not ticker_symbol or not ticker_symbol.strip():
+            raise ValueError("ticker_symbol cannot be empty")
+
+        # Validate timestamp
         if not isinstance(timestamp, (int, float)):
             raise TypeError(f"timestamp must be a number, got {type(timestamp)}")
+
+        # Validate source
         if not isinstance(source, str):
             raise TypeError(f"source must be a string, got {type(source)}")
 
+        # Validate exchange_code (no inference, store as-is)
+        if exchange_code is not None and not isinstance(exchange_code, str):
+            raise TypeError(f"exchange_code must be a string or None, got {type(exchange_code)}")
+        if exchange_code is not None:
+            exchange_code = exchange_code.strip() or None
+
         # Set required fields
-        self.instrument = instrument
+        self.ticker_symbol = ticker_symbol.strip()
         self.timestamp = float(timestamp)
         self.source = source
+        self.exchange_code = exchange_code
 
         # Initialize all slots to None
         for slot in self.__slots__:
-            if slot not in ('instrument', 'timestamp', 'source'):
+            if slot not in ('ticker_symbol', 'timestamp', 'source', 'exchange_code'):
                 setattr(self, slot, None)
 
         # Process optional market data
@@ -146,7 +164,7 @@ class Quote:
                 raise TypeError(f"Field {attr_name} expects Decimal, str, int, or float, got {type(value)}")
 
         # Check if this should be an int field (quantities)
-        elif 'qty' in attr_name or attr_name in ['latest_qty', 'total_matched_qty', 'foreign_buy_qty', 'foreign_sell_qty', 'foreign_room']:
+        elif 'qty' in attr_name or attr_name in ['latest_qty', 'total_matched_qty', 'foreign_buy_qty', 'foreign_sell_qty', 'foreign_room', 'open_interest']:
             if isinstance(value, int):
                 return value
             elif isinstance(value, (str, float)):
@@ -203,7 +221,7 @@ class Quote:
         """
         available = []
         for slot in self.__slots__:
-            if slot not in ('instrument', 'timestamp', 'source'):
+            if slot not in ('ticker_symbol', 'timestamp', 'source', 'exchange_code'):
                 if getattr(self, slot, None) is not None:
                     available.append(slot)
         return available
@@ -211,22 +229,25 @@ class Quote:
     def to_dict(self) -> Dict[str, Any]:
         """Converts data of the object into dictionary.
 
-        The Instrument object is converted to its ID string, and Decimal values
-        are converted to strings for serialization.
+        Decimal values are converted to strings for serialization.
 
         Returns:
             A dictionary containing the information of the object
         """
         # Start with core fields
         data = {
-            'instrument': self.instrument.id,
+            'ticker_symbol': self.ticker_symbol,
             'timestamp': self.timestamp,
             'source': self.source
         }
 
+        # Add exchange_code if present
+        if self.exchange_code is not None:
+            data['exchange_code'] = self.exchange_code
+
         # Add non-None market data fields
         for slot in self.__slots__:
-            if slot not in ('instrument', 'timestamp', 'source'):
+            if slot not in ('ticker_symbol', 'timestamp', 'source', 'exchange_code'):
                 value = getattr(self, slot, None)
                 if value is not None:
                     if isinstance(value, Decimal):
@@ -244,11 +265,9 @@ class Quote:
             info_dict: Dictionary containing quote data
 
         Returns:
-            New QuoteSlots instance
+            New Quote instance
         """
-        data_copy = info_dict.copy()
-        data_copy['instrument'] = Instrument.from_id(data_copy['instrument'])
-        return cls(**data_copy)
+        return cls(**info_dict)
 
     def __eq__(self, other: object) -> bool:
         """Compare two QuoteSlots objects for equality.
@@ -270,6 +289,7 @@ class Quote:
         return True
 
     def __repr__(self) -> str:
-        """String representation of QuoteSlots object."""
+        """String representation of Quote object."""
         non_none_fields = len(self.available_quote_types())
-        return f"QuoteSlots(instrument={self.instrument}, timestamp={self.timestamp}, source='{self.source}', market_data_fields={non_none_fields})"
+        exchange_str = f", exchange_code='{self.exchange_code}'" if self.exchange_code else ""
+        return f"Quote(ticker_symbol='{self.ticker_symbol}'{exchange_str}, timestamp={self.timestamp}, source='{self.source}', market_data_fields={non_none_fields})"

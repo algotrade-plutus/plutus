@@ -60,6 +60,8 @@ class QuoteType(Enum):
     FOREIGN_ROOM = 'foreign_room'
     MATURITY_DATE = 'maturity_date'
     LATEST_ESTIMATED_MATCHED_PRICE = 'latest_est_matched_price'
+    SETTLEMENT_PRICE = 'settlement_price'
+    OPEN_INTEREST = 'open_interest'
 
 
 # A reusable mapping from a string value back to its QuoteType enum member
@@ -99,4 +101,5 @@ QUOTE_DECIMAL_ATTRIBUTES = {
     'lowest_price',
     'avg_price',
     'latest_est_matched_price',
+    'settlement_price',
 }

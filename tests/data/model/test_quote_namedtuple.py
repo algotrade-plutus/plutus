@@ -3,24 +3,18 @@ from decimal import Decimal
 
 import pytest
 
-from plutus.core.instrument import Instrument
 from plutus.data.model.enums import QuoteType
-from plutus.data.model.quote_namedtuple import QuoteNT, create_quote_nt
+from plutus.data.model.quote_named_tuple import QuoteNamedTuple as QuoteNT, create_quote_nt
 
 
 @pytest.fixture
-def sample_instrument():
-    """Provides a sample Instrument object for tests."""
-    return Instrument(ticker_symbol="FPT", exchange_code_str="HSX")
-
-
-@pytest.fixture
-def basic_quote_data(sample_instrument):
+def basic_quote_data():
     """Provides a dictionary of basic, valid quote data."""
     return {
-        "instrument": sample_instrument,
+        "ticker_symbol": "FPT",
         "timestamp": time.time(),
         "source": "test_source",
+        "exchange_code": "HSX",
     }
 
 
@@ -37,7 +31,8 @@ class TestQuoteNTModel:
         }
         quote = create_quote_nt(**full_data)
 
-        assert quote.instrument == basic_quote_data["instrument"]
+        assert quote.ticker_symbol == "FPT"
+        assert quote.exchange_code == "HSX"
         assert quote.source == "test_source"
         assert isinstance(quote.ref_price, Decimal)
         assert quote.ref_price == Decimal("101.5")
@@ -55,14 +50,15 @@ class TestQuoteNTModel:
         }
         quote = create_quote_nt(**full_data)
 
-        assert quote.instrument == basic_quote_data["instrument"]
+        assert quote.ticker_symbol == "FPT"
+        assert quote.exchange_code == "HSX"
         assert quote.source == "test_source"
         assert isinstance(quote.ref_price, Decimal)
         assert quote.ref_price == Decimal("101.5")
         assert quote.bid_qty_1 == 1500
         assert quote.floor_price is None  # Unset optional field should be None
 
-    def test_creation_fails_with_missing_required_fields(self, sample_instrument):
+    def test_creation_fails_with_missing_required_fields(self):
         """
         Tests that TypeError is raised if required fields are missing.
         """
@@ -70,10 +66,10 @@ class TestQuoteNTModel:
             QuoteNT(timestamp=time.time(), source="test")
 
         with pytest.raises(TypeError):
-            QuoteNT(instrument=sample_instrument, source="test")
+            QuoteNT(ticker_symbol="FPT", source="test")
 
         with pytest.raises(TypeError):
-            QuoteNT(instrument=sample_instrument, timestamp=time.time())
+            QuoteNT(ticker_symbol="FPT", timestamp=time.time())
 
     def test_creation_fails_with_invalid_data_type(self, basic_quote_data):
         """
@@ -142,8 +138,9 @@ class TestQuoteNTModel:
         )
         quote_dict = quote.to_dict()
 
-        # Check core types
-        assert quote_dict["instrument"] == basic_quote_data["instrument"].id
+        # Check core fields
+        assert quote_dict["ticker_symbol"] == "FPT"
+        assert quote_dict["exchange_code"] == "HSX"
         assert quote_dict["source"] == "test_source"
 
         # Check serialized market data
@@ -153,12 +150,13 @@ class TestQuoteNTModel:
         # Check that unset fields are not included
         assert "floor_price" not in quote_dict
 
-    def test_deserialization_from_dict_and_round_trip(self, sample_instrument):
+    def test_deserialization_from_dict_and_round_trip(self):
         """
         Tests the from_dict method and ensures a perfect round trip.
         """
         original_data = {
-            "instrument": sample_instrument.id,
+            "ticker_symbol": "FPT",
+            "exchange_code": "HSX",
             "timestamp": time.time(),
             "source": "round_trip_test",
             "ref_price": "110.0",
@@ -170,7 +168,8 @@ class TestQuoteNTModel:
         quote1 = QuoteNT.from_dict(original_data)
 
         assert isinstance(quote1, QuoteNT)
-        assert quote1.instrument == sample_instrument
+        assert quote1.ticker_symbol == "FPT"
+        assert quote1.exchange_code == "HSX"
         assert quote1.ref_price == Decimal("110.0")
         assert quote1.latest_price == Decimal("111.5")
         assert quote1.total_matched_qty == 500000
@@ -182,13 +181,14 @@ class TestQuoteNTModel:
         quote2 = QuoteNT.from_dict(re_serialized_data)
         assert quote1 == quote2
 
-    def test_from_dict_no_side_effects(self, sample_instrument):
+    def test_from_dict_no_side_effects(self):
         """
         Tests that from_dict does NOT mutate its input dict (fixing the original bug).
         This should pass for QuoteNT implementation.
         """
         data_dict = {
-            "instrument": sample_instrument.id,
+            "ticker_symbol": "FPT",
+            "exchange_code": "HSX",
             "timestamp": time.time(),
             "source": "side_effect_test",
         }
@@ -220,20 +220,22 @@ class TestQuoteNTModel:
         with pytest.raises(AttributeError):
             quote.source = "modified_source"
 
-    def test_factory_function(self, sample_instrument):
+    def test_factory_function(self):
         """
         Tests the create_quote_nt factory function.
         """
         quote = create_quote_nt(
-            instrument=sample_instrument,
+            ticker_symbol="FPT",
             timestamp=time.time(),
             source="factory_test",
+            exchange_code="HSX",
             ref_price=Decimal("99.99"),
             latest_qty=1000
         )
 
         assert isinstance(quote, QuoteNT)
-        assert quote.instrument == sample_instrument
+        assert quote.ticker_symbol == "FPT"
+        assert quote.exchange_code == "HSX"
         assert quote.ref_price == Decimal("99.99")
         assert quote.latest_qty == 1000
 
@@ -250,7 +252,7 @@ class TestQuoteNTModel:
 
         repr_str = repr(quote)
         assert "QuoteNT" in repr_str
-        assert str(quote.instrument) in repr_str
+        assert quote.ticker_symbol in repr_str
         assert "market_data_fields=3" in repr_str
 
     def test_equality_comparison(self, basic_quote_data):
@@ -290,18 +292,19 @@ class TestQuoteNTModel:
         for quote in quotes:
             _ = quote.ref_price
             _ = quote.latest_qty
-            _ = quote.instrument
+            _ = quote.ticker_symbol
         access_time = time.perf_counter() - start_time
 
         # Should be extremely fast
         assert access_time < 0.01
 
-    def test_large_data_scenario(self, sample_instrument):
+    def test_large_data_scenario(self):
         """
         Tests QuoteNT with a large amount of market data fields.
         """
         large_data = {
-            "instrument": sample_instrument,
+            "ticker_symbol": "FPT",
+            "exchange_code": "HSX",
             "timestamp": time.time(),
             "source": "large_test",
             # Add many fields
@@ -335,9 +338,142 @@ class TestQuoteNTModel:
         # Available quote types should include all non-None fields (excluding core 3)
         available = quote.available_quote_types()
         # Count the market data fields we actually set (excluding instrument, timestamp, source)
-        expected_fields = len([k for k in large_data.keys() if k not in ['instrument', 'timestamp', 'source']])
+        expected_fields = len([k for k in large_data.keys() if k not in ['ticker_symbol', 'timestamp', 'source', 'exchange_code']])
         assert len(available) == expected_fields  # All the market data fields we set
 
         # Serialization should work correctly
         quote_dict = quote.to_dict()
         assert len(quote_dict) == len(large_data)  # Should match input data
+
+    def test_exchange_code_none_handling(self):
+        """
+        Tests that QuoteNT properly handles exchange_code=None.
+        """
+        # Test 1: Create QuoteNT without exchange_code (defaults to None)
+        quote1 = create_quote_nt(
+            ticker_symbol="FPT",
+            timestamp=time.time(),
+            source="test_source",
+            ref_price=Decimal("100.0")
+        )
+        assert quote1.exchange_code is None
+
+        # Test 2: Create QuoteNT with explicit exchange_code=None
+        quote2 = create_quote_nt(
+            ticker_symbol="FPT",
+            timestamp=time.time(),
+            source="test_source",
+            exchange_code=None,
+            ref_price=Decimal("100.0")
+        )
+        assert quote2.exchange_code is None
+
+        # Test 3: Serialization with None exchange_code
+        quote_dict = quote1.to_dict()
+        assert 'exchange_code' not in quote_dict  # None should not be serialized
+
+        # Test 4: Deserialization without exchange_code field
+        data = {
+            "ticker_symbol": "FPT",
+            "timestamp": time.time(),
+            "source": "test",
+            "ref_price": "100.0"
+        }
+        quote3 = QuoteNT.from_dict(data)
+        assert quote3.exchange_code is None
+
+        # Test 5: Repr with None exchange_code should not show exchange_code
+        repr_str = repr(quote1)
+        assert "exchange_code=" not in repr_str
+
+        # Test 6: Direct QuoteNT construction (bypassing factory)
+        quote4 = QuoteNT(
+            ticker_symbol="FPT",
+            timestamp=time.time(),
+            source="test_source"
+        )
+        assert quote4.exchange_code is None
+
+    def test_settlement_price_and_open_interest(self):
+        """
+        Tests that QuoteNT properly handles futures-specific fields: settlement_price and open_interest.
+        """
+        # Test 1: Create QuoteNT with settlement_price (Decimal)
+        quote1 = create_quote_nt(
+            ticker_symbol="VN30F2306",
+            exchange_code="HNX",
+            timestamp=time.time(),
+            source="test_source",
+            settlement_price=Decimal("1025.50")
+        )
+        assert quote1.settlement_price == Decimal("1025.50")
+        assert isinstance(quote1.settlement_price, Decimal)
+
+        # Test 2: Create QuoteNT with open_interest (int)
+        quote2 = create_quote_nt(
+            ticker_symbol="VN30F2306",
+            exchange_code="HNX",
+            timestamp=time.time(),
+            source="test_source",
+            open_interest=50000
+        )
+        assert quote2.open_interest == 50000
+        assert isinstance(quote2.open_interest, int)
+
+        # Test 3: Type conversion - settlement_price from string
+        quote3 = create_quote_nt(
+            ticker_symbol="VN30F2306",
+            exchange_code="HNX",
+            timestamp=time.time(),
+            source="test_source",
+            settlement_price="1030.75"
+        )
+        assert quote3.settlement_price == Decimal("1030.75")
+
+        # Test 4: Type conversion - open_interest from string
+        quote4 = create_quote_nt(
+            ticker_symbol="VN30F2306",
+            exchange_code="HNX",
+            timestamp=time.time(),
+            source="test_source",
+            open_interest="75000"
+        )
+        assert quote4.open_interest == 75000
+
+        # Test 5: Serialization includes both fields
+        quote5 = create_quote_nt(
+            ticker_symbol="VN30F2306",
+            exchange_code="HNX",
+            timestamp=time.time(),
+            source="test_source",
+            settlement_price=Decimal("1025.50"),
+            open_interest=50000
+        )
+        quote_dict = quote5.to_dict()
+        assert quote_dict['settlement_price'] == '1025.50'
+        assert quote_dict['open_interest'] == 50000
+
+        # Test 6: Deserialization from dict
+        data = {
+            "ticker_symbol": "VN30F2306",
+            "exchange_code": "HNX",
+            "timestamp": time.time(),
+            "source": "test",
+            "settlement_price": "1025.50",
+            "open_interest": 50000
+        }
+        quote6 = QuoteNT.from_dict(data)
+        assert quote6.settlement_price == Decimal("1025.50")
+        assert quote6.open_interest == 50000
+
+        # Test 7: Direct construction with new fields
+        quote7 = QuoteNT(
+            ticker_symbol="VN30F2306",
+            exchange_code="HNX",
+            timestamp=time.time(),
+            source="test_source",
+            settlement_price=Decimal("1025.50"),
+            open_interest=50000
+        )
+        assert quote7.settlement_price == Decimal("1025.50")
+        assert quote7.open_interest == 50000
