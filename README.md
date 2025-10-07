@@ -138,7 +138,7 @@ See [Performance Optimization Guide](src/plutus/datahub/docs/DATA_OPTIMIZATION_G
 
 - **Version**: 0.0.5 (October 2025)
 - **Status**: Production-ready for data analytics
-- **Test Coverage**: 67+ tests passing
+- **Test Coverage**: 166+ tests passing
 - **Features**:
   - ✅ DataHub (tick queries, OHLC aggregation, CLI interface)
   - ✅ Performance optimization (Parquet, metadata cache)
