@@ -281,7 +281,7 @@ class TestCSVIntegrationWithSampleData:
     def setup_method(self):
         """Set up test fixtures."""
         self.reader = CSVQuoteReader()
-        self.sample_data_path = Path(__file__).parent.parent.parent / "tests" / "sample_data"
+        self.sample_data_path = Path(__file__).parent.parent.parent / "tests" / "sample_data" / "csv"
 
     def test_sample_data_directory_exists(self):
         """Test that sample data directory exists."""

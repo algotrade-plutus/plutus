@@ -1,0 +1,26 @@
+# Plutus DataHub Configuration Template
+#
+# FIRST-TIME SETUP:
+#   1. Copy this file: cp config.cfg.template config.cfg
+#   2. Edit config.cfg and set your dataset path below
+#   3. Run tests to verify: pytest tests/datahub/
+#
+# NOTE: config.cfg is gitignored and will not be committed to version control
+
+[datahub]
+# Path to your market data directory (REQUIRED)
+# This should point to the hermes-offline-market-data-pre-2023 directory
+#
+# Examples:
+#   - Absolute path: /Users/yourname/dataset/hermes-offline-market-data-pre-2023
+#   - Home directory: ~/dataset/hermes-offline-market-data-pre-2023
+#   - Relative path: ./data/hermes-offline-market-data-pre-2023
+#
+# IMPORTANT: Remove the leading # and set the correct path
+# PLUTUS_DATA_ROOT = /path/to/hermes-offline-market-data-pre-2023
+
+[preferences]
+# Prefer Parquet files over CSV for better performance (default: true)
+PREFER_PARQUET = true
+
+# Future configuration options can be added here
