@@ -34,7 +34,7 @@ from typing import Callable, Optional, Tuple, Union
 
 # Block 3: import from internal code, still use the rule "import" first, "from" second
 from plutus.core.instrument import Instrument
-from plutus.core.quote import CachedQuote, InternalDataHubQuote
+from plutus.data.model.quote import QuoteNamedTuple
 from plutus.core.order import OrderSide
 
 
@@ -163,7 +163,7 @@ class DataHub:
     def _get_latest_quote(
         self,
         instrument: Instrument
-    ) -> Optional[CachedQuote]:
+    ) -> Optional[QuoteNamedTuple]:
         """Returns the latest quotes of the Instrument.
 
         This is the private method which subclasses need to implement.
@@ -174,7 +174,7 @@ class DataHub:
             instrument (Instrument): The Instrument to get the quotes.
 
         Returns:
-            A CachedQuote object contains the quote.
+            A DataQuote object contains the quote.
 
         Raises:
             NotImplementedError: If subclass does not implement this method.
@@ -185,7 +185,7 @@ class DataHub:
         self,
         instrument: Instrument,
         quote_valid_duration: Optional[Union[float, int]] = None,
-    ) -> Optional[CachedQuote]:
+    ) -> Optional[QuoteNamedTuple]:
         """Returns the latest quotes of the Instrument.
         Contains the logic of checking None and checking expiration of data
         to support other get individual CachedQuoteElement method.
@@ -198,7 +198,7 @@ class DataHub:
                 Set to None to ignore the valid duration. Default is None.
 
         Returns:
-            A CachedQuote object contains the quote.
+            A DataQuote object contains the quote.
         """
         cached_quote = self._get_latest_quote(instrument)
 
@@ -216,60 +216,21 @@ class DataHub:
 
         return cached_quote
 
-    def _get_latest_cached_quote_element_value(
+    def _get_quote_attribute(
         self,
         instrument: Instrument,
-        cache_quote_element_type: str,
+        attribute_name: str,
         quote_valid_duration: Optional[Union[float, int]] = None,
-        cached_quote_element_valid_duration: Optional[Union[float, int]] = None
     ) -> Optional[Union[Decimal, int, str]]:
-        """Returns the value of the CachedQuoteElement based on some criteria.
+        """Helper to get a specific attribute from the latest valid quote."""
+        latest_quote = self.get_latest_quote(
+            instrument, quote_valid_duration=quote_valid_duration
+        )
 
-        The current criterion is that the CachedQuoteElement must not exceed
-        the expiration time.
-
-        Args:
-            instrument (Instrument): The instrument of the CachedQuoteElement.
-            cache_quote_element_type (str): The type of the CachedQuoteElement in string.
-            cached_quote_element_valid_duration (float, or int. Optional.): The valid duration
-                of the cached quote element in seconds from the cached quote's latest timestamp.
-                This can be seen as price hub heartbeat.
-                Set to None to ignore the valid duration. Default is None.
-            quote_valid_duration (float, or int. Optional.): The valid duration
-                of the quote in seconds, from the quote's latest timestamp.
-                Set to None to ignore the valid duration. Default is None.
-
-        Returns:
-            The value of the CachedQuoteElement.
-
-        """
-        cached_quote = self.get_latest_quote(instrument, quote_valid_duration)
-        if not cached_quote:
+        if not latest_quote:
             return None
 
-        # Change into dictionary mode, the reason is to easily traverse the attribute name
-        quote_info_dict = vars(cached_quote)
-        cached_quote_element = quote_info_dict[cache_quote_element_type]
-
-        if not cached_quote_element:
-            return None
-
-        # Check if the cached quote element is valid or not. The valid duration
-        # is set in the cached_quote_element_valid_duration parameters. If the
-        # cached_quote_element_valid_duration is None, it means that the API
-        # just check the existence of the element.
-        if cached_quote_element_valid_duration:
-            time_delta = time.time() - cached_quote_element.last_updated
-            # The quote is older than the valid duration.
-            if time_delta > cached_quote_element_valid_duration:
-                return None
-
-        if isinstance(cached_quote_element.value, float):
-            cached_quote_element.value = Decimal(str(
-                cached_quote_element.value / instrument.currency_unit
-            ))
-
-        return cached_quote_element.value
+        return getattr(latest_quote, attribute_name, None)
 
     def get_timestamp(self, instrument: Instrument) -> Optional[Decimal]:
         """Returns the latest timestamp."""
@@ -280,19 +241,14 @@ class DataHub:
         self,
         instrument: Instrument,
         quote_valid_duration: Optional[Union[float, int]] = None,
-        cached_quote_element_valid_duration: Optional[Union[float, int]] = None,
     ) -> Optional[Decimal]:
         """Returns the latest matched price of the Instrument before the expiration time.
 
         Args:
             instrument (Instrument): The Instrument to get the latest matched price.
-            quote_valid_duration (float, or int. Optional): The valid duration
+            quote_valid_duration (float, or int. Optional.): The valid duration
                 of the quote in seconds from the quote's latest timestamp.
                 This can be seen as price hub heartbeat.
-                Set to None to ignore the valid duration. Default is None.
-            cached_quote_element_valid_duration (float, or int. Optional): The
-                valid duration of the cached quote element in seconds from
-                the quote's latest timestamp.
                 Set to None to ignore the valid duration. Default is None.
 
         Returns:
@@ -301,18 +257,15 @@ class DataHub:
             is expired.
 
         """
-        return self._get_latest_cached_quote_element_value(
-            instrument,
-            'latest_matched_price',
-            quote_valid_duration,
-            cached_quote_element_valid_duration
+        # Note: The enum is 'latest_price', so we access it via that name.
+        return self._get_quote_attribute(
+            instrument, 'latest_price', quote_valid_duration
         )
 
     def get_latest_estimated_matched_price(
         self,
         instrument: Instrument,
         quote_valid_duration: Optional[Union[float, int]] = None,
-        cached_quote_element_valid_duration: Optional[Union[float, int]] = None,
     ) -> Optional[Decimal]:
         """Returns the latest estimated matched price of the Instrument before the expiration time.
 
@@ -322,29 +275,20 @@ class DataHub:
                 of the quote in seconds from the quote's latest timestamp.
                 This can be seen as price hub heartbeat.
                 Set to None to ignore the valid duration. Default is None.
-            cached_quote_element_valid_duration (float, or int. Optional): The
-                valid duration of the cached quote element in seconds from
-                the quote's latest timestamp.
-                Set to None to ignore the valid duration. Default is None.
 
         Returns:
             A Decimal if there is a valid latest estimated matched price.
             None if there is no latest estimated matched price or the latest estimated
             matched price is expired.
-
         """
-        return self._get_latest_cached_quote_element_value(
-            instrument,
-            'latest_estimated_matched_price',
-            quote_valid_duration,
-            cached_quote_element_valid_duration
+        return self._get_quote_attribute(
+            instrument, 'latest_est_matched_price', quote_valid_duration
         )
 
     def get_latest_matched_quantity(
         self,
         instrument: Instrument,
         quote_valid_duration: Optional[Union[float, int]] = None,
-        cached_quote_element_valid_duration: Optional[Union[float, int]] = None,
     ) -> Optional[int]:
         """Returns the latest matched quantity of the Instrument
         before the expiration time.
@@ -355,28 +299,21 @@ class DataHub:
                 of the quote in seconds from the quote's latest timestamp.
                 This can be seen as price hub heartbeat.
                 Set to None to ignore the valid duration. Default is None.
-            cached_quote_element_valid_duration (float, or int. Optional): The
-                valid duration of the cached quote element in seconds from
-                the quote's latest timestamp.
-                Set to None to ignore the valid duration. Default is None.
 
         Returns:
             A Decimal if there is a valid latest matched quantity.
             None if there is no latest matched quantity or the cached is expired.
 
         """
-        return self._get_latest_cached_quote_element_value(
-            instrument,
-            'latest_matched_quantity',
-            quote_valid_duration,
-            cached_quote_element_valid_duration
+        # Note: The enum is 'latest_qty', so we access it via that name.
+        return self._get_quote_attribute(
+            instrument, 'latest_qty', quote_valid_duration
         )
 
     def get_total_matched_quantity(
         self,
         instrument: Instrument,
         quote_valid_duration: Optional[Union[float, int]] = None,
-        cached_quote_element_valid_duration: Optional[Union[float, int]] = None,
     ) -> Optional[int]:
         """Returns the total matched quantity of the Instrument
         before the expiration time.
@@ -387,28 +324,20 @@ class DataHub:
                 of the quote in seconds from the quote's latest timestamp.
                 This can be seen as price hub heartbeat.
                 Set to None to ignore the valid duration. Default is None.
-            cached_quote_element_valid_duration (float, or int. Optional): The
-                valid duration of the cached quote element in seconds from
-                the quote's latest timestamp.
-                Set to None to ignore the valid duration. Default is None.
 
         Returns:
             A Decimal if there is a valid latest matched quantity.
             None if there is no latest matched quantity or the cached is expired.
 
         """
-        return self._get_latest_cached_quote_element_value(
-            instrument,
-            'total_matched_quantity',
-            quote_valid_duration,
-            cached_quote_element_valid_duration
+        return self._get_quote_attribute(
+            instrument, 'total_matched_qty', quote_valid_duration
         )
 
     def get_open_price(
         self,
         instrument: Instrument,
         quote_valid_duration: Optional[Union[float, int]] = None,
-        cached_quote_element_valid_duration: Optional[Union[float, int]] = None,
     ) -> Optional[Decimal]:
         """Returns the opep price of the Instrument before the expiration time.
 
@@ -418,28 +347,18 @@ class DataHub:
                 of the quote in seconds from the quote's latest timestamp.
                 This can be seen as price hub heartbeat.
                 Set to None to ignore the valid duration. Default is None.
-            cached_quote_element_valid_duration (float, or int. Optional): The
-                valid duration of the cached quote element in seconds from
-                the quote's latest timestamp.
-                Set to None to ignore the valid duration. Default is None.
 
         Returns:
             A Decimal if there is a valid open price.
             None if there is no open price or the cached is expired.
 
         """
-        return self._get_latest_cached_quote_element_value(
-            instrument,
-            'open_price',
-            quote_valid_duration,
-            cached_quote_element_valid_duration
-        )
+        return self._get_quote_attribute(instrument, 'open_price', quote_valid_duration)
 
     def get_close_price(
         self,
         instrument: Instrument,
         quote_valid_duration: Optional[Union[float, int]] = None,
-        cached_quote_element_valid_duration: Optional[Union[float, int]] = None,
     ) -> Optional[Decimal]:
         """Returns the close price of the Instrument before the expiration time.
 
@@ -449,28 +368,18 @@ class DataHub:
                 of the quote in seconds from the quote's latest timestamp.
                 This can be seen as price hub heartbeat.
                 Set to None to ignore the valid duration. Default is None.
-            cached_quote_element_valid_duration (float, or int. Optional): The
-                valid duration of the cached quote element in seconds from
-                the quote's latest timestamp.
-                Set to None to ignore the valid duration. Default is None.
 
         Returns:
             A Decimal if there is a valid close price.
             None if there is no close price or the cached is expired.
 
         """
-        return self._get_latest_cached_quote_element_value(
-            instrument,
-            'close_price',
-            quote_valid_duration,
-            cached_quote_element_valid_duration
-        )
+        return self._get_quote_attribute(instrument, 'close_price', quote_valid_duration)
 
     def get_reference_price(
         self,
         instrument: Instrument,
         quote_valid_duration: Optional[Union[float, int]] = None,
-        cached_quote_element_valid_duration: Optional[Union[float, int]] = None,
     ) -> Optional[Decimal]:
         """Returns the reference price of the Instrument before the expiration time.
 
@@ -480,28 +389,18 @@ class DataHub:
                 of the quote in seconds from the quote's latest timestamp.
                 This can be seen as price hub heartbeat.
                 Set to None to ignore the valid duration. Default is None.
-            cached_quote_element_valid_duration (float, or int. Optional): The
-                valid duration of the cached quote element in seconds from
-                the quote's latest timestamp.
-                Set to None to ignore the valid duration. Default is None.
 
         Returns:
             A Decimal if there is a valid reference price.
             None if there is no reference price or the cached is expired.
 
         """
-        return self._get_latest_cached_quote_element_value(
-            instrument,
-            'ref_price',
-            quote_valid_duration,
-            cached_quote_element_valid_duration
-        )
+        return self._get_quote_attribute(instrument, 'ref_price', quote_valid_duration)
 
     def get_ceiling_price(
         self,
         instrument: Instrument,
         quote_valid_duration: Optional[Union[float, int]] = None,
-        cached_quote_element_valid_duration: Optional[Union[float, int]] = None,
     ) -> Optional[Decimal]:
         """Returns the ceiling price of the Instrument before the expiration time.
 
@@ -511,28 +410,18 @@ class DataHub:
                 of the quote in seconds from the quote's latest timestamp.
                 This can be seen as price hub heartbeat.
                 Set to None to ignore the valid duration. Default is None.
-            cached_quote_element_valid_duration (float, or int. Optional): The
-                valid duration of the cached quote element in seconds from
-                the quote's latest timestamp.
-                Set to None to ignore the valid duration. Default is None.
 
         Returns:
             A Decimal if there is a valid ceiling price.
             None if there is no ceiling price or the cached is expired.
 
         """
-        return self._get_latest_cached_quote_element_value(
-            instrument,
-            'ceiling_price',
-            quote_valid_duration,
-            cached_quote_element_valid_duration
-        )
+        return self._get_quote_attribute(instrument, 'ceiling_price', quote_valid_duration)
 
     def get_floor_price(
         self,
         instrument: Instrument,
         quote_valid_duration: Optional[Union[float, int]] = None,
-        cached_quote_element_valid_duration: Optional[Union[float, int]] = None,
     ) -> Optional[Decimal]:
         """Returns the floor price of the Instrument before the expiration time.
 
@@ -542,28 +431,18 @@ class DataHub:
                 of the quote in seconds from the quote's latest timestamp.
                 This can be seen as price hub heartbeat.
                 Set to None to ignore the valid duration. Default is None.
-            cached_quote_element_valid_duration (float, or int. Optional): The
-                valid duration of the cached quote element in seconds from
-                the quote's latest timestamp.
-                Set to None to ignore the valid duration. Default is None.
 
         Returns:
             A Decimal if there is a valid floor price.
             None if there is no floor price or the cached is expired.
 
         """
-        return self._get_latest_cached_quote_element_value(
-            instrument,
-            'floor_price',
-            quote_valid_duration,
-            cached_quote_element_valid_duration
-        )
+        return self._get_quote_attribute(instrument, 'floor_price', quote_valid_duration)
 
     def get_ask_price_1(
         self,
         instrument: Instrument,
         quote_valid_duration: Optional[Union[float, int]] = None,
-        cached_quote_element_valid_duration: Optional[Union[float, int]] = None,
     ) -> Optional[Decimal]:
         """Returns the ask price 1 of the Instrument before the expiration time.
 
@@ -573,27 +452,17 @@ class DataHub:
                 of the quote in seconds from the quote's latest timestamp.
                 This can be seen as price hub heartbeat.
                 Set to None to ignore the valid duration. Default is None.
-            cached_quote_element_valid_duration (float, or int. Optional): The
-                valid duration of the cached quote element in seconds from
-                the quote's latest timestamp.
-                Set to None to ignore the valid duration. Default is None.
 
         Returns:
             A Decimal if there is a valid ask price 1.
             None if there is no ask price 1 or the cached is expired.
         """
-        return self._get_latest_cached_quote_element_value(
-            instrument,
-            'ask_price_1',
-            quote_valid_duration,
-            cached_quote_element_valid_duration
-        )
+        return self._get_quote_attribute(instrument, 'ask_price_1', quote_valid_duration)
 
     def get_ask_quantity_1(
         self,
         instrument: Instrument,
         quote_valid_duration: Optional[Union[float, int]] = None,
-        cached_quote_element_valid_duration: Optional[Union[float, int]] = None,
     ) -> Optional[Decimal]:
         """Returns the ask quantity 1 of the Instrument before the expiration time.
 
@@ -603,27 +472,17 @@ class DataHub:
                 of the quote in seconds from the quote's latest timestamp.
                 This can be seen as price hub heartbeat.
                 Set to None to ignore the valid duration. Default is None.
-            cached_quote_element_valid_duration (float, or int. Optional): The
-                valid duration of the cached quote element in seconds from
-                the quote's latest timestamp.
-                Set to None to ignore the valid duration. Default is None.
 
         Returns:
             A Decimal if there is a valid ask quantity 1.
             None if there is no ask quantity 1 or the cached is expired.
         """
-        return self._get_latest_cached_quote_element_value(
-            instrument,
-            'ask_quantity_1',
-            quote_valid_duration,
-            cached_quote_element_valid_duration
-        )
+        return self._get_quote_attribute(instrument, 'ask_qty_1', quote_valid_duration)
 
     def get_bid_price_1(
         self,
         instrument: Instrument,
         quote_valid_duration: Optional[Union[float, int]] = None,
-        cached_quote_element_valid_duration: Optional[Union[float, int]] = None,
     ) -> Optional[Decimal]:
         """Returns the bid price 1 of the Instrument before the expiration time.
 
@@ -633,27 +492,17 @@ class DataHub:
                 of the quote in seconds from the quote's latest timestamp.
                 This can be seen as price hub heartbeat.
                 Set to None to ignore the valid duration. Default is None.
-            cached_quote_element_valid_duration (float, or int. Optional): The
-                valid duration of the cached quote element in seconds from
-                the quote's latest timestamp.
-                Set to None to ignore the valid duration. Default is None.
 
         Returns:
             A Decimal if there is a valid bid price 1.
             None if there is no bid price 1 or the cached is expired.
         """
-        return self._get_latest_cached_quote_element_value(
-            instrument,
-            'bid_price_1',
-            quote_valid_duration,
-            cached_quote_element_valid_duration
-        )
+        return self._get_quote_attribute(instrument, 'bid_price_1', quote_valid_duration)
 
     def get_ask_price_3(
         self,
         instrument: Instrument,
         quote_valid_duration: Optional[Union[float, int]] = None,
-        cached_quote_element_valid_duration: Optional[Union[float, int]] = None,
     ) -> Optional[Decimal]:
         """Returns the bid price 1 of the Instrument before the expiration time.
 
@@ -663,27 +512,17 @@ class DataHub:
                 of the quote in seconds from the quote's latest timestamp.
                 This can be seen as price hub heartbeat.
                 Set to None to ignore the valid duration. Default is None.
-            cached_quote_element_valid_duration (float, or int. Optional): The
-                valid duration of the cached quote element in seconds from
-                the quote's latest timestamp.
-                Set to None to ignore the valid duration. Default is None.
 
         Returns:
             A Decimal if there is a valid bid price 1.
             None if there is no bid price 1 or the cached is expired.
         """
-        return self._get_latest_cached_quote_element_value(
-            instrument,
-            'ask_price_3',
-            quote_valid_duration,
-            cached_quote_element_valid_duration
-        )
+        return self._get_quote_attribute(instrument, 'ask_price_3', quote_valid_duration)
 
     def get_bid_price_3(
         self,
         instrument: Instrument,
         quote_valid_duration: Optional[Union[float, int]] = None,
-        cached_quote_element_valid_duration: Optional[Union[float, int]] = None,
     ) -> Optional[Decimal]:
         """Returns the bid price 1 of the Instrument before the expiration time.
 
@@ -693,27 +532,17 @@ class DataHub:
                 of the quote in seconds from the quote's latest timestamp.
                 This can be seen as price hub heartbeat.
                 Set to None to ignore the valid duration. Default is None.
-            cached_quote_element_valid_duration (float, or int. Optional): The
-                valid duration of the cached quote element in seconds from
-                the quote's latest timestamp.
-                Set to None to ignore the valid duration. Default is None.
 
         Returns:
             A Decimal if there is a valid bid price 1.
             None if there is no bid price 1 or the cached is expired.
         """
-        return self._get_latest_cached_quote_element_value(
-            instrument,
-            'bid_price_3',
-            quote_valid_duration,
-            cached_quote_element_valid_duration
-        )
+        return self._get_quote_attribute(instrument, 'bid_price_3', quote_valid_duration)
 
     def get_bid_quantity_1(
         self,
         instrument: Instrument,
         quote_valid_duration: Optional[Union[float, int]] = None,
-        cached_quote_element_valid_duration: Optional[Union[float, int]] = None,
     ) -> Optional[Decimal]:
         """Returns the bid price 1 of the Instrument before the expiration time.
 
@@ -723,21 +552,12 @@ class DataHub:
                 of the quote in seconds from the quote's latest timestamp.
                 This can be seen as price hub heartbeat.
                 Set to None to ignore the valid duration. Default is None.
-            cached_quote_element_valid_duration (float, or int. Optional): The
-                valid duration of the cached quote element in seconds from
-                the quote's latest timestamp.
-                Set to None to ignore the valid duration. Default is None.
 
         Returns:
             A Decimal if there is a valid bid price 1.
             None if there is no bid price 1 or the cached is expired.
         """
-        return self._get_latest_cached_quote_element_value(
-            instrument,
-            'bid_quantity_1',
-            quote_valid_duration,
-            cached_quote_element_valid_duration
-        )
+        return self._get_quote_attribute(instrument, 'bid_qty_1', quote_valid_duration)
 
     def get_market_order_limit_price(
         self, instrument: Instrument, side: OrderSide
@@ -799,7 +619,7 @@ class DataHub:
 
     def set_data_handler(
         self,
-        data_handler: Callable[[Instrument, InternalDataHubQuote], None],
+        data_handler: Callable[[Instrument, QuoteNamedTuple], None],
         instrument_id_pattern: str,
         run_in_thread: bool,
         sleep_time: float = 0.001,
