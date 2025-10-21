@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "plutus-datahub": {
+      "command": "/absolute/path/to/plutus/.venv/bin/python",
+      "args": [
+        "/absolute/path/to/plutus/src/plutus/mcp/__main__.py"
+      ],
+      "env": {
+        "PYTHONPATH": "/absolute/path/to/plutus/src",
+        "HERMES_DATA_ROOT": "/absolute/path/to/dataset",
+        "MCP_LOG_LEVEL": "INFO"
+      }
+    }
+  }
+}

@@ -11,3 +11,7 @@ config.cfg
 !config.cfg.template
 
 idocs
+.claude*
+.gemini*
+.venv
+.pytest_*

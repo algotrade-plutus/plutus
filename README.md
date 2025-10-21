@@ -15,9 +15,10 @@ Plutus is an algorithmic trading framework with a powerful data analytics layer.
   - OHLC aggregation with 7 intervals (1m, 5m, 15m, 30m, 1h, 4h, 1d)
   - Tick-level data access with field selection
   - Date/datetime range filtering
-- **Dual Interface**: Command-line tools and Python API
+- **Triple Interface**: Command-line tools, Python API, and **LLM integration via MCP** 🆕
+- **LLM-Powered Analysis**: Query data using natural language through Claude Desktop or other MCP clients
 - **High Performance**: Optional Parquet optimization for 10-100x faster queries (60% smaller storage)
-- **Production Ready**: 67+ tests, comprehensive error handling, well-documented
+- **Production Ready**: 230+ tests, comprehensive error handling, well-documented
 
 ## Quick Start
 
@@ -102,6 +103,68 @@ for bar in ohlc:
           f"L={bar['low']} C={bar['close']} V={bar['volume']:,.0f}")
 ```
 
+## MCP Server for LLM Integration 🆕
+
+Access market data through natural language using Claude Desktop or other MCP-compatible LLMs. No code required!
+
+### Quick Start
+
+**1. Start the MCP Server:**
+```bash
+python -m plutus.mcp
+```
+
+**2. Configure Claude Desktop:**
+
+Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS):
+
+```json
+{
+  "mcpServers": {
+    "plutus-datahub": {
+      "command": "python",
+      "args": ["-m", "plutus.mcp"],
+      "env": {
+        "HERMES_DATA_ROOT": "/absolute/path/to/dataset"
+      }
+    }
+  }
+}
+```
+
+**3. Query with Natural Language:**
+
+In Claude Desktop, simply ask:
+> "Get me FPT's daily OHLC data for January 2021"
+
+> "Analyze HPG's intraday volume patterns on January 15, 2021"
+
+> "Compare FPT and VIC performance for 2021. Which had better risk-adjusted returns?"
+
+### What You Can Do
+
+- **Query tick data**: "Show me VIC's matched price and volume from 9am to 10am on Jan 15"
+- **Generate OHLC bars**: "Get 5-minute OHLC bars for HPG on January 15, 2021"
+- **Analyze trends**: "Analyze FPT's daily trends for Q1 2021 with volatility metrics"
+- **Compare stocks**: "Compare HPG and VIC returns, Sharpe ratios, and correlation"
+- **Technical analysis**: "Calculate RSI, MACD, and Bollinger Bands for FPT"
+- **Detect anomalies**: "Find unusual volume spikes or price movements for VIC"
+
+### MCP Features
+
+- **4 Tools**: query_tick_data, query_ohlc_data, get_available_fields, get_query_statistics
+- **4 Resources**: Dataset metadata, ticker list, field descriptions, interval info
+- **5 Prompts**: Daily trends, volume analysis, ticker comparison, anomaly detection, technical indicators
+
+### Documentation
+
+- **[MCP Quickstart Guide](src/plutus/mcp/docs/MCP_QUICKSTART.md)** - 5-minute setup and first queries
+- **[Tools API Reference](src/plutus/mcp/docs/MCP_TOOLS_REFERENCE.md)** - Complete tool documentation
+- **[Usage Examples](src/plutus/mcp/docs/MCP_EXAMPLES.md)** - Real-world query examples
+- **[Client Setup Guide](src/plutus/mcp/docs/MCP_CLIENT_SETUP.md)** - Configure Claude Desktop, VS Code, custom clients
+
+---
+
 ## Documentation
 
 - **[CLI Usage Guide](src/plutus/datahub/docs/CLI_USAGE_GUIDE.md)** - Comprehensive CLI examples, workflows, and integration patterns
@@ -136,11 +199,12 @@ See [Performance Optimization Guide](src/plutus/datahub/docs/DATA_OPTIMIZATION_G
 
 ## Project Status
 
-- **Version**: 0.0.5 (October 2025)
-- **Status**: Production-ready for data analytics
-- **Test Coverage**: 166+ tests passing
+- **Version**: 1.0.0 (October 2025)
+- **Status**: Production-ready for data analytics & LLM integration
+- **Test Coverage**: 230+ tests passing
 - **Features**:
   - ✅ DataHub (tick queries, OHLC aggregation, CLI interface)
+  - ✅ MCP Server (LLM integration with Claude Desktop)
   - ✅ Performance optimization (Parquet, metadata cache)
   - 🚧 Trading algorithms (Quote/Portfolio/Bot framework - in development)
 
