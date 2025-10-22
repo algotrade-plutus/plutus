@@ -15,7 +15,10 @@ And Claude will use the MCP server to fetch the data and analyze it for you.
 - Python 3.12 or higher
 - Plutus package installed (`pip install plutus`)
 - Vietnamese market data dataset (21GB)
-- Claude Desktop or Claude Code (VS Code extension)
+- **MCP Client** (choose one):
+  - Claude Desktop (macOS/Windows)
+  - Claude Code (VS Code extension)
+  - Gemini CLI (Terminal-based, all platforms)
 
 ---
 
@@ -175,6 +178,51 @@ Verify connection:
 ```bash
 claude mcp list
 ```
+
+#### Option C: Gemini CLI (Google's Terminal AI Agent)
+
+**Step 1: Install Gemini CLI**
+
+```bash
+npm install -g @google/gemini-cli@latest
+gemini --version
+gemini auth login  # Sign in if not already
+```
+
+**Step 2: Add Plutus MCP Server**
+
+Navigate to your Plutus project and add the server:
+
+```bash
+cd /path/to/plutus
+gemini mcp add plutus-datahub /absolute/path/to/plutus/.venv/bin/python -m plutus.mcp \
+  -e PYTHONPATH=/absolute/path/to/plutus/src \
+  -e HERMES_DATA_ROOT=/absolute/path/to/dataset \
+  --description "Plutus DataHub MCP server for Vietnamese market data"
+```
+
+**Important:** Environment variables (`-e KEY=VALUE`) must come AFTER the command and args.
+
+**Step 3: Verify Connection**
+
+```bash
+gemini mcp list
+```
+
+Expected output:
+```
+✓ plutus-datahub: /path/to/.venv/bin/python -m plutus.mcp (stdio) - Connected
+```
+
+**Step 4: Test in Gemini CLI**
+
+Start Gemini and test:
+```bash
+gemini
+> @plutus-datahub Get FPT's daily OHLC for January 15, 2021
+```
+
+**For more Gemini CLI options** (scopes, tool filtering, timeouts), see [MCP_CLIENT_SETUP.md](MCP_CLIENT_SETUP.md#gemini-cli-googles-terminal-ai-agent).
 
 ### Step 5: Test Connection
 

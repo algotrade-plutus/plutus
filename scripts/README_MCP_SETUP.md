@@ -169,6 +169,73 @@ In Claude Code chat, ask:
 
 ---
 
+### Option C: Gemini CLI (Google's Terminal AI Agent)
+
+#### Step 1: Install Gemini CLI
+
+Install globally via npm:
+```bash
+npm install -g @google/gemini-cli@latest
+```
+
+Verify installation:
+```bash
+gemini --version
+```
+
+Sign in (if not already):
+```bash
+gemini auth login
+```
+
+#### Step 2: Add Plutus MCP Server
+
+Navigate to your Plutus project and add the server:
+
+```bash
+cd /path/to/plutus
+gemini mcp add plutus-datahub /absolute/path/to/plutus/.venv/bin/python -m plutus.mcp \
+  -e PYTHONPATH=/absolute/path/to/plutus/src \
+  -e HERMES_DATA_ROOT=/absolute/path/to/dataset \
+  --description "Plutus DataHub MCP server for Vietnamese market data"
+```
+
+**Important Notes:**
+- Environment variables (`-e KEY=VALUE`) must come AFTER the command and args
+- Use **absolute paths** (not `~` or relative paths)
+- By default, servers are added to project scope (`.gemini/settings.json`)
+- Use `--scope user` to add to user scope (`~/.gemini/settings.json`)
+
+#### Step 3: Verify Connection
+
+List configured MCP servers:
+```bash
+gemini mcp list
+```
+
+Expected output:
+```
+✓ plutus-datahub: /path/to/.venv/bin/python -m plutus.mcp (stdio) - Connected
+```
+
+#### Step 4: Test in Gemini CLI
+
+Start Gemini CLI:
+```bash
+gemini
+```
+
+Test with a query:
+```
+> @plutus-datahub Get FPT's daily OHLC for January 15, 2021
+```
+
+**Advanced Configuration:**
+
+For more options (scopes, tool filtering, timeouts, etc.), see the [MCP Client Setup Guide](../src/plutus/mcp/docs/MCP_CLIENT_SETUP.md#gemini-cli-googles-terminal-ai-agent).
+
+---
+
 ## Environment Variables
 
 | Variable | Description | Default | Required |

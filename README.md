@@ -1,28 +1,31 @@
 # Plutus
 
-> A framework for algorithmic trading based on ALGOTRADE's [9-step process](https://hub.algotrade.vn/knowledge-hub/steps-to-develop-a-trading-algorithm/)
+> **Zero-Setup Market Data Analytics** with Python API, CLI, and LLM Integration
 
 [![Python](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Tests](https://img.shields.io/badge/tests-205%20passing-brightgreen.svg)]()
 
-Plutus is an algorithmic trading framework with a powerful data analytics layer. Query 21GB of Vietnamese market data (2000-2022) without database installation, generate OHLC bars from tick data, and build trading strategies using the ALGOTRADE methodology.
+Plutus is a data analytics framework for Vietnamese stock market with **three ways to access 21GB of historical data (2000-2022)**: Python API, command-line tools, and natural language queries through LLM integration.
 
-## Features
+---
 
-- **Zero-Setup Analytics**: Query 21GB of Vietnamese market data without database installation (powered by DuckDB)
-- **Rich Dataset**: Historical tick and daily data from 2000-2022 (HSX, HNX, UPCOM exchanges)
-- **Flexible Querying**:
-  - OHLC aggregation with 7 intervals (1m, 5m, 15m, 30m, 1h, 4h, 1d)
-  - Tick-level data access with field selection
-  - Date/datetime range filtering
-- **Triple Interface**: Command-line tools, Python API, and **LLM integration via MCP** 🆕
-- **LLM-Powered Analysis**: Query data using natural language through Claude Desktop or other MCP clients
-- **High Performance**: Optional Parquet optimization for 10-100x faster queries (60% smaller storage)
-- **Production Ready**: 230+ tests, comprehensive error handling, well-documented
+## What is Plutus?
+
+Plutus provides **zero-setup access** to Vietnamese market data without database installation:
+
+- **📊 Rich Dataset**: 21GB tick & daily data from HSX, HNX, UPCOM (2000-2022)
+- **🚀 Zero Setup**: Query CSV files directly using DuckDB (no database required)
+- **⚡ High Performance**: Optional Parquet optimization for 10-100x faster queries
+- **🔧 Triple Interface**: Python API + CLI + LLM integration (MCP)
+- **🤖 AI-Powered**: Query data using natural language through Claude, Gemini, or other MCP clients
+- **✅ Production Ready**: 205+ tests, comprehensive documentation
+
+---
 
 ## Quick Start
 
-### 1. Installation
+### Installation
 
 ```bash
 git clone https://github.com/algotradevn/plutus.git
@@ -30,68 +33,30 @@ cd plutus
 pip install -e .
 ```
 
-### 2. Configuration
+### Configuration
 
-Copy the configuration template:
+Set your dataset path (choose one method):
 
+**Option 1: Environment Variable (Recommended)**
+```bash
+export HERMES_DATA_ROOT=/path/to/hermes-offline-market-data-pre-2023
+```
+
+**Option 2: Config File**
 ```bash
 cp config.cfg.template config.cfg
+# Edit config.cfg and set PLUTUS_DATA_ROOT
 ```
 
-Edit `config.cfg` and set your dataset path:
+### First Query
 
-```ini
-[datahub]
-PLUTUS_DATA_ROOT = /path/to/hermes-offline-market-data-pre-2023
-```
-
-**Configuration Methods** (in priority order):
-1. **Python parameter**: `DataHubConfig(data_root='/path/to/dataset')`
-2. **Environment variable**: `export PLUTUS_DATA_ROOT=/path/to/dataset`
-3. **Config file**: Edit `config.cfg` (recommended for development)
-
-**Security Note**: `config.cfg` contains personal paths and is excluded from version control. Never commit this file.
-
-### 3. Run Your First Query
-
-**CLI Example** - Generate 1-minute OHLC bars:
-
-```bash
-python -m plutus.datahub \
-  --ticker FPT \
-  --begin 2021-01-15 \
-  --end 2021-01-16 \
-  --type ohlc \
-  --interval 1m \
-  --output fpt_1m.csv
-```
-
-**Python API Example** - Query tick data:
-
+**Python API:**
 ```python
 from plutus.datahub import query_historical
 
-# Get tick data
-results = query_historical(
-    ticker_symbol='FPT',
-    begin='2021-01-15 09:00:00',
-    end='2021-01-15 10:00:00',
-    type='tick',
-    fields=['matched_price', 'matched_volume']
-)
-
-for tick in results:
-    print(f"{tick['datetime']}: {tick['matched_price']} ({tick['matched_volume']:,})")
-```
-
-**OHLC Aggregation Example**:
-
-```python
-from plutus.datahub import query_historical
-
-# Generate 5-minute OHLC bars
+# Get 5-minute OHLC bars
 ohlc = query_historical(
-    ticker_symbol='VIC',
+    ticker_symbol='FPT',
     begin='2021-01-15',
     end='2021-01-16',
     type='ohlc',
@@ -100,21 +65,131 @@ ohlc = query_historical(
 
 for bar in ohlc:
     print(f"{bar['bar_time']}: O={bar['open']} H={bar['high']} "
-          f"L={bar['low']} C={bar['close']} V={bar['volume']:,.0f}")
+          f"L={bar['low']} C={bar['close']}")
 ```
 
-## MCP Server for LLM Integration 🆕
+**CLI:**
+```bash
+python -m plutus.datahub \
+  --ticker FPT \
+  --begin 2021-01-15 \
+  --end 2021-01-16 \
+  --type ohlc \
+  --interval 5m \
+  --output fpt.csv
+```
 
-Access market data through natural language using Claude Desktop or other MCP-compatible LLMs. No code required!
+**LLM (Natural Language):**
+```
+> Get me FPT's 5-minute OHLC bars for January 15, 2021
+```
 
-### Quick Start
+---
 
-**1. Start the MCP Server:**
+## Features
+
+### 1. DataHub Library (Python API)
+
+Programmatic access to market data with flexible querying:
+
+**Tick Data Queries:**
+```python
+from plutus.datahub import query_historical
+
+# Get tick-level data with field selection
+ticks = query_historical(
+    ticker_symbol='HPG',
+    begin='2021-01-15 09:00:00',
+    end='2021-01-15 10:00:00',
+    type='tick',
+    fields=['matched_price', 'matched_volume', 'bid_price_1', 'ask_price_1']
+)
+
+for tick in ticks:
+    print(f"{tick['datetime']}: {tick['matched_price']} @ {tick['matched_volume']}")
+```
+
+**OHLC Aggregation:**
+```python
+# Generate candlestick bars from tick data
+ohlc = query_historical(
+    ticker_symbol='VIC',
+    begin='2021-01-15',
+    end='2021-01-16',
+    type='ohlc',
+    interval='15m',  # 1m, 5m, 15m, 30m, 1h, 4h, 1d
+    include_volume=True
+)
+```
+
+**Features:**
+- 40+ data fields (matched price/volume, bid/ask, foreign flows, open interest)
+- 7 OHLC intervals (1m, 5m, 15m, 30m, 1h, 4h, 1d)
+- Date/datetime range filtering
+- Lazy iteration for memory efficiency
+- DataFrame conversion via `to_dataframe()`
+
+📖 **[Python API Documentation](examples/)**
+
+---
+
+### 2. DataHub CLI
+
+Command-line interface for data export and analysis:
+
+```bash
+# Export tick data to CSV
+python -m plutus.datahub \
+  --ticker FPT \
+  --begin "2021-01-15 09:00" \
+  --end "2021-01-15 10:00" \
+  --type tick \
+  --fields matched_price,matched_volume \
+  --output fpt_ticks.csv
+
+# Generate OHLC bars in JSON format
+python -m plutus.datahub \
+  --ticker HPG \
+  --begin 2021-01-15 \
+  --end 2021-01-16 \
+  --type ohlc \
+  --interval 1m \
+  --format json \
+  --output hpg_1m.json
+
+# Get query statistics before execution
+python -m plutus.datahub \
+  --ticker VIC \
+  --begin 2021-01-01 \
+  --end 2021-12-31 \
+  --stats
+```
+
+**Output Formats:** CSV, JSON, table (terminal)
+
+📖 **[CLI Usage Guide](src/plutus/datahub/docs/CLI_USAGE_GUIDE.md)**
+
+---
+
+### 3. MCP Server (LLM Integration)
+
+Access market data through natural language using Claude Desktop, Gemini CLI, or other MCP-compatible LLMs.
+
+#### What is MCP?
+
+**Model Context Protocol (MCP)** enables LLMs to access external data sources through a standardized interface. Instead of writing code, you query data using natural language.
+
+#### Quick Setup
+
+**1. Start MCP Server:**
 ```bash
 python -m plutus.mcp
 ```
 
-**2. Configure Claude Desktop:**
+**2. Configure Your Client:**
+
+<details>
+<summary><b>Claude Desktop</b></summary>
 
 Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS):
 
@@ -132,88 +207,134 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS):
 }
 ```
 
+Restart Claude Desktop.
+</details>
+
+<details>
+<summary><b>Claude Code (VS Code)</b></summary>
+
+```bash
+claude mcp add --transport stdio plutus-datahub python -- -m plutus.mcp
+```
+
+Edit `~/.claude.json` to add `HERMES_DATA_ROOT`.
+</details>
+
+<details>
+<summary><b>Gemini CLI (Google)</b></summary>
+
+Install and configure:
+```bash
+npm install -g @google/gemini-cli@latest
+gemini auth login
+
+gemini mcp add plutus-datahub python -m plutus.mcp \
+  -e HERMES_DATA_ROOT=/absolute/path/to/dataset \
+  --description "Vietnamese market data access"
+```
+
+Test:
+```bash
+gemini
+> @plutus-datahub Get FPT's daily OHLC for January 15, 2021
+```
+</details>
+
 **3. Query with Natural Language:**
 
-In Claude Desktop, simply ask:
-> "Get me FPT's daily OHLC data for January 2021"
+Try these queries in your MCP client:
 
-> "Analyze HPG's intraday volume patterns on January 15, 2021"
+- **Basic Data**: "Get FPT's daily OHLC data for January 2021"
+- **Intraday Analysis**: "Show me VIC's 5-minute OHLC bars on Jan 15, 2021 with volume"
+- **Tick Data**: "Get HPG's matched price and volume from 9am to 10am on Jan 15"
+- **Comparison**: "Compare FPT and VIC performance for Q1 2021"
+- **Technical Analysis**: "Calculate RSI and MACD for HPG in January 2021"
+- **Anomaly Detection**: "Find unusual volume spikes for FPT in 2021"
 
-> "Compare FPT and VIC performance for 2021. Which had better risk-adjusted returns?"
-
-### What You Can Do
-
-- **Query tick data**: "Show me VIC's matched price and volume from 9am to 10am on Jan 15"
-- **Generate OHLC bars**: "Get 5-minute OHLC bars for HPG on January 15, 2021"
-- **Analyze trends**: "Analyze FPT's daily trends for Q1 2021 with volatility metrics"
-- **Compare stocks**: "Compare HPG and VIC returns, Sharpe ratios, and correlation"
-- **Technical analysis**: "Calculate RSI, MACD, and Bollinger Bands for FPT"
-- **Detect anomalies**: "Find unusual volume spikes or price movements for VIC"
-
-### MCP Features
+#### MCP Features
 
 - **4 Tools**: query_tick_data, query_ohlc_data, get_available_fields, get_query_statistics
-- **4 Resources**: Dataset metadata, ticker list, field descriptions, interval info
+- **4 Resources**: Dataset metadata, ticker list, field descriptions, OHLC intervals
 - **5 Prompts**: Daily trends, volume analysis, ticker comparison, anomaly detection, technical indicators
 
-### Documentation
+#### Supported Clients
 
-- **[MCP Quickstart Guide](src/plutus/mcp/docs/MCP_QUICKSTART.md)** - 5-minute setup and first queries
-- **[Tools API Reference](src/plutus/mcp/docs/MCP_TOOLS_REFERENCE.md)** - Complete tool documentation
+- ✅ **Claude Desktop** (macOS, Windows)
+- ✅ **Claude Code** (VS Code extension)
+- ✅ **Gemini CLI** (Terminal, all platforms)
+- ✅ **Custom MCP Clients** (Python/TypeScript SDK)
+
+📖 **MCP Documentation:**
+- **[Quick Start Guide](src/plutus/mcp/docs/MCP_QUICKSTART.md)** - 5-minute setup
+- **[Client Setup](src/plutus/mcp/docs/MCP_CLIENT_SETUP.md)** - Detailed configuration for all clients
+- **[Tools Reference](src/plutus/mcp/docs/MCP_TOOLS_REFERENCE.md)** - Complete API documentation
 - **[Usage Examples](src/plutus/mcp/docs/MCP_EXAMPLES.md)** - Real-world query examples
-- **[Client Setup Guide](src/plutus/mcp/docs/MCP_CLIENT_SETUP.md)** - Configure Claude Desktop, VS Code, custom clients
 
 ---
-
-## Documentation
-
-- **[CLI Usage Guide](src/plutus/datahub/docs/CLI_USAGE_GUIDE.md)** - Comprehensive CLI examples, workflows, and integration patterns
-- **[Performance Optimization](src/plutus/datahub/docs/DATA_OPTIMIZATION_GUIDE.md)** - Make queries 10-100x faster with Parquet conversion and metadata caching
-- **[Python Examples](examples/)** - Ready-to-run Python scripts demonstrating API usage
 
 ## Dataset
 
 Plutus requires the **hermes-offline-market-data-pre-2023** dataset (~21GB):
-- Historical tick data (2000-2022)
-- Daily aggregations
-- Vietnamese stock market (HSX, HNX, UPCOM)
 
-Contact [ALGOTRADE](https://algotrade.vn) for dataset access.
+- **Coverage**: 2021-2022 (2 years)
+- **Exchanges**: HSX, HNX, UPCOM
+- **Data Types**: Tick-level intraday + daily aggregations
+- **Format**: CSV files (optionally convert to Parquet for 10-100x faster queries)
+
+📧 **Contact [ALGOTRADE](https://algotrade.vn) for dataset access**
+
+---
+
+## Performance Optimization
+
+Out of the box, Plutus queries CSV files directly (zero setup). For production use:
+
+```bash
+# Convert to Parquet (10-100x faster, 60% smaller)
+python -m plutus.datahub.cli_optimize optimize --data-root /path/to/dataset
+```
+
+**Benefits:**
+- 10-100x faster queries
+- 60% smaller storage footprint
+- Metadata caching for instant field lookups
+
+📖 **[Performance Guide](src/plutus/datahub/docs/DATA_OPTIMIZATION_GUIDE.md)**
+
+---
 
 ## Requirements
 
 - **Python**: 3.12 or higher
 - **Dataset**: hermes-offline-market-data-pre-2023 (21GB)
-- **Dependencies**: Automatically installed via pip (DuckDB, pyarrow, etc.)
+- **Dependencies**: Automatically installed via pip
+  - DuckDB (query engine)
+  - PyArrow (Parquet support)
+  - FastMCP (MCP server)
+  - Others (see `pyproject.toml`)
 
-## Performance Optimization
-
-Out of the box, Plutus queries CSV files directly (no setup required). For production use, optimize performance:
-
-```bash
-# Convert CSV to Parquet (10-100x faster queries, 60% smaller files)
-python -m plutus.datahub.cli_optimize optimize --data-root /path/to/dataset
-```
-
-See [Performance Optimization Guide](src/plutus/datahub/docs/DATA_OPTIMIZATION_GUIDE.md) for details.
+---
 
 ## Project Status
 
 - **Version**: 1.0.0 (October 2025)
-- **Status**: Production-ready for data analytics & LLM integration
-- **Test Coverage**: 230+ tests passing
-- **Features**:
-  - ✅ DataHub (tick queries, OHLC aggregation, CLI interface)
-  - ✅ MCP Server (LLM integration with Claude Desktop)
-  - ✅ Performance optimization (Parquet, metadata cache)
-  - 🚧 Trading algorithms (Quote/Portfolio/Bot framework - in development)
+- **Tests**: 205/205 passing ✅
+- **Production Ready**: DataHub + MCP Server
+
+**Current Features:**
+- ✅ DataHub (Python API + CLI)
+- ✅ MCP Server (Claude Desktop, Gemini CLI, custom clients)
+- ✅ Performance optimization (Parquet, metadata cache)
+- 🚧 Trading algorithms (Framework in development)
+
+---
 
 ## Architecture
 
 Plutus follows the [ALGOTRADE 9-step algorithmic trading process](https://hub.algotrade.vn/knowledge-hub/steps-to-develop-a-trading-algorithm/):
 
 1. Define trading hypothesis
-2. **Data collection** ← DataHub provides this layer
+2. **Data collection** ← **DataHub provides this layer** ✅
 3. Data exploration
 4. Signal detection
 5. Portfolio management
@@ -222,7 +343,30 @@ Plutus follows the [ALGOTRADE 9-step algorithmic trading process](https://hub.al
 8. Optimization
 9. Live trading
 
-The DataHub module (currently production-ready) handles step 2. Other modules are under development.
+The **DataHub module** (production-ready) handles step 2 with three interfaces:
+- Python API for programmatic access
+- CLI for data export and batch processing
+- MCP Server for LLM integration
+
+Other modules are under development.
+
+---
+
+## Documentation
+
+### DataHub
+- **[CLI Usage Guide](src/plutus/datahub/docs/CLI_USAGE_GUIDE.md)** - Command-line examples and workflows
+- **[Performance Optimization](src/plutus/datahub/docs/DATA_OPTIMIZATION_GUIDE.md)** - Parquet conversion and tuning
+- **[Python Examples](examples/)** - Ready-to-run Python scripts
+
+### MCP Server
+- **[Quick Start](src/plutus/mcp/docs/MCP_QUICKSTART.md)** - 5-minute setup for Claude/Gemini
+- **[Client Setup](src/plutus/mcp/docs/MCP_CLIENT_SETUP.md)** - Detailed configuration guide
+- **[Tools Reference](src/plutus/mcp/docs/MCP_TOOLS_REFERENCE.md)** - Complete API documentation
+- **[Usage Examples](src/plutus/mcp/docs/MCP_EXAMPLES.md)** - Query patterns and workflows
+- **[Setup Scripts](scripts/README_MCP_SETUP.md)** - Server setup and integration
+
+---
 
 ## Troubleshooting
 
@@ -230,7 +374,7 @@ The DataHub module (currently production-ready) handles step 2. Other modules ar
 ```
 Error: Dataset not found at: /path/to/dataset
 ```
-**Solution**: Verify the dataset path in `config.cfg` or use `--data-root` parameter.
+**Solution**: Set `HERMES_DATA_ROOT` environment variable or edit `config.cfg`
 
 ### Import Errors
 ```
@@ -239,19 +383,34 @@ ModuleNotFoundError: No module named 'plutus'
 **Solution**: Install in development mode: `pip install -e .`
 
 ### Slow Queries
-**Solution**: See [Performance Optimization Guide](src/plutus/datahub/docs/DATA_OPTIMIZATION_GUIDE.md) to convert data to Parquet format.
+**Solution**: Convert data to Parquet format (see [Performance Guide](src/plutus/datahub/docs/DATA_OPTIMIZATION_GUIDE.md))
 
-For more troubleshooting, see the [CLI Usage Guide](src/plutus/datahub/docs/CLI_USAGE_GUIDE.md#troubleshooting).
+### MCP Connection Issues
+**Solution**: See [MCP Quick Start](src/plutus/mcp/docs/MCP_QUICKSTART.md#troubleshooting) for client-specific troubleshooting
+
+---
+
+## Contributing
+
+This is a research project. For questions or collaboration:
+- **GitHub Issues**: https://github.com/algotradevn/plutus/issues
+- **Email**: andan@algotrade.vn
+
+---
 
 ## License
 
 MIT License - See [LICENSE](LICENSE) file for details.
 
+---
+
 ## Author
 
-**Dan** (dan@algotrade.vn)
+**Dan** (andan@algotrade.vn)
 [ALGOTRADE](https://algotrade.vn) - Algorithmic Trading Education & Research
 
-## Contributing
+---
 
-This is a research project. For questions or collaboration, contact the author.
+## Acknowledgments
+
+Built on the [ALGOTRADE 9-step methodology](https://hub.algotrade.vn/knowledge-hub/steps-to-develop-a-trading-algorithm/) for systematic algorithmic trading development.
