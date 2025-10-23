@@ -11,3 +11,5 @@ config.cfg
 !config.cfg.template
 
 idocs
+
+*.gemini
