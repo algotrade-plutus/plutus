@@ -3,15 +3,16 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "plutus"
-version = "1.0.0"
+name = "algotrade-plutus"
+version = "0.2.5.20251023"
 authors = [
-  { name="Dan", email="dan@algotrade.vn" },
+  { name="Dan", email="andan@algotrade.vn" },
 ]
 description = "Zero-setup market data analytics with Python API, CLI, and LLM integration"
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }
+license-files = ["LICEN[CS]E*"]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Financial and Insurance Industry",
