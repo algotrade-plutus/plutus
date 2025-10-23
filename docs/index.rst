@@ -6,7 +6,7 @@ Welcome to Plutus Documentation
 * **Zero-setup market data analytics** with Python API and CLI
 * **22+ performance metrics** for strategy evaluation
 * **LLM integration** via MCP server for natural language queries
-* **21GB Vietnamese market data** (2000-2022) with DuckDB query engine
+* **21GB Vietnamese market data** (2021-2022) with DuckDB query engine
 
 .. image:: https://img.shields.io/badge/python-3.12+-blue.svg
    :target: https://www.python.org/downloads/
@@ -23,7 +23,7 @@ Install Plutus:
 
 .. code-block:: bash
 
-   pip install plutus
+   pip install algotrade-plutus
 
 Query market data:
 

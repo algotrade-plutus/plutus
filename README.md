@@ -6,7 +6,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Tests](https://img.shields.io/badge/tests-205%20passing-brightgreen.svg)]()
 
-Plutus is a data analytics framework for Vietnamese stock market with **three ways to access 21GB of historical data (2000-2022)**: Python API, command-line tools, and natural language queries through LLM integration.
+Plutus is a data analytics framework for Vietnamese stock market with **three ways to access 21GB of historical data (2021-2022)**: Python API, command-line tools, and natural language queries through LLM integration.
 
 ---
 
