@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "algotrade-plutus"
-version = "0.2.5.20251023"
+version = "0.2.5.20251023rc"
 authors = [
   { name="Dan", email="andan@algotrade.vn" },
 ]

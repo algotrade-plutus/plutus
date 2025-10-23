@@ -1,4 +1,4 @@
-# Plutus
+# PLUTUS Open Source - Breaking the Barrier in Algorithmic Trading
 
 > **Zero-Setup Market Data Analytics** with Python API, CLI, and LLM Integration
 
@@ -6,13 +6,13 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Tests](https://img.shields.io/badge/tests-205%20passing-brightgreen.svg)]()
 
-Plutus is a data analytics framework for Vietnamese stock market with **three ways to access 21GB of historical data (2021-2022)**: Python API, command-line tools, and natural language queries through LLM integration.
+PLUTUS is a data analytics framework for Vietnamese stock market with **three ways to access 21GB of historical data (2021-2022)**: Python API, command-line tools, and natural language queries through LLM integration.
 
 ---
 
-## What is Plutus?
+## What is PLUTUS?
 
-Plutus provides **zero-setup access** to Vietnamese market data without database installation:
+PLUTUS provides **zero-setup access** to Vietnamese market data without database installation:
 
 - **📊 Rich Dataset**: 21GB tick & daily data from HSX, HNX, UPCOM (2000-2022)
 - **🚀 Zero Setup**: Query CSV files directly using DuckDB (no database required)
