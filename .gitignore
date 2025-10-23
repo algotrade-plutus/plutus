@@ -11,8 +11,10 @@ config.cfg
 !config.cfg.template
 
 idocs
-
-*.gemini
+.claude*
+.gemini*
+.venv
+.pytest_*
 
 # Sphinx documentation build artifacts
 docs/_build/

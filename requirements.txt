@@ -1,8 +1,31 @@
-build==1.2.1
-packaging==24.1
-pyproject_hooks==1.1.0
-pytz==2024.1
-redis==5.0.8
-ujson==5.10.0
-pydantic==2.11.9
-pytest==8.4.2
+# Core Dependencies (DataHub)
+duckdb>=1.0.0
+pandas>=2.0.0
+pyarrow>=12.0.0
+pytz>=2024.1
+
+# MCP Server Dependencies
+fastmcp>=2.0.0
+pydantic>=2.0.0
+
+# Development Dependencies
+pytest>=8.0.0
+build>=1.0.0
+
+# Legacy Dependencies (optional - for backward compatibility)
+# redis>=5.0.0
+# ujson>=5.0.0
+
+# Installation Instructions:
+# --------------------------
+# For DataHub only (no MCP):
+#   pip install -e .
+#
+# For DataHub + MCP Server:
+#   pip install -e ".[mcp]"
+#
+# For Development (all features + testing):
+#   pip install -e ".[all]"
+#
+# Using requirements.txt directly:
+#   pip install -r requirements.txt
