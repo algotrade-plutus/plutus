@@ -14,7 +14,7 @@ PLUTUS is a data analytics framework for Vietnamese stock market with **three wa
 
 PLUTUS provides **zero-setup access** to Vietnamese market data without database installation:
 
-- **📊 Rich Dataset**: 21GB tick & daily data from HSX, HNX, UPCOM (2000-2022)
+- **📊 Rich Dataset**: 21GB tick & daily data from HSX, HNX, UPCOM (2021-2022)
 - **🚀 Zero Setup**: Query CSV files directly using DuckDB (no database required)
 - **⚡ High Performance**: Optional Parquet optimization for 10-100x faster queries
 - **🔧 Triple Interface**: Python API + CLI + LLM integration (MCP)
