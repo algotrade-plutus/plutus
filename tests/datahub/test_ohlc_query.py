@@ -293,13 +293,17 @@ class TestOHLCQuery:
 
     def test_build_ohlc_query_with_volume(self, query):
         """Test SQL generation for OHLC with volume."""
-        sql = query._build_ohlc_query(
+        sql, params = query._build_ohlc_query(
             ticker='HPG',
             start_dt='2023-06-15 00:00:00',
             end_dt='2023-06-16 00:00:00',
             interval='1m',
             include_volume=True
         )
+
+        # The ticker is bound, never interpolated into the SQL text.
+        assert params == ['HPG', '2023-06-15 00:00:00', '2023-06-16 00:00:00']
+        assert "'HPG'" not in sql
 
         # Check SQL contains expected keywords
         assert 'time_bucket' in sql
@@ -314,13 +318,16 @@ class TestOHLCQuery:
 
     def test_build_ohlc_query_without_volume(self, query):
         """Test SQL generation for OHLC without volume."""
-        sql = query._build_ohlc_query(
+        sql, params = query._build_ohlc_query(
             ticker='HPG',
             start_dt='2023-06-15 00:00:00',
             end_dt='2023-06-16 00:00:00',
             interval='1m',
             include_volume=False
         )
+
+        assert params == ['HPG', '2023-06-15 00:00:00', '2023-06-16 00:00:00']
+        assert "'HPG'" not in sql
 
         # Check SQL contains expected keywords
         assert 'time_bucket' in sql

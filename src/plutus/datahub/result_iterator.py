@@ -27,19 +27,35 @@ class ResultIterator:
         >>> df = results.to_dataframe()
     """
 
-    def __init__(self, query: str, connection: duckdb.DuckDBPyConnection):
+    def __init__(
+        self,
+        query: str,
+        connection: duckdb.DuckDBPyConnection,
+        params: Optional[List[Any]] = None,
+    ):
         """Initialize result iterator.
 
         Args:
-            query: SQL query string
+            query: SQL query string, optionally containing `?` placeholders
             connection: DuckDB connection object
+            params: Values bound to the query's `?` placeholders. Passing user
+                input this way instead of interpolating it into the SQL string
+                is what keeps a ticker like ``O'BRIEN`` from breaking the query.
         """
         self._query = query
         self._conn = connection
+        self._params = list(params) if params is not None else None
         self._cursor = None
         self._column_names = None
         self._materialized = False
         self._count = None
+
+    def _execute(self, query: Optional[str] = None) -> duckdb.DuckDBPyConnection:
+        """Execute `query` (default: this iterator's query) with bound params."""
+        sql = self._query if query is None else query
+        if self._params is None:
+            return self._conn.execute(sql)
+        return self._conn.execute(sql, self._params)
 
     def __iter__(self) -> Iterator[Dict[str, Any]]:
         """Start lazy iteration over results.
@@ -53,7 +69,7 @@ class ResultIterator:
         """
         # Always create a fresh cursor for new iteration
         # This allows the iterator to be reused (e.g., list() then iterate again)
-        self._cursor = self._conn.execute(self._query)
+        self._cursor = self._execute()
         self._column_names = [desc[0] for desc in self._cursor.description]
         self._materialized = False  # Reset materialization flag
 
@@ -70,7 +86,7 @@ class ResultIterator:
         """
         if self._cursor is None:
             # Initialize cursor if __iter__() wasn't called
-            self._cursor = self._conn.execute(self._query)
+            self._cursor = self._execute()
             self._column_names = [desc[0] for desc in self._cursor.description]
 
         row = self._cursor.fetchone()
@@ -96,7 +112,7 @@ class ResultIterator:
             ...     df_batch = pd.DataFrame(batch)
             ...     save_to_database(df_batch)
         """
-        cursor = self._conn.execute(self._query)
+        cursor = self._execute()
         self._column_names = [desc[0] for desc in cursor.description]
 
         while True:
@@ -140,7 +156,7 @@ class ResultIterator:
                 )
 
         # Materialize using DuckDB's built-in pandas conversion
-        df = self._conn.execute(self._query).df()
+        df = self._execute().df()
         self._materialized = True
         return df
 
@@ -166,7 +182,7 @@ class ResultIterator:
         """
         if self._count is None:
             count_query = f"SELECT COUNT(*) FROM ({self._query}) AS _count_subquery"
-            self._count = self._conn.execute(count_query).fetchone()[0]
+            self._count = self._execute(count_query).fetchone()[0]
         return self._count
 
     def count(self) -> int:

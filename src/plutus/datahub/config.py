@@ -234,17 +234,22 @@ class DataHubConfig:
         )
 
     def _validate_dataset(self):
-        """Validate that critical files exist in dataset.
+        """Validate that the dataset is identifiable as a market-data root.
 
         Accepts either .csv or .parquet format for critical files.
         This allows Parquet-only deployments (CSV files deleted after conversion).
+
+        Only the ticker master is required up front. Every other field is
+        validated lazily, at the point a query actually needs it (see
+        :meth:`require_field`), so that a partial deployment still serves the
+        tables it does have. A daily-bar deployment carrying no tick archive is
+        a legitimate configuration and must not fail at construction time.
 
         Raises:
             FileNotFoundError: If critical files missing
         """
         critical_files = [
-            'quote_matched',      # Primary tick data
-            'quote_ticker',       # Metadata
+            'quote_ticker',       # Metadata: identifies the root as a dataset
         ]
 
         missing = []
@@ -264,12 +269,20 @@ class DataHubConfig:
                 f"Note: Either .csv or .parquet format is acceptable."
             )
 
-    def get_file_path(self, field: str, prefer_parquet: Optional[bool] = None) -> Path:
+    def get_file_path(
+        self,
+        field: str,
+        prefer_parquet: Optional[bool] = None,
+        query: Optional[str] = None,
+    ) -> Path:
         """Get full path to CSV/Parquet file for a field.
 
         Args:
             field: Field name (e.g., 'matched_price', 'bid_price_1')
             prefer_parquet: Override default parquet preference
+            query: Human-readable description of the query requiring this
+                field. Included in the error when the field is missing, so the
+                message names both what is absent and what needed it.
 
         Returns:
             Path to data file (.parquet or .csv)
@@ -313,17 +326,74 @@ class DataHubConfig:
         if csv_path.exists():
             return csv_path
 
-        # Neither format exists - provide helpful error
+        # Neither format exists - provide helpful error naming BOTH the missing
+        # field and the query that needed it.
+        needed_by = f"Required by: {query}\n" if query else ""
         raise FileNotFoundError(
             f"Data file not found for field '{field}':\n"
             f"  CSV:     {csv_path} (not found)\n"
             f"  Parquet: {parquet_path} (not found)\n"
-            f"Expected mapping: {field} → {filename}\n\n"
-            f"Hint: Check if dataset is complete or run Parquet conversion."
+            f"Expected mapping: {field} → {filename}\n"
+            f"{needed_by}"
+            f"\nThis dataset root does not carry that table. It may be a "
+            f"daily-bar-only deployment; the tick archive is a separate, much "
+            f"larger download.\n"
+            f"Hint: check `DataHubConfig.has_field()` before querying, or point "
+            f"PLUTUS_DATA_ROOT at a dataset that includes this table."
         )
 
-    def get_available_fields(self) -> list:
-        """Get list of all available data fields.
+    def has_field(self, field: str) -> bool:
+        """Report whether a field is actually present in this dataset root.
+
+        Unlike :meth:`get_available_fields`, this touches the filesystem, so it
+        reflects what can really be queried rather than what the library knows
+        how to name.
+
+        Args:
+            field: Field name (e.g., 'matched_price', 'bid_price_1')
+
+        Returns:
+            True if a .parquet or .csv file backs this field.
+
+        Example:
+            >>> config = DataHubConfig()
+            >>> config.has_field('close_price')
+            True
+        """
+        try:
+            self.get_file_path(field)
+        except (FileNotFoundError, ValueError):
+            return False
+        return True
+
+    def require_field(self, field: str, query: str) -> Path:
+        """Resolve a field's path, or fail naming the query that needed it.
+
+        This is the per-field validation entry point. Query builders call it
+        instead of :meth:`get_file_path` so that a missing table produces an
+        error a user can act on.
+
+        Args:
+            field: Field name (e.g., 'matched_price')
+            query: Human-readable description of the requiring query,
+                e.g. "get_ohlc(interval='5m')".
+
+        Returns:
+            Path to the backing data file.
+
+        Raises:
+            FileNotFoundError: If no file backs the field, naming both the
+                field and `query`.
+        """
+        return self.get_file_path(field, query=query)
+
+    def get_available_fields(self, on_disk: bool = False) -> list:
+        """Get list of data fields.
+
+        Args:
+            on_disk: When True, return only fields actually backed by a file in
+                this dataset root. When False (default), return every field the
+                library knows how to map.
 
         Returns:
             Sorted list of field names
@@ -334,7 +404,10 @@ class DataHubConfig:
             >>> 'matched_price' in fields
             True
         """
-        return sorted(self.file_mappings.keys())
+        fields = sorted(self.file_mappings.keys())
+        if on_disk:
+            return [f for f in fields if self.has_field(f)]
+        return fields
 
     def __repr__(self) -> str:
         """String representation."""

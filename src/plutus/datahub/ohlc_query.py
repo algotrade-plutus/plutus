@@ -110,10 +110,114 @@ class OHLCQuery:
             raise ValueError(f"Invalid interval '{interval}'. Must be one of: {valid}")
 
         # Build SQL query
-        sql = self._build_ohlc_query(ticker, start_dt, end_dt, interval, include_volume)
+        if interval == '1d':
+            sql, params = self._build_daily_query(
+                ticker, start_dt, end_dt, include_volume
+            )
+        else:
+            sql, params = self._build_ohlc_query(
+                ticker, start_dt, end_dt, interval, include_volume
+            )
 
         # Return lazy iterator
-        return ResultIterator(sql, self._conn)
+        return ResultIterator(sql, self._conn, params)
+
+    def _build_daily_query(
+        self,
+        ticker: str,
+        start_dt: str,
+        end_dt: str,
+        include_volume: bool
+    ) -> tuple:
+        """Build SQL reading pre-computed daily bars from the daily tables.
+
+        Daily bars are stored directly by the exchange feed; they are not
+        re-derived from ticks. This matters for two reasons:
+
+        1. **Coverage.** The daily tables span 2000-07-28 to 2022-12-30, while
+           the tick archive begins 2020-12-02. Aggregating ticks would silently
+           truncate two decades of history.
+        2. **Correctness.** `quote_max`/`quote_min` are the session high/low as
+           published. They are used here in preference to `quote_high`/
+           `quote_low`, which hold intraday tick extremes covering 2021 onward
+           only — routing daily bars through those would shorten coverage
+           without saying so.
+
+        Args:
+            ticker: Ticker symbol
+            start_dt: Start datetime (ISO format)
+            end_dt: End datetime (exclusive)
+            include_volume: Join the daily volume table
+
+        Returns:
+            (sql, params) where params bind the query's `?` placeholders.
+
+        Raises:
+            FileNotFoundError: If a required daily table is absent, naming both
+                the missing field and this query.
+        """
+        needed_by = "get_ohlc(interval='1d')"
+        open_file = self.config.require_field('open_price', needed_by)
+        high_file = self.config.require_field('max_price', needed_by)
+        low_file = self.config.require_field('min_price', needed_by)
+        close_file = self.config.require_field('close_price', needed_by)
+
+        # `datetime` is DATE in every daily table, so bind dates rather than
+        # timestamps; a timestamp bound against a DATE column compares wrong.
+        params = [ticker, self._as_date(start_dt), self._as_date(end_dt)]
+
+        if include_volume:
+            volume_file = self.config.require_field('daily_volume', needed_by)
+            select_volume = "v.quantity AS volume"
+            join_volume = (
+                f"JOIN read_parquet_or_csv('{volume_file}') v "
+                f"USING (datetime, tickersymbol)"
+            )
+        else:
+            select_volume = "NULL AS volume"
+            join_volume = ""
+
+        sql = f"""
+        SELECT o.datetime AS bar_time,
+               o.tickersymbol,
+               o.price AS open,
+               h.price AS high,
+               l.price AS low,
+               c.price AS close,
+               {select_volume}
+        FROM read_parquet_or_csv('{open_file}')  o
+        JOIN read_parquet_or_csv('{high_file}')  h USING (datetime, tickersymbol)
+        JOIN read_parquet_or_csv('{low_file}')   l USING (datetime, tickersymbol)
+        JOIN read_parquet_or_csv('{close_file}') c USING (datetime, tickersymbol)
+        {join_volume}
+        WHERE o.tickersymbol = ?
+          AND o.datetime >= ?
+          AND o.datetime < ?
+        ORDER BY bar_time
+        """
+        return self._resolve_readers(sql), params
+
+    @staticmethod
+    def _as_date(value: str) -> str:
+        """Reduce an ISO datetime to its date part for DATE-typed columns."""
+        return str(value)[:10]
+
+    @staticmethod
+    def _resolve_readers(sql: str) -> str:
+        """Replace the read_parquet_or_csv() marker with the right DuckDB reader.
+
+        DuckDB infers the format from the extension when a path is given to the
+        generic `read_*` family, but being explicit keeps the plan stable across
+        mixed CSV/Parquet deployments.
+        """
+        import re
+
+        def pick(match: re.Match) -> str:
+            path = match.group(1)
+            reader = 'read_parquet' if path.endswith('.parquet') else 'read_csv_auto'
+            return f"{reader}('{path}')"
+
+        return re.sub(r"read_parquet_or_csv\('([^']+)'\)", pick, sql)
 
     def _build_ohlc_query(
         self,
@@ -122,8 +226,8 @@ class OHLCQuery:
         end_dt: str,
         interval: str,
         include_volume: bool
-    ) -> str:
-        """Build SQL query for OHLC aggregation.
+    ) -> tuple:
+        """Build SQL query for intraday OHLC aggregation from ticks.
 
         Args:
             ticker: Ticker symbol
@@ -133,15 +237,22 @@ class OHLCQuery:
             include_volume: Include volume aggregation
 
         Returns:
-            SQL query string
+            (sql, params) where params bind the query's `?` placeholders.
+
+        Raises:
+            FileNotFoundError: If the tick archive is absent, naming both the
+                missing field and this query.
         """
         # Get file paths
-        matched_price_file = self.config.get_file_path('matched_price')
+        needed_by = f"get_ohlc(interval='{interval}')"
+        matched_price_file = self.config.require_field('matched_price', needed_by)
         interval_sql = self.INTERVALS[interval]
+
+        params = [ticker, start_dt, end_dt]
 
         if include_volume:
             # Join matched price + volume, then aggregate
-            matched_volume_file = self.config.get_file_path('matched_volume')
+            matched_volume_file = self.config.require_field('matched_volume', needed_by)
 
             sql = f"""
         WITH tick_data AS (
@@ -154,9 +265,9 @@ class OHLCQuery:
             LEFT JOIN '{matched_volume_file}' AS v
                 ON m.datetime = v.datetime
                 AND m.tickersymbol = v.tickersymbol
-            WHERE m.tickersymbol = '{ticker}'
-                AND m.datetime >= '{start_dt}'
-                AND m.datetime < '{end_dt}'
+            WHERE m.tickersymbol = ?
+                AND m.datetime >= ?
+                AND m.datetime < ?
         )
         SELECT
             time_bucket(INTERVAL '{interval_sql}', datetime) AS bar_time,
@@ -181,14 +292,14 @@ class OHLCQuery:
             MIN(price) AS low,
             LAST(price ORDER BY datetime) AS close
         FROM '{matched_price_file}'
-        WHERE tickersymbol = '{ticker}'
-            AND datetime >= '{start_dt}'
-            AND datetime < '{end_dt}'
+        WHERE tickersymbol = ?
+            AND datetime >= ?
+            AND datetime < ?
         GROUP BY bar_time, tickersymbol
         ORDER BY bar_time
         """
 
-        return sql
+        return sql, params
 
     def __repr__(self) -> str:
         """String representation."""
