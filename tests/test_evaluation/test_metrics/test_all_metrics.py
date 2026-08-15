@@ -46,7 +46,8 @@ class TestReturnMetrics:
         """Test Sharpe ratio with all zero returns."""
         returns = [Decimal('0'), Decimal('0'), Decimal('0')]
         sharpe = metrics.sharpe_ratio(returns)
-        assert sharpe == Decimal('0')
+        # Zero dispersion: undefined, not zero. See plutus.evaluation.contract.
+        assert sharpe is None
 
     def test_sortino_ratio_positive(self, simple_returns):
         """Test Sortino ratio with mixed returns."""
@@ -64,8 +65,10 @@ class TestReturnMetrics:
             min_acceptable_return=Decimal('0.0'),
             annualization_factor=252
         )
-        # With all returns above MAR, sortino should be very high or Inf
-        assert sortino >= Decimal('0')
+        # All returns above MAR leaves no downside deviation to divide by,
+        # so the ratio is undefined. It must not be Infinity: that cannot be
+        # serialised to JSON.
+        assert sortino is None
 
     def test_calmar_ratio(self, simple_returns):
         """Test Calmar ratio."""
@@ -89,8 +92,8 @@ class TestReturnMetrics:
     def test_omega_ratio_positive(self, positive_returns):
         """Test Omega ratio with positive returns."""
         omega = metrics.omega_ratio(positive_returns, threshold=Decimal('0.0'))
-        # All returns above threshold, should be very high or Inf
-        assert omega >= Decimal('1.0')
+        # No losses below the threshold: no denominator, so undefined.
+        assert omega is None
 
     def test_omega_ratio_negative(self, negative_returns):
         """Test Omega ratio with negative returns."""
@@ -121,7 +124,8 @@ class TestReturnMetrics:
             simple_returns,  # Same as benchmark
             annualization_factor=252
         )
-        assert ir == Decimal('0')
+        # Perfect tracking gives zero tracking error: undefined, not zero.
+        assert ir is None
 
     def test_information_ratio_length_mismatch(self, simple_returns):
         """Test Information ratio with mismatched lengths."""
@@ -144,7 +148,8 @@ class TestReturnMetrics:
     def test_cagr_empty(self):
         """Test CAGR with empty returns."""
         cagr_value = metrics.cagr([], annualization_factor=252)
-        assert cagr_value == Decimal('0')
+        # No observations: undefined, distinct from a flat 0% return.
+        assert cagr_value is None
 
     def test_total_return_positive(self, positive_returns):
         """Test total return with positive returns."""
@@ -161,7 +166,8 @@ class TestReturnMetrics:
     def test_total_return_empty(self):
         """Test total return with empty returns."""
         total = metrics.total_return([])
-        assert total == Decimal('0')
+        # No trades is not the same as trading and breaking even.
+        assert total is None
 
 
 class TestRiskMetrics:
@@ -204,7 +210,7 @@ class TestRiskMetrics:
     def test_value_at_risk_empty(self):
         """Test VaR with empty returns."""
         var = metrics.value_at_risk([], confidence_level=Decimal('0.95'))
-        assert var == Decimal('0')
+        assert var is None
 
     def test_conditional_var_95(self, returns_with_outliers):
         """Test CVaR at 95% confidence."""
@@ -224,7 +230,7 @@ class TestRiskMetrics:
     def test_conditional_var_empty(self):
         """Test CVaR with empty returns."""
         cvar = metrics.conditional_value_at_risk([], confidence_level=Decimal('0.95'))
-        assert cvar == Decimal('0')
+        assert cvar is None
 
     def test_annualized_volatility(self, returns_with_outliers):
         """Test annualized volatility."""
@@ -238,7 +244,8 @@ class TestRiskMetrics:
     def test_volatility_single_value(self):
         """Test volatility with single value."""
         vol = metrics.annualized_volatility([Decimal('0.01')], annualization_factor=252)
-        assert vol == Decimal('0')
+        # One observation gives no dispersion: undefined, not zero volatility.
+        assert vol is None
 
     def test_downside_deviation(self, returns_with_outliers):
         """Test downside deviation."""
@@ -263,7 +270,7 @@ class TestRiskMetrics:
     def test_downside_deviation_empty(self):
         """Test downside deviation with empty returns."""
         dd = metrics.downside_deviation([], Decimal('0.0'), 252)
-        assert dd == Decimal('0')
+        assert dd is None
 
 
 class TestDrawdownMetrics:
@@ -297,7 +304,8 @@ class TestDrawdownMetrics:
     def test_maximum_drawdown_empty(self):
         """Test maximum drawdown with empty returns."""
         max_dd = metrics.maximum_drawdown([])
-        assert max_dd == Decimal('0')
+        # Empty input is undefined; a series that never fell measures 0.
+        assert max_dd is None
 
     def test_average_drawdown(self, returns_with_drawdown):
         """Test average drawdown calculation."""
@@ -314,7 +322,7 @@ class TestDrawdownMetrics:
     def test_average_drawdown_empty(self):
         """Test average drawdown with empty returns."""
         avg_dd = metrics.average_drawdown([])
-        assert avg_dd == Decimal('0')
+        assert avg_dd is None
 
     def test_average_drawdown_duration(self, returns_with_drawdown):
         """Test average drawdown duration calculation."""
@@ -325,7 +333,7 @@ class TestDrawdownMetrics:
     def test_average_drawdown_duration_empty(self):
         """Test average drawdown duration with empty returns."""
         avg_duration = metrics.average_drawdown_duration([])
-        assert avg_duration == Decimal('0')
+        assert avg_duration is None
 
     def test_longest_drawdown_duration(self, returns_with_drawdown):
         """Test longest drawdown duration calculation."""
@@ -336,7 +344,7 @@ class TestDrawdownMetrics:
     def test_longest_drawdown_duration_empty(self):
         """Test longest drawdown duration with empty returns."""
         longest = metrics.longest_drawdown_duration([])
-        assert longest == 0
+        assert longest is None
 
     def test_get_drawdown_periods(self, returns_with_drawdown):
         """Test get_drawdown_periods function."""

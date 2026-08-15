@@ -4,9 +4,11 @@
 
 [![Python](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-205%20passing-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/tests-428%20passing-brightgreen.svg)]()
 
-PLUTUS is a data analytics framework for Vietnamese stock market with **three ways to access 21GB of historical data (2021-2022)**: Python API, command-line tools, and natural language queries through LLM integration.
+PLUTUS is a data analytics framework for the Vietnamese stock market with **three ways to access a 21 GB historical archive**: Python API, command-line tools, and natural language queries through LLM integration.
+
+Daily bars span **2000-07-28 to 2022-12-30** (2,511,874 rows across 1,725 tickers); tick-level data covers **2020-12 to 2022-12**. Every figure in this README is reproducible with `python reproduce_measurements.py --data-root <path>`.
 
 ---
 
@@ -14,12 +16,12 @@ PLUTUS is a data analytics framework for Vietnamese stock market with **three wa
 
 PLUTUS provides **zero-setup access** to Vietnamese market data without database installation:
 
-- **📊 Rich Dataset**: 21GB tick & daily data from HSX, HNX, UPCOM (2021-2022)
+- **📊 Rich Dataset**: 21 GB raw archive from HSX, HNX, UPCOM — 23 years of daily bars (2000-2022), tick-level from 2020-12
 - **🚀 Zero Setup**: Query CSV files directly using DuckDB (no database required)
-- **⚡ High Performance**: Optional Parquet optimization for 10-100x faster queries
+- **⚡ High Performance**: Optional Parquet conversion — 10-30x faster on real queries, 81.8% smaller
 - **🔧 Triple Interface**: Python API + CLI + LLM integration (MCP)
 - **🤖 AI-Powered**: Query data using natural language through Claude, Gemini, or other MCP clients
-- **✅ Production Ready**: 205+ tests, comprehensive documentation
+- **✅ Production Ready**: 428 tests, comprehensive documentation
 
 ---
 
@@ -274,12 +276,19 @@ Try these queries in your MCP client:
 
 ## Dataset
 
-Plutus requires the **hermes-offline-market-data-pre-2023** dataset (~21GB):
+Plutus requires the **hermes-offline-market-data-pre-2023** dataset (21.0 GB as raw CSV):
 
-- **Coverage**: 2021-2022 (2 years)
+- **Daily bars**: 2000-07-28 to 2022-12-30 — 2,511,874 rows, 1,725 tickers
+- **Tick data**: 2020-12-02 to 2022-12-30 — 41.3M matched trades
+- **Order book**: best bid/ask prices at depth levels 1-3 (2021-01-15 onward).
+  Bid/ask **sizes** are not populated in this release, so depth-of-book
+  liquidity cannot be measured — only prices.
+- **Foreign ownership**: 2006-12-28 to 2022-12-30 — 12.8M room observations
 - **Exchanges**: HSX, HNX, UPCOM
-- **Data Types**: Tick-level intraday + daily aggregations
-- **Format**: CSV files (optionally convert to Parquet for 10-100x faster queries)
+- **Format**: CSV files (optionally convert to Parquet)
+
+A daily-bars-only deployment is supported: Plutus validates each table at
+query time, so the absence of the tick archive only affects tick queries.
 
 📧 **Contact [ALGOTRADE](https://algotrade.vn) for dataset access**
 
@@ -290,14 +299,27 @@ Plutus requires the **hermes-offline-market-data-pre-2023** dataset (~21GB):
 Out of the box, Plutus queries CSV files directly (zero setup). For production use:
 
 ```bash
-# Convert to Parquet (10-100x faster, 60% smaller)
+# Convert to Parquet
 python -m plutus.datahub.cli_optimize optimize --data-root /path/to/dataset
 ```
 
-**Benefits:**
-- 10-100x faster queries
-- 60% smaller storage footprint
-- Metadata caching for instant field lookups
+**Measured benefits** (via `reproduce_measurements.py`, `quote_close`):
+
+| Query shape | Speedup |
+|---|---|
+| Full scan (`count`, `avg`) | 23.0x |
+| Filtered (`WHERE tickersymbol = ...`) | 29.8x |
+| Group-by (per-ticker aggregate) | 10.3x |
+| Row count only | 190.4x |
+
+The row-count figure is reported separately on purpose: Parquet answers it
+from footer statistics without reading row data, so it is not a general query
+speedup and should not be quoted as one. Expect **10-30x** on queries that
+actually read data.
+
+Storage: **81.8% smaller** across the 29 tables present in both formats
+(912.3 MB CSV to 166.2 MB Parquet). Metadata caching gives instant field
+lookups.
 
 📖 **[Performance Guide](src/plutus/datahub/docs/DATA_OPTIMIZATION_GUIDE.md)**
 
@@ -306,7 +328,7 @@ python -m plutus.datahub.cli_optimize optimize --data-root /path/to/dataset
 ## Requirements
 
 - **Python**: 3.12 or higher
-- **Dataset**: hermes-offline-market-data-pre-2023 (21GB)
+- **Dataset**: hermes-offline-market-data-pre-2023 (21.0 GB raw CSV)
 - **Dependencies**: Automatically installed via pip
   - DuckDB (query engine)
   - PyArrow (Parquet support)
@@ -317,8 +339,8 @@ python -m plutus.datahub.cli_optimize optimize --data-root /path/to/dataset
 
 ## Project Status
 
-- **Version**: 1.0.0 (October 2025)
-- **Tests**: 205/205 passing ✅
+- **Version**: see `plutus.__version__` (single source: `pyproject.toml`)
+- **Tests**: 428/428 passing ✅
 - **Production Ready**: DataHub + MCP Server
 
 **Current Features:**

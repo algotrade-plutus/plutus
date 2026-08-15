@@ -40,6 +40,21 @@ class VietnamMarketConstant:
     """A daily trading limit is the maximum price range limit that a security is
     allowed to fluctuate in one trading session"""
 
+    TRADING_DAYS_PER_YEAR = 250
+    """Trading sessions in a Vietnamese calendar year.
+
+    Measured over 2010-2022 from the exchange calendar in this corpus: the
+    median is 250 sessions, with a range of 247-252. The 252 figure carried by
+    most libraries is the NYSE convention; applying it here overstates every
+    annualized metric by roughly 0.40%, because annualization scales with
+    sqrt(periods) or periods.
+
+    Used as the default `annualization_factor` throughout
+    :mod:`plutus.evaluation`. It remains overridable per call for non-daily
+    data (12 for monthly, 1 for annual) or for comparison against results
+    computed under the NYSE convention.
+    """
+
     TICK_SIZE = {
         DS: Decimal('0.1'),
         HNX: Decimal('0.1'),

@@ -12,7 +12,13 @@ from decimal import Decimal
 from typing import List, Dict, Any, Optional
 
 # Import metric functions from metrics module
+from plutus.core.constant import VietnamMarketConstant
 from plutus.evaluation import metrics
+
+#: Default periods per year. The Vietnamese calendar runs a median 250
+#: sessions (2010-2022, range 247-252), not the NYSE's 252; see
+#: VietnamMarketConstant.TRADING_DAYS_PER_YEAR.
+DEFAULT_ANNUALIZATION = VietnamMarketConstant.TRADING_DAYS_PER_YEAR
 
 
 class PerformanceEvaluator:
@@ -25,7 +31,7 @@ class PerformanceEvaluator:
     Attributes:
         returns: List of period returns
         num_return: Number of return periods
-        annualized_factor: Annualization factor (252 for daily, 12 for monthly, 1 for annual)
+        annualized_factor: Annualization factor (250 for daily VN, 12 for monthly, 1 for annual)
         risk_free_return: Annualized risk-free return rate (default: 3%)
         minimal_acceptable_return: Minimal acceptable return for Sortino (default: 7%)
         return_mean: Mean of returns (computed on-demand)
@@ -36,11 +42,34 @@ class PerformanceEvaluator:
         >>> returns = [Decimal('0.01'), Decimal('0.02'), Decimal('-0.01')]
         >>> evaluator = PerformanceEvaluator.from_returns(
         ...     returns=returns,
-        ...     annualization_factor=252,
+        ...     annualization_factor=250,
         ...     risk_free_rate=Decimal('0.03')
         ... )
         >>> print(f"Sharpe Ratio: {evaluator.sharpe_ratio:.4f}")
         >>> print(f"Max Drawdown: {evaluator.maximum_drawdown:.4f}")
+
+    Note:
+        **Undefined metrics return ``None``, never ``0`` and never
+        ``Infinity``.** A metric is undefined when its inputs do not determine
+        it — an empty return series, or a zero denominator such as a constant
+        series fed to Sharpe. ``0`` would be indistinguishable from a strategy
+        that traded and broke even, and ``Infinity`` cannot be serialised to
+        JSON. See :mod:`plutus.evaluation.contract`.
+
+    Note:
+        **The defaults are Vietnamese-market defaults and are load-bearing.**
+        Comparing output against externally published figures requires
+        matching them explicitly, because they differ from common conventions:
+
+        * ``annualization_factor=250`` — the measured median Vietnamese
+          trading year (2010-2022, range 247-252). Most libraries default to
+          the NYSE's 252, which overstates annualized metrics by ~0.40%.
+        * ``risk_free_return=0.03`` — 3%. Published Vietnamese strategy
+          results often assume 6%, which materially changes Sharpe.
+        * ``minimal_acceptable_return=0.07`` — 7%, used as the Sortino MAR.
+
+        Undocumented mismatched defaults are a common source of metrics that
+        silently disagree with published ones.
     """
 
     def __init__(
@@ -54,7 +83,7 @@ class PerformanceEvaluator:
 
         Args:
             returns: List of period returns (Decimal values)
-            annualized_factor: Annualization factor (252 for daily, 12 for monthly, 1 for annual)
+            annualized_factor: Annualization factor (250 for daily VN, 12 for monthly, 1 for annual)
             risk_free_return: Annualized risk-free return rate
             minimal_acceptable_return: Minimal acceptable return for Sortino ratio
 
@@ -80,7 +109,7 @@ class PerformanceEvaluator:
     def from_returns(
         cls,
         returns: List[Decimal],
-        annualization_factor: int = 252,
+        annualization_factor: int = DEFAULT_ANNUALIZATION,
         risk_free_rate: Decimal = Decimal('0.03'),
         min_acceptable_return: Decimal = Decimal('0.07')
     ) -> 'PerformanceEvaluator':
@@ -90,7 +119,7 @@ class PerformanceEvaluator:
 
         Args:
             returns: List of period returns
-            annualization_factor: Number of periods per year (252 for daily, 12 for monthly, 1 for annual)
+            annualization_factor: Number of periods per year (250 for daily VN, 12 for monthly, 1 for annual)
             risk_free_rate: Annualized risk-free return rate
             min_acceptable_return: Minimal acceptable return for Sortino ratio
 
@@ -102,7 +131,7 @@ class PerformanceEvaluator:
             >>> returns = [Decimal('0.01'), Decimal('0.02'), Decimal('-0.01')]
             >>> evaluator = PerformanceEvaluator.from_returns(
             ...     returns=returns,
-            ...     annualization_factor=252,
+            ...     annualization_factor=250,
             ...     risk_free_rate=Decimal('0.03')
             ... )
         """
@@ -177,7 +206,7 @@ class PerformanceEvaluator:
             self._cache['longest_drawdown_period'] = self._get_longest_drawdown_period()
         return self._cache['longest_drawdown_period']
 
-    def _get_sharpe_ratio(self, risk_free_return: Decimal) -> Decimal:
+    def _get_sharpe_ratio(self, risk_free_return: Decimal) -> Optional[Decimal]:
         """Compute Sharpe ratio.
 
         Args:
@@ -186,15 +215,17 @@ class PerformanceEvaluator:
         Returns:
             Annualized Sharpe ratio
         """
-        if len(self.returns) <= 1 or all(r == Decimal('0') for r in self.returns):
-            return Decimal('0')
+        # Undefined without dispersion to divide by; see
+        # plutus.evaluation.contract.
+        if len(self.returns) <= 1 or self.return_std == 0:
+            return None
 
         return (
             self.annualized_factor**Decimal('0.5') *
             (self.return_mean - risk_free_return/self.annualized_factor) / self.return_std
         )
 
-    def _get_sortino_ratio(self, minimal_acceptable_return: Decimal) -> Decimal:
+    def _get_sortino_ratio(self, minimal_acceptable_return: Decimal) -> Optional[Decimal]:
         """Compute Sortino ratio.
 
         Args:
@@ -203,19 +234,22 @@ class PerformanceEvaluator:
         Returns:
             Annualized Sortino ratio
         """
-        if len(self.returns) <= 1 or all(r == Decimal('0') for r in self.returns):
-            return Decimal('0')
+        if len(self.returns) <= 1:
+            return None
 
         downside_deviation = (
             statistics.mean(
                 [min(Decimal(0), r - minimal_acceptable_return / self.annualized_factor)**2 for r in self.returns]
             ) ** Decimal('0.5')
         )
+        # No downside deviation leaves no denominator: undefined, not Infinity.
+        if downside_deviation == 0:
+            return None
+
         return (
             self.annualized_factor**Decimal('0.5') *
             (self.return_mean - minimal_acceptable_return/self.annualized_factor) /
             downside_deviation
-            if downside_deviation > 0 else Decimal('Inf')
         )
 
     def _get_cumulative_performances(self) -> List[Decimal]:

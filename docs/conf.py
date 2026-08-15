@@ -16,8 +16,13 @@ sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 project = 'Plutus'
 copyright = '2025, Dan (ALGOTRADE)'
 author = 'Dan (dan@algotrade.vn)'
-release = '0.2.5'
-version = '0.2.5.20251022'
+# Derived from the package, which derives from pyproject.toml. Do not hard-code
+# a version here: three independent copies previously disagreed (pyproject
+# 0.2.5.202510rc, docs 0.2.5 / 0.2.5.20251022, README 1.0.0).
+from plutus import __version__ as _plutus_version  # noqa: E402
+
+release = _plutus_version
+version = _plutus_version
 
 # -- General configuration ---------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#general-configuration

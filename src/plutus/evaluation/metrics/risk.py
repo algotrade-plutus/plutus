@@ -6,13 +6,18 @@ Conditional VaR, and volatility measures.
 
 import statistics
 from decimal import Decimal
-from typing import List
+from typing import List, Optional
+
+from plutus.core.constant import VietnamMarketConstant
+
+#: See VietnamMarketConstant.TRADING_DAYS_PER_YEAR (median 250 VN sessions).
+DEFAULT_ANNUALIZATION = VietnamMarketConstant.TRADING_DAYS_PER_YEAR
 
 
 def value_at_risk(
     returns: List[Decimal],
     confidence_level: Decimal = Decimal('0.95')
-) -> Decimal:
+) -> Optional[Decimal]:
     """Calculate Value at Risk (VaR).
 
     VaR estimates the maximum loss over a given time period at a
@@ -37,7 +42,7 @@ def value_at_risk(
         >>> value_at_risk(returns, confidence_level=Decimal('0.99'))  # 99% VaR
     """
     if len(returns) == 0:
-        return Decimal('0')
+        return None
 
     # Sort returns in ascending order
     sorted_returns = sorted(returns)
@@ -55,7 +60,7 @@ def value_at_risk(
 def conditional_value_at_risk(
     returns: List[Decimal],
     confidence_level: Decimal = Decimal('0.95')
-) -> Decimal:
+) -> Optional[Decimal]:
     """Calculate Conditional Value at Risk (CVaR) / Expected Shortfall.
 
     CVaR measures the expected loss given that the loss exceeds VaR.
@@ -79,10 +84,12 @@ def conditional_value_at_risk(
         >>> conditional_value_at_risk(returns, confidence_level=Decimal('0.95'))
     """
     if len(returns) == 0:
-        return Decimal('0')
+        return None
 
     # Calculate VaR
     var = value_at_risk(returns, confidence_level)
+    if var is None:
+        return None
 
     # Get all returns worse than VaR
     tail_returns = [r for r in returns if r <= var]
@@ -96,15 +103,15 @@ def conditional_value_at_risk(
 
 def annualized_volatility(
     returns: List[Decimal],
-    annualization_factor: int = 252
-) -> Decimal:
+    annualization_factor: int = DEFAULT_ANNUALIZATION
+) -> Optional[Decimal]:
     """Calculate annualized volatility (standard deviation).
 
     Measures the variability of returns, indicating risk/uncertainty.
 
     Args:
         returns: List of period returns
-        annualization_factor: Periods per year (252=daily, 12=monthly, 1=annual)
+        annualization_factor: Periods per year (250=daily VN, 12=monthly, 1=annual)
 
     Returns:
         Annualized volatility
@@ -118,10 +125,11 @@ def annualized_volatility(
         Typical stocks: 15-30% annual volatility
 
     Example:
-        >>> annualized_volatility(returns, annualization_factor=252)
+        >>> annualized_volatility(returns, annualization_factor=250)
     """
+    # Dispersion needs at least two observations.
     if len(returns) <= 1:
-        return Decimal('0')
+        return None
 
     std_return = statistics.stdev(returns)
 
@@ -132,8 +140,8 @@ def annualized_volatility(
 def downside_deviation(
     returns: List[Decimal],
     min_acceptable_return: Decimal = Decimal('0.0'),
-    annualization_factor: int = 252
-) -> Decimal:
+    annualization_factor: int = DEFAULT_ANNUALIZATION
+) -> Optional[Decimal]:
     """Calculate annualized downside deviation.
 
     Similar to volatility but only considers returns below a threshold,
@@ -142,7 +150,7 @@ def downside_deviation(
     Args:
         returns: List of period returns
         min_acceptable_return: Minimum acceptable return/MAR (default: 0%)
-        annualization_factor: Periods per year (252=daily, 12=monthly, 1=annual)
+        annualization_factor: Periods per year (250=daily VN, 12=monthly, 1=annual)
 
     Returns:
         Annualized downside deviation
@@ -155,10 +163,10 @@ def downside_deviation(
         Used in Sortino ratio calculation
 
     Example:
-        >>> downside_deviation(returns, min_acceptable_return=Decimal('0.0'), annualization_factor=252)
+        >>> downside_deviation(returns, min_acceptable_return=Decimal('0.0'), annualization_factor=250)
     """
     if len(returns) == 0:
-        return Decimal('0')
+        return None
 
     # Adjust MAR to period frequency
     period_mar = min_acceptable_return / Decimal(str(annualization_factor))

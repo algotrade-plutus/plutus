@@ -265,9 +265,21 @@ class TestGetAvailableFields:
         assert "bid_price" in field_names
         assert "ask_price" in field_names
 
-        # Verify order book fields have depth levels
+        # Order book prices carry depth levels 1-3. The dataset holds exactly
+        # three levels; advertising ten invited requests that return nothing.
         bid_price = next(f for f in result["intraday_fields"] if f["name"] == "bid_price")
-        assert bid_price["depth_levels"] == list(range(1, 11))
+        assert bid_price["depth_levels"] == [1, 2, 3]
+
+        # Sizes are known to the library but unpopulated in this release, and
+        # the description must say so rather than let a caller discover it by
+        # getting empty results back.
+        for name in ("bid_size", "ask_size"):
+            field = next(f for f in result["intraday_fields"] if f["name"] == name)
+            assert "NOT POPULATED" in field["description"]
+
+        # Every field reports whether this deployment can actually serve it.
+        assert all("available" in f for f in result["intraday_fields"])
+        assert "unavailable_fields" in result
 
 
 class TestGetQueryStatistics:

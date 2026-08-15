@@ -1,6 +1,11 @@
 """Plutus Data Analytics Interface.
 
-Zero-setup analytics library for Vietnamese market data (21GB dataset).
+Zero-setup analytics library for Vietnamese market data.
+
+The reference corpus is 21.0 GB as raw CSV, or 554.6 MB once converted to
+Parquet (81.8% smaller across comparable tables). Daily bars span 2000-07-28
+to 2022-12-30; tick data begins 2020-12-02. Regenerate these figures with
+`reproduce_measurements.py`.
 Uses DuckDB for high-performance SQL queries on CSV/Parquet files without import.
 
 Example:

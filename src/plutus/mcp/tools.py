@@ -317,27 +317,35 @@ def register_tools(mcp, config: MCPServerConfig) -> None:
                 },
                 {
                     "name": "bid_price",
-                    "description": "Bid order book price",
+                    "description": "Bid order book price (depth 1-3)",
                     "category": "order_book",
-                    "depth_levels": list(range(1, 11))
+                    "depth_levels": [1, 2, 3]
                 },
                 {
                     "name": "ask_price",
-                    "description": "Ask order book price",
+                    "description": "Ask order book price (depth 1-3)",
                     "category": "order_book",
-                    "depth_levels": list(range(1, 11))
+                    "depth_levels": [1, 2, 3]
                 },
                 {
                     "name": "bid_size",
-                    "description": "Bid order book size/quantity",
+                    "description": (
+                        "Bid order book size/quantity. NOT POPULATED in this "
+                        "dataset release: the table exists but holds zero rows, "
+                        "so depth-of-book liquidity cannot be measured."
+                    ),
                     "category": "order_book",
-                    "depth_levels": list(range(1, 11))
+                    "depth_levels": [1, 2, 3]
                 },
                 {
                     "name": "ask_size",
-                    "description": "Ask order book size/quantity",
+                    "description": (
+                        "Ask order book size/quantity. NOT POPULATED in this "
+                        "dataset release: the table exists but holds zero rows, "
+                        "so depth-of-book liquidity cannot be measured."
+                    ),
                     "category": "order_book",
-                    "depth_levels": list(range(1, 11))
+                    "depth_levels": [1, 2, 3]
                 },
                 {
                     "name": "open_price",
@@ -406,10 +414,29 @@ def register_tools(mcp, config: MCPServerConfig) -> None:
                 }
             ]
 
+            # Mark each field with what this deployment can actually serve.
+            # Without this an LLM reading the list will confidently request a
+            # field that returns nothing, with no way to tell why.
+            for field in intraday_fields + aggregation_fields:
+                field["available"] = datahub_config.has_field(field["name"])
+
+            unavailable = sorted(
+                f["name"] for f in intraday_fields + aggregation_fields
+                if not f["available"]
+            )
+
             return {
                 "intraday_fields": intraday_fields,
                 "aggregation_fields": aggregation_fields,
-                "note": "For order book fields with depth_levels, append _1 to _10 (e.g., bid_price_1, bid_price_2, ...)"
+                "unavailable_fields": unavailable,
+                "note": (
+                    "Order book fields carry depth levels 1-3; append the level "
+                    "to the field name (e.g. bid_price_1). Check the `available` "
+                    "flag before querying: a field can be known to the library "
+                    "but absent from this dataset root. bid_size/ask_size are "
+                    "known but hold no rows in this release, so only order book "
+                    "*prices* are usable."
+                )
             }
 
         except Exception as e:

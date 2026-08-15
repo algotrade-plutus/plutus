@@ -27,7 +27,7 @@ def create_parser() -> argparse.ArgumentParser:
     """Create argument parser for CLI."""
     parser = argparse.ArgumentParser(
         prog='plutus-datahub',
-        description='Query Vietnamese market data (21GB dataset) without database installation',
+        description='Query Vietnamese market data (21 GB raw archive) without database installation',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:

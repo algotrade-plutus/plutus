@@ -5,10 +5,10 @@ average drawdown, and drawdown duration analysis.
 """
 
 from decimal import Decimal
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 
-def maximum_drawdown(returns: List[Decimal]) -> Decimal:
+def maximum_drawdown(returns: List[Decimal]) -> Optional[Decimal]:
     """Calculate maximum drawdown (optimized O(n) algorithm).
 
     Maximum drawdown is the largest peak-to-trough decline in cumulative returns.
@@ -29,8 +29,10 @@ def maximum_drawdown(returns: List[Decimal]) -> Decimal:
     Example:
         >>> maximum_drawdown(returns)
     """
+    # An empty series has no drawdown to measure. This is distinct from a
+    # series that never fell below its peak, which genuinely measures 0.
     if len(returns) == 0:
-        return Decimal('0')
+        return None
 
     # Build cumulative returns
     cumulative = [Decimal('1')]
@@ -49,7 +51,7 @@ def maximum_drawdown(returns: List[Decimal]) -> Decimal:
     return max_drawdown
 
 
-def average_drawdown(returns: List[Decimal]) -> Decimal:
+def average_drawdown(returns: List[Decimal]) -> Optional[Decimal]:
     """Calculate average drawdown.
 
     Average of all drawdowns (periods when below previous peak).
@@ -67,8 +69,10 @@ def average_drawdown(returns: List[Decimal]) -> Decimal:
     Example:
         >>> average_drawdown(returns)
     """
+    # An empty series has no drawdown to measure. This is distinct from a
+    # series that never fell below its peak, which genuinely measures 0.
     if len(returns) == 0:
-        return Decimal('0')
+        return None
 
     # Build cumulative returns
     cumulative = [Decimal('1')]
@@ -92,7 +96,7 @@ def average_drawdown(returns: List[Decimal]) -> Decimal:
     return sum(drawdowns) / Decimal(str(len(drawdowns)))
 
 
-def average_drawdown_duration(returns: List[Decimal]) -> Decimal:
+def average_drawdown_duration(returns: List[Decimal]) -> Optional[Decimal]:
     """Calculate average drawdown duration.
 
     Average number of periods to recover from drawdowns.
@@ -110,8 +114,10 @@ def average_drawdown_duration(returns: List[Decimal]) -> Decimal:
     Example:
         >>> average_drawdown_duration(returns)
     """
+    # An empty series has no drawdown to measure. This is distinct from a
+    # series that never fell below its peak, which genuinely measures 0.
     if len(returns) == 0:
-        return Decimal('0')
+        return None
 
     # Build cumulative returns
     cumulative = [Decimal('1')]
@@ -150,7 +156,7 @@ def average_drawdown_duration(returns: List[Decimal]) -> Decimal:
     return Decimal(str(sum(durations))) / Decimal(str(len(durations)))
 
 
-def longest_drawdown_duration(returns: List[Decimal]) -> int:
+def longest_drawdown_duration(returns: List[Decimal]) -> Optional[int]:
     """Calculate longest drawdown duration.
 
     Maximum number of periods between peak and recovery.
@@ -169,7 +175,7 @@ def longest_drawdown_duration(returns: List[Decimal]) -> int:
         >>> longest_drawdown_duration(returns)
     """
     if len(returns) == 0:
-        return 0
+        return None
 
     # Build cumulative returns
     cumulative = [Decimal('1')]
