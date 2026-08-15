@@ -137,7 +137,7 @@ def cmd_optimize(args):
     print("\nYour dataset is now optimized for maximum performance!")
     print("\nNext steps:")
     print("  1. Update config.cfg: PREFER_PARQUET = true")
-    print("  2. Run queries - they should be 10-100x faster!")
+    print("  2. Run queries - expect 10-30x faster on queries that read data")
     print("=" * 60)
 
     return 0

@@ -489,5 +489,5 @@ echo "Downloaded FPT data for $YESTERDAY"
 ## See Also
 
 - **Python API**: See [examples/datahub_ohlc_example.py](../../../examples/datahub_ohlc_example.py)
-- **Performance Optimization**: See [DATA_OPTIMIZATION_GUIDE.md](DATA_OPTIMIZATION_GUIDE.md) - Make your queries 10-100x faster
+- **Performance Optimization**: See [DATA_OPTIMIZATION_GUIDE.md](DATA_OPTIMIZATION_GUIDE.md) - Make your queries 10-30x faster
 - **Project README**: See [README.md](../../../README.md) - Installation, configuration, and quick start guide

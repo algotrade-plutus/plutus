@@ -4,7 +4,7 @@
 
 [![Python](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-428%20passing-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/tests-444%20passing-brightgreen.svg)]()
 
 PLUTUS is a data analytics framework for the Vietnamese stock market with **three ways to access a 21 GB historical archive**: Python API, command-line tools, and natural language queries through LLM integration.
 
@@ -21,7 +21,7 @@ PLUTUS provides **zero-setup access** to Vietnamese market data without database
 - **⚡ High Performance**: Optional Parquet conversion — 10-30x faster on real queries, 81.8% smaller
 - **🔧 Triple Interface**: Python API + CLI + LLM integration (MCP)
 - **🤖 AI-Powered**: Query data using natural language through Claude, Gemini, or other MCP clients
-- **✅ Production Ready**: 428 tests, comprehensive documentation
+- **✅ Production Ready**: 444 tests, comprehensive documentation
 
 ---
 
@@ -294,6 +294,53 @@ query time, so the absence of the tick archive only affects tick queries.
 
 ---
 
+## Dataset Audit
+
+Real market data carries defects. Plutus characterizes them rather than
+leaving each analysis to rediscover them:
+
+```bash
+python -m plutus.data.audit --data-root /path/to/dataset
+python -m plutus.data.audit --data-root /path/to/dataset --json report.json
+```
+
+Eight checks, with the incidence measured on the reference corpus:
+
+| Check | Invariant | Violations |
+|---|---|---|
+| `price_band_invariant` | ceiling ≥ floor | 1,272 rows on 3 days (0.155%) |
+| `ohlc_invariants` | high ≥ max(open, close), low ≤ min(open, close) | 327 + 99 of 3,877,981 |
+| `non_vietnamese_symbols` | no rows before the 2000-07-28 HSX opening | 33,210 (all `SPX`) |
+| `non_session_timestamps` | no weekend observations | 3,526 |
+| `orphan_symbols` | quoted symbols exist in the ticker master | 87 of 1,988 |
+| `empty_tables` | present tables hold rows | 4 (bid/ask sizes, total bid/ask) |
+| `ragged_coverage` | *(reported)* | 15 of 28 tables start in 2021 |
+| `vn30_survivorship` | *(reported)* | 53 distinct members across 12 × 30 snapshots |
+
+Queries apply the two row-level exclusions by default via `strict=True`:
+
+```python
+# Default: pre-exchange and weekend rows excluded
+bars = query.fetch('VTL', '2000-01-01', '2023-01-01', interval='1d')
+
+# Opt out to see the corpus unfiltered
+raw = query.fetch('VTL', '2000-01-01', '2023-01-01', interval='1d', strict=False)
+```
+
+The inverted price bands are exposed as data rather than filtered
+automatically, because OHLC queries do not join the band tables:
+
+```python
+from plutus.data.audit import DataAudit
+excluded = DataAudit(data_root).inverted_band_exclusions()  # 1,272 (date, ticker) pairs
+```
+
+Two of these defect classes — the inverted bands and the OHLC-invariant
+violations — are independent of each other, so a row can fail one and pass the
+other.
+
+---
+
 ## Performance Optimization
 
 Out of the box, Plutus queries CSV files directly (zero setup). For production use:
@@ -340,7 +387,7 @@ lookups.
 ## Project Status
 
 - **Version**: see `plutus.__version__` (single source: `pyproject.toml`)
-- **Tests**: 428/428 passing ✅
+- **Tests**: 444/444 passing ✅
 - **Production Ready**: DataHub + MCP Server
 
 **Current Features:**

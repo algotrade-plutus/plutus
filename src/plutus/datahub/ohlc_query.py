@@ -59,7 +59,8 @@ class OHLCQuery:
         start_date: str,
         end_date: str,
         interval: str = '1m',
-        include_volume: bool = True
+        include_volume: bool = True,
+        strict: bool = True
     ) -> ResultIterator:
         """Fetch OHLC bars aggregated from tick data.
 
@@ -78,6 +79,14 @@ class OHLCQuery:
                 - '4h': 4-hour bars
                 - '1d': 1-day bars
             include_volume: Include volume aggregation (default: True)
+            strict: Exclude rows the dataset audit flags as unusable
+                (default: True). Specifically: observations predating the
+                exchange's 2000-07-28 opening, which are a foreign index
+                series sharing these tables, and weekend timestamps, which no
+                Vietnamese session produced. Pass ``strict=False`` to see the
+                corpus unfiltered.
+
+                Run ``python -m plutus.data.audit`` for the incidence of each.
 
         Returns:
             ResultIterator: Lazy iterator over OHLC bars
@@ -112,11 +121,11 @@ class OHLCQuery:
         # Build SQL query
         if interval == '1d':
             sql, params = self._build_daily_query(
-                ticker, start_dt, end_dt, include_volume
+                ticker, start_dt, end_dt, include_volume, strict
             )
         else:
             sql, params = self._build_ohlc_query(
-                ticker, start_dt, end_dt, interval, include_volume
+                ticker, start_dt, end_dt, interval, include_volume, strict
             )
 
         # Return lazy iterator
@@ -127,7 +136,8 @@ class OHLCQuery:
         ticker: str,
         start_dt: str,
         end_dt: str,
-        include_volume: bool
+        include_volume: bool,
+        strict: bool = True
     ) -> tuple:
         """Build SQL reading pre-computed daily bars from the daily tables.
 
@@ -193,9 +203,31 @@ class OHLCQuery:
         WHERE o.tickersymbol = ?
           AND o.datetime >= ?
           AND o.datetime < ?
+          {self._strict_predicates('o.datetime', strict)}
         ORDER BY bar_time
         """
         return self._resolve_readers(sql), params
+
+    @staticmethod
+    def _strict_predicates(column: str, strict: bool) -> str:
+        """SQL excluding rows the dataset audit flags as unusable.
+
+        Two exclusions, both measured by :mod:`plutus.data.audit`:
+
+        * observations before 2000-07-28, the date the Ho Chi Minh exchange
+          opened. Rows predating it are a foreign index series sharing these
+          tables, not Vietnamese equities.
+        * weekend timestamps, which no Vietnamese trading session produced.
+
+        Returns an empty string when `strict` is False, leaving the query
+        untouched.
+        """
+        if not strict:
+            return ""
+        return (
+            f"AND {column} >= DATE '2000-07-28'\n"
+            f"          AND dayofweek({column}) NOT IN (0, 6)"
+        )
 
     @staticmethod
     def _as_date(value: str) -> str:
@@ -225,7 +257,8 @@ class OHLCQuery:
         start_dt: str,
         end_dt: str,
         interval: str,
-        include_volume: bool
+        include_volume: bool,
+        strict: bool = True
     ) -> tuple:
         """Build SQL query for intraday OHLC aggregation from ticks.
 
@@ -268,6 +301,7 @@ class OHLCQuery:
             WHERE m.tickersymbol = ?
                 AND m.datetime >= ?
                 AND m.datetime < ?
+                {self._strict_predicates('m.datetime', strict)}
         )
         SELECT
             time_bucket(INTERVAL '{interval_sql}', datetime) AS bar_time,
@@ -295,6 +329,7 @@ class OHLCQuery:
         WHERE tickersymbol = ?
             AND datetime >= ?
             AND datetime < ?
+            {self._strict_predicates('datetime', strict)}
         GROUP BY bar_time, tickersymbol
         ORDER BY bar_time
         """

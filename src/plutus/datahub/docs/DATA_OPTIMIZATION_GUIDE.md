@@ -1,6 +1,9 @@
 # Data Optimization Guide - PLUTUS DataHub
 
-Make your queries 10-100x faster with two simple optimizations.
+Make your queries 10-30x faster with two simple optimizations.
+
+All figures below are measured on `quote_close` by `reproduce_measurements.py`
+at the repository root; re-run it to regenerate them.
 
 ---
 
@@ -27,7 +30,7 @@ python -m plutus.datahub.cli_optimize optimize --data-root /path/to/dataset
 ```
 
 This will:
-1. Convert CSV files to Parquet format (~10x faster queries, 60% smaller files)
+1. Convert CSV files to Parquet format (10-30x faster queries, 81.8% smaller files)
 2. Build metadata cache (~1000x faster ticker lookups)
 
 Total time: ~5-10 minutes for full 21GB dataset.
@@ -42,7 +45,7 @@ CSV files are slow to scan. Parquet is a columnar format optimized for analytics
 
 | Metric | CSV | Parquet | Improvement |
 |--------|-----|---------|-------------|
-| **Query Speed** | Baseline | 10-100x faster | 🚀 |
+| **Query Speed** | Baseline | 23.0x scan / 29.8x filter / 10.3x group-by | 🚀 |
 | **File Size** | 21 GB | ~8 GB | 60% reduction |
 | **Compression** | None | Snappy | Dictionary encoding |
 
@@ -482,8 +485,10 @@ print(f'✅ Prefer Parquet: {config.prefer_parquet}')
 - **Savings**: 12.6 GB (60% reduction)
 
 **Performance**:
-- **Query speed**: 10-100x faster (Parquet vs CSV)
-- **Storage efficiency**: 60% smaller files
+- **Query speed**: 23.0x full scan, 29.8x filtered, 10.3x group-by (Parquet vs
+  CSV). A bare row count is 190.4x, but Parquet answers that from footer
+  statistics without reading data, so it is not a general query speedup.
+- **Storage efficiency**: 81.8% smaller (912.3 MB -> 166.2 MB across 29 tables)
 - **No trade-offs**: Same functionality, better performance
 
 **Deployment Flexibility**:
@@ -592,7 +597,7 @@ python -m plutus.datahub.cli_optimize build-cache \
    PREFER_PARQUET = true
    ```
 
-3. **Run queries** - enjoy 10-100x speedup!
+3. **Run queries** - enjoy the 10-30x speedup!
 
 ### Production Deployment
 
