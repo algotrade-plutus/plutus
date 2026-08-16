@@ -484,6 +484,77 @@ class DataAudit:
         })
         return result
 
+    #: A ticker retaining less than this share of its raw price variation
+    #: after adjustment has lost information to rounding.
+    ADJUSTED_RETENTION_FLOOR = 0.10
+
+    def check_adjusted_price_degeneracy(self) -> CheckResult:
+        """Adjusted prices must retain the variation of their raw series.
+
+        `adjclose = close / AdjRatio`, stored upstream as `numeric(11,2)`. For
+        a heavily-adjusted, low-priced ticker the quotient rounds onto a coarse
+        grid and the series collapses: distinct daily closes become a handful
+        of repeated values, and returns computed from them are phantom or
+        undefined.
+
+        The test is relative, not absolute. Counting distinct adjusted prices
+        alone would flag illiquid tickers whose *raw* prices barely move
+        either, which is a property of the stock rather than a data defect.
+        Comparing against the raw series isolates the information actually lost
+        in adjustment.
+
+        Note this defect worsens over time: `AdjRatio` accumulates with each
+        corporate action, so a corpus re-exported later will quantize harder
+        than one cut earlier. A clean result here is worth re-checking after
+        any re-export rather than assumed to hold.
+        """
+        result = CheckResult(
+            name='adjusted_price_degeneracy',
+            description='Adjusted prices retain the raw series\' variation',
+            invariant=(
+                f'distinct(adjclose) / distinct(close) >= '
+                f'{self.ADJUSTED_RETENTION_FLOOR:.0%} per ticker'
+            ),
+        )
+        missing = self._missing('quote_adjclose', 'quote_close')
+        if missing:
+            result.ran = False
+            result.skipped_reason = f"missing tables: {missing}"
+            return result
+
+        adj_r, close_r = self._reader('quote_adjclose'), self._reader('quote_close')
+        # Restricted to tickers with enough history and enough raw variation
+        # for the ratio to mean anything.
+        rows = self._query(f"""
+            WITH a AS (
+              SELECT tickersymbol, count(*) AS n, count(DISTINCT price) AS adj_px
+              FROM {adj_r} GROUP BY 1
+            ), r AS (
+              SELECT tickersymbol, count(DISTINCT price) AS raw_px
+              FROM {close_r} GROUP BY 1
+            )
+            SELECT a.tickersymbol, a.n, r.raw_px, a.adj_px,
+                   a.adj_px::DOUBLE / r.raw_px AS retained
+            FROM a JOIN r USING (tickersymbol)
+            WHERE a.n >= 500 AND r.raw_px > 20
+            ORDER BY retained ASC
+        """)
+        result.total = len(rows)
+        degraded = [row for row in rows if row[4] < self.ADJUSTED_RETENTION_FLOOR]
+        result.violations = len(degraded)
+        result.detail['worst'] = {
+            sym: {'days': n, 'raw_distinct': raw, 'adj_distinct': adj,
+                  'retained': round(ret, 4)}
+            for sym, n, raw, adj, ret in rows[:5]
+        }
+        result.detail['degraded'] = [row[0] for row in degraded]
+
+        zeros = self._query(
+            f"SELECT count(DISTINCT tickersymbol) FROM {adj_r} WHERE price = 0"
+        )[0][0]
+        result.detail['tickers_with_zero_adjclose'] = zeros
+        return result
+
     # -- reusable exclusions ----------------------------------------------
 
     def inverted_band_exclusions(self) -> List[tuple]:
@@ -524,6 +595,7 @@ class DataAudit:
         'empty_tables': 'check_empty_tables',
         'ragged_coverage': 'check_ragged_coverage',
         'vn30_survivorship': 'check_vn30_survivorship',
+        'adjusted_price_degeneracy': 'check_adjusted_price_degeneracy',
     }
 
     def run(self, only: Optional[List[str]] = None) -> AuditReport:
@@ -594,6 +666,16 @@ def _render(report: AuditReport) -> str:
             lines.append(
                 f"  late start: {len(detail['starting_2021_or_later'])} of "
                 f"{check.total} tables begin 2021 or later"
+            )
+        if check.name == 'adjusted_price_degeneracy' and detail.get('worst'):
+            worst = next(iter(detail['worst'].items()))
+            lines.append(
+                f"  worst     : {worst[0]} retains {worst[1]['retained']:.1%} "
+                f"({worst[1]['adj_distinct']} of {worst[1]['raw_distinct']} distinct)"
+            )
+            lines.append(
+                f"  zero adj  : {detail['tickers_with_zero_adjclose']} tickers "
+                f"carry an adjclose of 0.00"
             )
         if check.name == 'vn30_survivorship':
             lines.append(

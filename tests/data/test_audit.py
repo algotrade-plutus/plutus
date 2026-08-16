@@ -248,3 +248,35 @@ def test_strict_is_the_default_and_leaves_clean_data_alone():
     )
 
     assert len(strict.to_dataframe()) == len(loose.to_dataframe()) == 18
+
+
+# --- adjusted-price degeneracy ---------------------------------------------
+
+@requires_corpus
+def test_adjusted_prices_retain_raw_variation(report):
+    """Adjustment must not round a price series onto a coarse grid.
+
+    Upstream stores adjclose as numeric(11,2). A heavily-adjusted, low-priced
+    ticker quantizes onto a 0.01 grid and its series collapses. This corpus is
+    clean at a 10% retention floor -- the worst ticker keeps ~38% -- but the
+    defect worsens as AdjRatio accumulates, so a later re-export will quantize
+    harder. This test is the tripwire for that.
+    """
+    check = _check(report, 'adjusted_price_degeneracy')
+
+    assert check.violations == 0, check.detail['degraded']
+    assert check.total > 1000
+
+
+@requires_corpus
+def test_adjusted_degeneracy_is_measured_against_the_raw_series(report):
+    """The test must be relative, not an absolute distinct-price count.
+
+    Counting distinct adjusted prices alone flags illiquid tickers whose raw
+    prices barely move either -- a property of the stock, not a data defect.
+    """
+    check = _check(report, 'adjusted_price_degeneracy')
+
+    for symbol, stats in check.detail['worst'].items():
+        assert stats['raw_distinct'] > 20, symbol
+        assert 0 <= stats['retained'] <= 1.0, symbol

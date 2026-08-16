@@ -4,7 +4,7 @@
 
 [![Python](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-446%20passing-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/tests-448%20passing-brightgreen.svg)]()
 
 PLUTUS is a data analytics framework for the Vietnamese stock market with **three ways to access a 21 GB historical archive**: Python API, command-line tools, and natural language queries through LLM integration.
 
@@ -21,7 +21,7 @@ PLUTUS provides **zero-setup access** to Vietnamese market data without database
 - **⚡ High Performance**: Optional Parquet conversion — 10-30x faster on real queries, 81.8% smaller
 - **🔧 Triple Interface**: Python API + CLI + LLM integration (MCP)
 - **🤖 AI-Powered**: Query data using natural language through Claude, Gemini, or other MCP clients
-- **✅ Production Ready**: 446 tests, comprehensive documentation
+- **✅ Production Ready**: 448 tests, comprehensive documentation
 
 ---
 
@@ -304,7 +304,7 @@ python -m plutus.data.audit --data-root /path/to/dataset
 python -m plutus.data.audit --data-root /path/to/dataset --json report.json
 ```
 
-Eight checks, with the incidence measured on the reference corpus:
+Nine checks, with the incidence measured on the reference corpus:
 
 | Check | Invariant | Violations |
 |---|---|---|
@@ -316,6 +316,7 @@ Eight checks, with the incidence measured on the reference corpus:
 | `empty_tables` | present tables hold rows | 4 (bid/ask sizes, total bid/ask) |
 | `ragged_coverage` | *(reported)* | 15 of 28 tables start in 2021 |
 | `vn30_survivorship` | *(reported)* | 53 distinct members across 12 × 30 snapshots |
+| `adjusted_price_degeneracy` | distinct(adjclose)/distinct(close) ≥ 10% | 0 of 1,517 (worst retains 38%) |
 
 Queries apply the two row-level exclusions by default via `strict=True`:
 
@@ -387,7 +388,7 @@ lookups.
 ## Project Status
 
 - **Version**: see `plutus.__version__` (single source: `pyproject.toml`)
-- **Tests**: 446/446 passing ✅
+- **Tests**: 448/448 passing ✅
 - **Production Ready**: DataHub + MCP Server
 
 **Current Features:**
