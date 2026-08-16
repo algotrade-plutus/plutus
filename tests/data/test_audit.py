@@ -264,8 +264,26 @@ def test_adjusted_prices_retain_raw_variation(report):
     """
     check = _check(report, 'adjusted_price_degeneracy')
 
-    assert check.violations == 0, check.detail['degraded']
+    # No ticker falls below the retention floor.
+    assert check.detail['degraded'] == []
     assert check.total > 1000
+
+
+@requires_corpus
+def test_zero_adjusted_prices_are_violations_not_footnotes(report):
+    """A zero adjusted price is invalid, not merely coarse.
+
+    Retention is a gradient; zero is a value that makes any return computed
+    over it a division by zero. PTG carries 891 such rows (2010-2013) in every
+    adj* table, while its raw series has none -- so this is produced by the
+    adjustment, not inherited from the source prices.
+    """
+    check = _check(report, 'adjusted_price_degeneracy')
+
+    assert check.detail['zero_valued'] == {'PTG': 891}
+    assert check.detail['zero_row_count'] == 891
+    # Counted as a violation even though nothing breaches the retention floor.
+    assert check.violations == 1
 
 
 @requires_corpus

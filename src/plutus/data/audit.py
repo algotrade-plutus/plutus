@@ -540,19 +540,27 @@ class DataAudit:
             ORDER BY retained ASC
         """)
         result.total = len(rows)
-        degraded = [row for row in rows if row[4] < self.ADJUSTED_RETENTION_FLOOR]
-        result.violations = len(degraded)
+        degraded = [row[0] for row in rows if row[4] < self.ADJUSTED_RETENTION_FLOOR]
         result.detail['worst'] = {
             sym: {'days': n, 'raw_distinct': raw, 'adj_distinct': adj,
                   'retained': round(ret, 4)}
             for sym, n, raw, adj, ret in rows[:5]
         }
-        result.detail['degraded'] = [row[0] for row in degraded]
+        result.detail['degraded'] = degraded
 
-        zeros = self._query(
-            f"SELECT count(DISTINCT tickersymbol) FROM {adj_r} WHERE price = 0"
-        )[0][0]
-        result.detail['tickers_with_zero_adjclose'] = zeros
+        # A zero adjusted price is categorically different from a coarse one.
+        # Retention is a gradient you can reason about; zero is an invalid
+        # value that makes any return over it a division by zero. It is
+        # counted as a violation in its own right, not reported as a footnote.
+        zero_rows = self._query(
+            f"SELECT tickersymbol, count(*) FROM {adj_r} WHERE price = 0 "
+            f"GROUP BY 1 ORDER BY 2 DESC"
+        )
+        zero_tickers = {sym: n for sym, n in zero_rows}
+        result.detail['zero_valued'] = zero_tickers
+        result.detail['zero_row_count'] = sum(zero_tickers.values())
+
+        result.violations = len(set(degraded) | set(zero_tickers))
         return result
 
     # -- reusable exclusions ----------------------------------------------
@@ -673,10 +681,9 @@ def _render(report: AuditReport) -> str:
                 f"  worst     : {worst[0]} retains {worst[1]['retained']:.1%} "
                 f"({worst[1]['adj_distinct']} of {worst[1]['raw_distinct']} distinct)"
             )
-            lines.append(
-                f"  zero adj  : {detail['tickers_with_zero_adjclose']} tickers "
-                f"carry an adjclose of 0.00"
-            )
+            if detail.get('zero_valued'):
+                z = ', '.join(f"{k} ({v:,} rows)" for k, v in detail['zero_valued'].items())
+                lines.append(f"  zero adj  : {z}  <- invalid, not merely coarse")
         if check.name == 'vn30_survivorship':
             lines.append(
                 f"  detail    : {detail['snapshots']} snapshots x "
