@@ -220,33 +220,97 @@ class DataAudit:
         result.detail['low_above_open_or_close'] = int(low_bad or 0)
         return result
 
-    def check_non_vietnamese_symbols(self) -> CheckResult:
-        """Tables billed as Vietnamese should not carry foreign indices.
+    #: Exchanges that make an instrument Vietnamese.
+    VIETNAM_EXCHANGES = ('HSX', 'HNX', 'HNXDS', 'UPCOM')
 
-        Rows predating the Ho Chi Minh exchange's July 2000 opening cannot be
-        Vietnamese equities. They are a foreign index series sharing the table.
+    #: The Ho Chi Minh exchange opened on this date. Nothing Vietnamese
+    #: predates it.
+    MARKET_OPENING = '2000-07-28'
+
+    def check_non_vietnamese_symbols(self) -> CheckResult:
+        """Tables billed as Vietnamese must not carry foreign instruments.
+
+        Identification is by *symbol*, not by date, and uses two independent
+        signals:
+
+        * **Exchange registration.** A ticker registered to an exchange outside
+          Vietnam is foreign whatever its dates. This is the signal that
+          matters for contemporaneous foreign data, which a date rule cannot
+          see at all.
+        * **Calendar.** A ticker with observations predating the market's
+          opening cannot be Vietnamese. This catches unregistered foreign
+          series, which carry no exchange to test.
+
+        Once a symbol is identified, **all** of its rows count as violations,
+        not merely the ones that tripped the test. An earlier date-only version
+        of this check reported a foreign index's pre-2000 tail (33,210 rows)
+        while silently passing the remaining 5,643 rows of the same instrument.
+
+        Unregistered is not the same as foreign: the VNINDEX itself and the
+        VN30F futures series carry no exchange but are Vietnamese. They are
+        reported by :meth:`check_orphan_symbols` instead.
         """
         result = CheckResult(
             name='non_vietnamese_symbols',
-            description='No pre-2000 rows: the HSX opened 2000-07-28',
-            invariant="datetime >= '2000-07-28'",
+            description='No instruments from outside the Vietnamese market',
+            invariant=(
+                f"every symbol is registered to {'/'.join(self.VIETNAM_EXCHANGES)} "
+                f"or has no observations before {self.MARKET_OPENING}"
+            ),
         )
         if self._missing('quote_close'):
             result.ran = False
             result.skipped_reason = 'missing table: quote_close'
             return result
 
-        reader = self._reader('quote_close')
-        result.violations = self._query(
-            f"SELECT count(*) FROM {reader} WHERE datetime < '2000-07-28'"
-        )[0][0]
-        result.total = self._query(f"SELECT count(*) FROM {reader}")[0][0]
-        result.detail['by_symbol'] = {
+        close_r = self._reader('quote_close')
+        ticker_r = self._reader('quote_ticker')
+
+        # Signal 1: registered to a non-Vietnamese exchange.
+        by_exchange: Dict[str, str] = {}
+        if ticker_r:
+            vn_list = ', '.join(f"'{e}'" for e in self.VIETNAM_EXCHANGES)
+            by_exchange = {
+                sym: exch for sym, exch in self._query(
+                    f"SELECT DISTINCT t.tickersymbol, t.exchangeid "
+                    f"FROM {ticker_r} t "
+                    f"WHERE t.exchangeid IS NOT NULL "
+                    f"  AND t.exchangeid NOT IN ({vn_list})"
+                )
+            }
+
+        # Signal 2: observations predating the market's opening.
+        by_calendar = [
+            row[0] for row in self._query(
+                f"SELECT DISTINCT tickersymbol FROM {close_r} "
+                f"WHERE datetime < '{self.MARKET_OPENING}'"
+            )
+        ]
+
+        foreign = sorted(set(by_exchange) | set(by_calendar))
+        result.total = self._query(f"SELECT count(*) FROM {close_r}")[0][0]
+
+        if not foreign:
+            result.violations = 0
+            result.detail.update({
+                'by_symbol': {}, 'flagged_by_exchange': {}, 'flagged_by_calendar': [],
+            })
+            return result
+
+        symbol_list = ', '.join(f"'{s}'" for s in foreign)
+        per_symbol = {
             sym: n for sym, n in self._query(
-                f"SELECT tickersymbol, count(*) FROM {reader} "
-                f"WHERE datetime < '2000-07-28' GROUP BY 1 ORDER BY 2 DESC"
+                f"SELECT tickersymbol, count(*) FROM {close_r} "
+                f"WHERE tickersymbol IN ({symbol_list}) "
+                f"GROUP BY 1 ORDER BY 2 DESC"
             )
         }
+        result.violations = sum(per_symbol.values())
+        result.detail.update({
+            'by_symbol': per_symbol,
+            'flagged_by_exchange': by_exchange,
+            'flagged_by_calendar': sorted(by_calendar),
+        })
         return result
 
     def check_non_session_timestamps(self) -> CheckResult:

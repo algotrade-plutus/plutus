@@ -4,7 +4,7 @@
 
 [![Python](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-444%20passing-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/tests-446%20passing-brightgreen.svg)]()
 
 PLUTUS is a data analytics framework for the Vietnamese stock market with **three ways to access a 21 GB historical archive**: Python API, command-line tools, and natural language queries through LLM integration.
 
@@ -21,7 +21,7 @@ PLUTUS provides **zero-setup access** to Vietnamese market data without database
 - **⚡ High Performance**: Optional Parquet conversion — 10-30x faster on real queries, 81.8% smaller
 - **🔧 Triple Interface**: Python API + CLI + LLM integration (MCP)
 - **🤖 AI-Powered**: Query data using natural language through Claude, Gemini, or other MCP clients
-- **✅ Production Ready**: 444 tests, comprehensive documentation
+- **✅ Production Ready**: 446 tests, comprehensive documentation
 
 ---
 
@@ -310,7 +310,7 @@ Eight checks, with the incidence measured on the reference corpus:
 |---|---|---|
 | `price_band_invariant` | ceiling ≥ floor | 1,272 rows on 3 days (0.155%) |
 | `ohlc_invariants` | high ≥ max(open, close), low ≤ min(open, close) | 327 + 99 of 3,877,981 |
-| `non_vietnamese_symbols` | no rows before the 2000-07-28 HSX opening | 33,210 (all `SPX`) |
+| `non_vietnamese_symbols` | every symbol registered to a VN exchange, or absent before 2000-07-28 | 38,853 (all `SPX`) |
 | `non_session_timestamps` | no weekend observations | 3,526 |
 | `orphan_symbols` | quoted symbols exist in the ticker master | 87 of 1,988 |
 | `empty_tables` | present tables hold rows | 4 (bid/ask sizes, total bid/ask) |
@@ -387,7 +387,7 @@ lookups.
 ## Project Status
 
 - **Version**: see `plutus.__version__` (single source: `pyproject.toml`)
-- **Tests**: 444/444 passing ✅
+- **Tests**: 446/446 passing ✅
 - **Production Ready**: DataHub + MCP Server
 
 **Current Features:**

@@ -100,10 +100,43 @@ def test_ohlc_invariant_violations(report):
 
 @requires_corpus
 def test_non_vietnamese_contamination(report):
-    """A foreign index series shares tables billed as Vietnamese."""
+    """A foreign index series shares tables billed as Vietnamese.
+
+    The count is every row of the offending symbol, not just the rows that
+    tripped the test. A date-only rule reported 33,210 here — the pre-2000
+    tail — while passing the same instrument's remaining 5,643 rows.
+    """
     check = _check(report, 'non_vietnamese_symbols')
 
-    assert check.detail['by_symbol'] == {'SPX': 33210}
+    assert check.detail['by_symbol'] == {'SPX': 38853}
+    # SPX carries no exchange, so only the calendar signal can catch it.
+    assert 'SPX' in check.detail['flagged_by_calendar']
+
+
+@requires_corpus
+def test_foreign_exchange_registration_is_checked(report):
+    """Contemporaneous foreign data must be catchable without a date signal.
+
+    The upstream database also carries Taiwanese (TWOTC) instruments spanning
+    2019-2024. Those fall entirely inside the Vietnamese date range, so a
+    date-based rule cannot see them. This corpus has none, but the check must
+    be structured to catch them if a future export includes them.
+    """
+    check = _check(report, 'non_vietnamese_symbols')
+
+    assert 'flagged_by_exchange' in check.detail
+    for symbol, exchange in check.detail['flagged_by_exchange'].items():
+        assert exchange not in DataAudit.VIETNAM_EXCHANGES, (symbol, exchange)
+
+
+@requires_corpus
+def test_unregistered_vietnamese_symbols_are_not_called_foreign(report):
+    """VNINDEX and the VN30F futures carry no exchange but are Vietnamese."""
+    check = _check(report, 'non_vietnamese_symbols')
+
+    flagged = set(check.detail['by_symbol'])
+    assert 'VNINDEX' not in flagged
+    assert not any(s.startswith('VN30F') for s in flagged)
 
 
 @requires_corpus
