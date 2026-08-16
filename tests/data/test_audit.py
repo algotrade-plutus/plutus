@@ -270,20 +270,34 @@ def test_adjusted_prices_retain_raw_variation(report):
 
 
 @requires_corpus
-def test_zero_adjusted_prices_are_violations_not_footnotes(report):
-    """A zero adjusted price is invalid, not merely coarse.
+def test_zero_adjusted_prices_are_disclosed_but_screened_by_liquidity(report):
+    """A zero adjusted price is invalid -- but only matters if tradeable.
 
-    Retention is a gradient; zero is a value that makes any return computed
-    over it a division by zero. PTG carries 891 such rows (2010-2013) in every
-    adj* table, while its raw series has none -- so this is produced by the
-    adjustment, not inherited from the source prices.
+    PTG carries 891 zero rows (2010-2013) in every adj* table while its raw
+    series has none, so the adjustment produces them. It also traded on 39
+    sessions out of 3,243 observations, at a median 300 shares: a delisted
+    shell, not a usable series. Its zeros are disclosed rather than counted.
+
+    Price variation is not liquidity. A shell carries its last price forward
+    for years, which looks like collapsed variation and is nothing of the
+    kind -- VTM and CMP hold 1,755 and 1,727 observations against zero
+    sessions traded.
     """
     check = _check(report, 'adjusted_price_degeneracy')
 
-    assert check.detail['zero_valued'] == {'PTG': 891}
-    assert check.detail['zero_row_count'] == 891
-    # Counted as a violation even though nothing breaches the retention floor.
-    assert check.violations == 1
+    assert check.detail['zero_valued_below_liquidity_screen'] == {'PTG': 891}
+    assert check.detail['zero_valued'] == {}
+    assert check.violations == 0
+
+
+@requires_corpus
+def test_audited_population_is_liquidity_screened(report):
+    """Only tickers that actually traded are audited."""
+    check = _check(report, 'adjusted_price_degeneracy')
+
+    assert check.detail['liquidity_screen'] == 'sessions_traded >= 250'
+    for symbol, stats in check.detail['worst'].items():
+        assert stats['sessions_traded'] >= 250, (symbol, stats)
 
 
 @requires_corpus

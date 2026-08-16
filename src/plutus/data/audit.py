@@ -488,6 +488,11 @@ class DataAudit:
     #: after adjustment has lost information to rounding.
     ADJUSTED_RETENTION_FLOOR = 0.10
 
+    #: Sessions on which a ticker must actually have traded before its price
+    #: series is worth auditing. One trading year, per
+    #: VietnamMarketConstant.TRADING_DAYS_PER_YEAR.
+    MIN_SESSIONS_TRADED = 250
+
     def check_adjusted_price_degeneracy(self) -> CheckResult:
         """Adjusted prices must retain the variation of their raw series.
 
@@ -523,8 +528,28 @@ class DataAudit:
             return result
 
         adj_r, close_r = self._reader('quote_adjclose'), self._reader('quote_close')
-        # Restricted to tickers with enough history and enough raw variation
-        # for the ratio to mean anything.
+        volume_r = self._reader('quote_dailyvolume')
+
+        # A ticker must actually TRADE before its price series is worth
+        # auditing. Price variation is not liquidity: a delisted shell carries
+        # its last price forward for years, producing a series with almost no
+        # distinct values and no volume behind any of them. Screening on
+        # variation alone flags those as adjustment damage when nothing has
+        # been damaged — they simply never traded.
+        if volume_r:
+            liquidity = f"""
+            , v AS (
+              SELECT tickersymbol,
+                     sum(CASE WHEN quantity > 0 THEN 1 ELSE 0 END) AS sessions_traded
+              FROM {volume_r} GROUP BY 1
+            )"""
+            liquidity_join = "JOIN v USING (tickersymbol)"
+            liquidity_filter = f"AND v.sessions_traded >= {self.MIN_SESSIONS_TRADED}"
+            traded_col = "v.sessions_traded"
+        else:
+            liquidity = liquidity_join = liquidity_filter = ""
+            traded_col = "NULL"
+
         rows = self._query(f"""
             WITH a AS (
               SELECT tickersymbol, count(*) AS n, count(DISTINCT price) AS adj_px
@@ -532,35 +557,45 @@ class DataAudit:
             ), r AS (
               SELECT tickersymbol, count(DISTINCT price) AS raw_px
               FROM {close_r} GROUP BY 1
-            )
+            ){liquidity}
             SELECT a.tickersymbol, a.n, r.raw_px, a.adj_px,
-                   a.adj_px::DOUBLE / r.raw_px AS retained
-            FROM a JOIN r USING (tickersymbol)
-            WHERE a.n >= 500 AND r.raw_px > 20
+                   a.adj_px::DOUBLE / r.raw_px AS retained, {traded_col}
+            FROM a JOIN r USING (tickersymbol) {liquidity_join}
+            WHERE a.n >= 500 AND r.raw_px > 20 {liquidity_filter}
             ORDER BY retained ASC
         """)
+        audited = {row[0] for row in rows}
+        result.detail['liquidity_screen'] = (
+            f'sessions_traded >= {self.MIN_SESSIONS_TRADED}' if volume_r
+            else 'none (quote_dailyvolume absent)'
+        )
         result.total = len(rows)
         degraded = [row[0] for row in rows if row[4] < self.ADJUSTED_RETENTION_FLOOR]
         result.detail['worst'] = {
             sym: {'days': n, 'raw_distinct': raw, 'adj_distinct': adj,
-                  'retained': round(ret, 4)}
-            for sym, n, raw, adj, ret in rows[:5]
+                  'retained': round(ret, 4), 'sessions_traded': traded}
+            for sym, n, raw, adj, ret, traded in rows[:5]
         }
         result.detail['degraded'] = degraded
 
         # A zero adjusted price is categorically different from a coarse one.
         # Retention is a gradient you can reason about; zero is an invalid
-        # value that makes any return over it a division by zero. It is
-        # counted as a violation in its own right, not reported as a footnote.
-        zero_rows = self._query(
-            f"SELECT tickersymbol, count(*) FROM {adj_r} WHERE price = 0 "
-            f"GROUP BY 1 ORDER BY 2 DESC"
-        )
-        zero_tickers = {sym: n for sym, n in zero_rows}
-        result.detail['zero_valued'] = zero_tickers
-        result.detail['zero_row_count'] = sum(zero_tickers.values())
+        # value that makes any return over it a division by zero.
+        zero_tickers = {
+            sym: n for sym, n in self._query(
+                f"SELECT tickersymbol, count(*) FROM {adj_r} WHERE price = 0 "
+                f"GROUP BY 1 ORDER BY 2 DESC"
+            )
+        }
+        # Zeros in a ticker nobody could trade are not a usability problem.
+        # They are still disclosed rather than dropped silently.
+        zero_tradeable = {s: n for s, n in zero_tickers.items() if s in audited}
+        zero_untradeable = {s: n for s, n in zero_tickers.items() if s not in audited}
+        result.detail['zero_valued'] = zero_tradeable
+        result.detail['zero_row_count'] = sum(zero_tradeable.values())
+        result.detail['zero_valued_below_liquidity_screen'] = zero_untradeable
 
-        result.violations = len(set(degraded) | set(zero_tickers))
+        result.violations = len(set(degraded) | set(zero_tradeable))
         return result
 
     # -- reusable exclusions ----------------------------------------------
