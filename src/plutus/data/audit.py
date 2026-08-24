@@ -598,6 +598,58 @@ class DataAudit:
         result.violations = len(set(degraded) | set(zero_tradeable))
         return result
 
+
+    def check_tick_grid_conformity(self) -> CheckResult:
+        """Observed prices must lie on the exchange's legal tick grid.
+
+        A price off the grid could not have traded: the matching engine would
+        never have accepted the order that produced it. This is a third defect
+        class independent of the ceiling/floor swap and the OHLC invariants,
+        and it was found by wiring the exchange model to the corpus.
+
+        Scoped to HSX, whose grid is price-dependent
+        (:func:`plutus.core.constant.get_hsx_tick_size`, including its
+        8-character C/E/F warrant/ETF exception). The other exchanges use a
+        flat 0.1 tick on which essentially every observed price lies, so the
+        check would be vacuous there.
+        """
+        result = CheckResult(
+            name='tick_grid_conformity',
+            description='HSX closes lie on the exchange tick grid',
+            invariant='close % get_hsx_tick_size(ticker, close) == 0',
+        )
+        missing = self._missing('quote_close', 'quote_ticker')
+        if missing:
+            result.ran = False
+            result.skipped_reason = f"missing tables: {missing}"
+            return result
+
+        from decimal import Decimal
+
+        from plutus.core.constant import get_hsx_tick_size
+
+        rows = self._query(
+            f"SELECT c.tickersymbol, c.datetime, c.price "
+            f"FROM {self._reader('quote_close')} c "
+            f"JOIN {self._reader('quote_ticker')} tk USING (tickersymbol) "
+            f"WHERE tk.exchangeid = 'HSX'"
+        )
+
+        offenders = {}
+        for ticker, day, price in rows:
+            value = Decimal(str(price))
+            tick = get_hsx_tick_size(ticker, value)
+            if tick is None or value % tick != 0:
+                offenders.setdefault(ticker, []).append(str(day)[:10])
+
+        result.total = len(rows)
+        result.violations = sum(len(days) for days in offenders.values())
+        # Deliberately not keyed 'by_symbol': that name is claimed by the
+        # generic renderer and would print twice.
+        result.detail['offenders'] = {k: len(v) for k, v in offenders.items()}
+        result.detail['dates'] = {k: sorted(v) for k, v in offenders.items()}
+        return result
+
     # -- reusable exclusions ----------------------------------------------
 
     def inverted_band_exclusions(self) -> List[tuple]:
@@ -639,6 +691,7 @@ class DataAudit:
         'ragged_coverage': 'check_ragged_coverage',
         'vn30_survivorship': 'check_vn30_survivorship',
         'adjusted_price_degeneracy': 'check_adjusted_price_degeneracy',
+        'tick_grid_conformity': 'check_tick_grid_conformity',
     }
 
     def run(self, only: Optional[List[str]] = None) -> AuditReport:
@@ -719,6 +772,9 @@ def _render(report: AuditReport) -> str:
             if detail.get('zero_valued'):
                 z = ', '.join(f"{k} ({v:,} rows)" for k, v in detail['zero_valued'].items())
                 lines.append(f"  zero adj  : {z}  <- invalid, not merely coarse")
+        if check.name == 'tick_grid_conformity' and detail.get('offenders'):
+            syms = ', '.join(f"{k} ({v})" for k, v in detail['offenders'].items())
+            lines.append(f"  symbols   : {syms}")
         if check.name == 'vn30_survivorship':
             lines.append(
                 f"  detail    : {detail['snapshots']} snapshots x "

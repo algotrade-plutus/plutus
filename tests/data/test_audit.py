@@ -312,3 +312,30 @@ def test_adjusted_degeneracy_is_measured_against_the_raw_series(report):
     for symbol, stats in check.detail['worst'].items():
         assert stats['raw_distinct'] > 20, symbol
         assert 0 <= stats['retained'] <= 1.0, symbol
+
+
+# --- tick-grid conformity ---------------------------------------------------
+
+@requires_corpus
+def test_tick_grid_conformity_finds_thirteen_off_grid_closes(report):
+    """A third defect class, independent of the band swap and the OHLC
+    invariants, and found by wiring the exchange model to the corpus.
+
+    A price off the grid could not have traded: the matching engine would never
+    have accepted the order that produced it.
+    """
+    check = _check(report, 'tick_grid_conformity')
+
+    assert check.violations == 13
+    assert check.total == 1_101_201
+    assert set(check.detail['offenders']) == {
+        'DAG', 'C47', 'SVI', 'NLG', 'CCI', 'MCP'}
+
+
+@requires_corpus
+def test_off_grid_closes_all_predate_2016(report):
+    check = _check(report, 'tick_grid_conformity')
+
+    for days in check.detail['dates'].values():
+        for day in days:
+            assert day < '2016'
