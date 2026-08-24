@@ -301,6 +301,88 @@ def measure_field_availability(parquet_root: Path) -> Dict[str, Any]:
     }
 
 
+
+# --------------------------------------------------------------------------
+# exchange fill model (plutus.market)
+# --------------------------------------------------------------------------
+
+def measure_exchange_admission(data_root: Path) -> Dict[str, Any]:
+    """Blocked-entry rate at both lags. Backs the paper's equity headline.
+
+    Both variants are reported because the difference between them is the
+    result: testing the ceiling lock on the session that produced the momentum
+    signal embeds look-ahead, and more than halves when corrected.
+    """
+    try:
+        from measurements.equity_admission import measure_blocked_entries
+    except ImportError as exc:  # pragma: no cover
+        return {"error": f"could not import measurements: {exc}"}
+
+    out: Dict[str, Any] = {}
+    for stocks_only in (True, False):
+        for lag in (0, 1):
+            r = measure_blocked_entries(str(data_root), lag=lag,
+                                        stocks_only=stocks_only)
+            out[f"{r.population}_lag{lag}"] = r.to_dict()
+    out["note"] = (
+        "lag=1 is the tradeable rule and the honest headline; lag=0 is the "
+        "figure prior work quoted and tests the lock on the signal session."
+    )
+    return out
+
+
+def measure_exchange_grid(data_root: Path) -> Dict[str, Any]:
+    """Tick-grid conformity, library rule against a named naive baseline."""
+    try:
+        from measurements.grid_conformity import measure_grid_conformity
+    except ImportError as exc:  # pragma: no cover
+        return {"error": f"could not import measurements: {exc}"}
+
+    return {r.universe: r.to_dict() for r in (
+        measure_grid_conformity(str(data_root), stocks_only=False),
+        measure_grid_conformity(str(data_root), stocks_only=True),
+    )}
+
+
+def measure_exchange_margin(data_root: Path) -> Dict[str, Any]:
+    """Front-month margin-call incidence, plus a rate sensitivity panel."""
+    try:
+        from decimal import Decimal
+
+        from measurements.margin_incidence import measure_margin_incidence
+    except ImportError as exc:  # pragma: no cover
+        return {"error": f"could not import measurements: {exc}"}
+
+    out = {f"hold_{h}": measure_margin_incidence(
+        str(data_root), holding_days=h).to_dict() for h in (5, 10, 20)}
+    out["sweep"] = {
+        rate: measure_margin_incidence(
+            str(data_root), holding_days=10,
+            initial_rate=Decimal(rate)).to_dict()
+        for rate in ("0.150", "0.175", "0.200", "0.225", "0.250", "0.300")
+    }
+    return out
+
+
+def measure_exchange_bar_vs_tick(
+    data_root: Path, raw_root: Optional[Path]
+) -> Dict[str, Any]:
+    """Divergence between an inferred and an observed band lock.
+
+    Needs the raw archive; skips with a stated reason without it, matching the
+    --csv-root convention used elsewhere in this file.
+    """
+    if raw_root is None or not raw_root.exists():
+        return {"skipped": "raw root not provided; the tick arm needs the "
+                           "order book, which only the raw archive carries"}
+    try:
+        from measurements.bar_vs_tick import measure_bar_vs_tick
+    except ImportError as exc:  # pragma: no cover
+        return {"error": f"could not import measurements: {exc}"}
+
+    return measure_bar_vs_tick(str(data_root), str(raw_root)).to_dict()
+
+
 # --------------------------------------------------------------------------
 # entry point
 # --------------------------------------------------------------------------
@@ -342,7 +424,7 @@ def main() -> int:
     print("Plutus measurement reproduction")
     print("=" * 72)
 
-    print("\n[1/5] storage ...")
+    print("\n[1/9] storage ...")
     results["storage"] = measure_storage(args.data_root, args.csv_root, args.raw_root)
     s = results["storage"]
     print(f"      parquet corpus : {s.get('parquet_human')}")
@@ -352,21 +434,21 @@ def main() -> int:
         print(f"      reduction      : {s['reduction_pct']}% "
               f"over {s['comparable_tables']} comparable tables")
 
-    print("\n[2/5] daily coverage ...")
+    print("\n[2/9] daily coverage ...")
     results["coverage"] = measure_coverage(args.data_root)
     cov = results["coverage"].get("ohlc_with_volume")
     if cov:
         print(f"      {cov['first_day']} -> {cov['last_day']}: "
               f"{cov['rows']:,} rows, {cov['tickers']} tickers")
 
-    print("\n[3/5] query speed ...")
+    print("\n[3/9] query speed ...")
     results["speed"] = measure_query_speed(args.data_root, args.csv_root)
     sp = results["speed"]
     for shape in ("full_scan", "filtered", "group_by", "metadata_only"):
         if shape in sp:
             print(f"      {shape:15s} {sp[shape]['speedup']}x")
 
-    print("\n[4/5] field availability ...")
+    print("\n[4/9] field availability ...")
     results["fields"] = measure_field_availability(args.data_root)
     fc = results["fields"].get("counts")
     if fc:
@@ -377,11 +459,42 @@ def main() -> int:
 
     if args.skip_tests:
         results["tests"] = {"skipped": True}
-        print("\n[5/5] test suite ... skipped")
+        print("\n[5/9] test suite ... skipped")
     else:
-        print("\n[5/5] test suite ...")
+        print("\n[5/9] test suite ...")
         results["tests"] = measure_test_suite(repo_root)
         print(f"      collected: {results['tests'].get('collected')}")
+
+    print("\n[6/9] exchange admission (equity headline) ...")
+    results["exchange_admission"] = measure_exchange_admission(args.data_root)
+    for key, value in results["exchange_admission"].items():
+        if isinstance(value, dict) and "rate" in value:
+            print(f"      {key:<26} {value['blocked']:>7,} / "
+                  f"{value['attempts']:>8,} = {value['rate']:.4%}")
+
+    print("\n[7/9] tick-grid conformity ...")
+    results["exchange_grid"] = measure_exchange_grid(args.data_root)
+    for universe, value in results["exchange_grid"].items():
+        print(f"      {universe:<22} library {value['library_rate']:.4%}  "
+              f"naive {value['naive_rate']:.4%}")
+
+    print("\n[8/9] derivatives margin incidence ...")
+    results["exchange_margin"] = measure_exchange_margin(args.data_root)
+    for hold in (5, 10, 20):
+        value = results["exchange_margin"][f"hold_{hold}"]
+        print(f"      hold {hold:>2}  {value['called']:>4,} / "
+              f"{value['entries']:>4,} = {value['call_rate']:.2%}")
+
+    print("\n[9/9] bar-vs-tick divergence ...")
+    results["exchange_bar_vs_tick"] = measure_exchange_bar_vs_tick(
+        args.data_root, args.raw_root)
+    div = results["exchange_bar_vs_tick"]
+    if "skipped" in div:
+        print(f"      skipped: {div['skipped']}")
+    else:
+        print(f"      n={div['n']:,}  bar {div['bar_blocked']:,}  "
+              f"tick {div['tick_blocked_at_close']:,}  "
+              f"agreement {div['agreement']:.4%}")
 
     if args.json:
         args.json.write_text(json.dumps(results, indent=2, default=str))

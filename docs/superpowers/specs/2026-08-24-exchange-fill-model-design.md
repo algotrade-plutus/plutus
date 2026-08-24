@@ -252,14 +252,23 @@ trader's behalf, re-enter, or compute P&L.
 
 Nothing already landed is discarded; weights change.
 
-| Prior headline | Now |
-|---|---|
-| Zero-setup data architecture | supporting infrastructure — not claimed |
-| 23-year daily coverage | one-sentence context |
-| Data-quality audit (WP4) | **minor** contribution (reproducibility) |
-| Optimism bias, equity | **primary** — order admission |
-| — | **primary** — position survival under margin (derivatives) |
-| — | supporting — vendor-independent boundary, bar+tick |
+| Prior headline | Now | Measured |
+|---|---|---|
+| Zero-setup data architecture | supporting infrastructure — not claimed | — |
+| 23-year daily coverage | one-sentence context | 2,511,874 rows, 1,725 tickers |
+| Data-quality audit (WP4) | **minor** contribution (reproducibility) | 10 checks, 44,219 violations |
+| Optimism bias, equity | **primary** — order admission | **5.84%** next-session (11,543/197,521); 12.90% same-session, look-ahead |
+| — | **primary** — position survival under margin (derivatives) | **12.60%** of front-month longs called at a 10-session hold (48/381) |
+| — | supporting — vendor-independent boundary, bar+tick | 97.56% bar/tick lock agreement on 173,168 ticker-days |
+| Tick-grid fidelity | supporting | **99.9988%** vs 83.86% naive; 13 off-grid closes found |
+
+**Superseded, and why.** The handoff's four headline figures were not computed
+by any code in the repo and three do not survive measurement: 12.96% on
+n=191,454 is unreproducible under any filter (the reproducing rule gives
+12.90% on n=197,337 and embeds look-ahead); 8.25% for stop-loss exits rests on
+a rule that exists nowhere; and the 91.62% naive grid baseline is
+unreproducible under six candidate grids across eight universes, so this work
+defines its own baseline explicitly.
 
 The audit, metrics contract, daily/tick query layer, CI and 450 tests all
 remain and all serve the new claims as reproducible substrate.

@@ -4,7 +4,7 @@
 
 [![Python](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-450%20passing-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/tests-617%20passing-brightgreen.svg)]()
 
 PLUTUS is a data analytics framework for the Vietnamese stock market with **three ways to access a 21 GB historical archive**: Python API, command-line tools, and natural language queries through LLM integration.
 
@@ -21,7 +21,7 @@ PLUTUS provides **zero-setup access** to Vietnamese market data without database
 - **⚡ High Performance**: Optional Parquet conversion — 10-30x faster on real queries, 81.8% smaller
 - **🔧 Triple Interface**: Python API + CLI + LLM integration (MCP)
 - **🤖 AI-Powered**: Query data using natural language through Claude, Gemini, or other MCP clients
-- **✅ Production Ready**: 450 tests, comprehensive documentation
+- **✅ Production Ready**: 617 tests, comprehensive documentation
 
 ---
 
@@ -294,6 +294,92 @@ query time, so the absence of the tick archive only affects tick queries.
 
 ---
 
+## Exchange Fill Model (`plutus.market`)
+
+An executable model of what a Vietnamese **exchange** does to an order and to a
+position. It reproduces the checks an exchange runs before an order may rest on
+the book, and the margin, position-limit and expiry logic a derivatives
+exchange runs against an open position each day.
+
+**Exchange-side, not trader-side.** There is no strategy, portfolio, cash
+balance or P&L here; no order lifecycle, queue-priority matching or
+partial-fill sequencing; and no decision about what to do after a margin call —
+only the report that the exchange would issue one. Plutus is a fill model, not
+a backtesting engine.
+
+```python
+from plutus.market.adapters import DataHubSource
+from plutus.market.exchanges import HSX_EXCHANGE
+from plutus.market.protocol import Order, Side
+from decimal import Decimal
+
+source = DataHubSource.for_root('/path/to/dataset')
+state = source.state_at('FPT', datetime(2021, 6, 15))
+order = Order(ticker='FPT', side=Side.BUY, quantity=100,
+              limit_price=Decimal('83.8'))
+
+verdict = HSX_EXCHANGE.admits(order, state)
+print(verdict.verdict, verdict.rule)   # Verdict.ADMITTED None
+```
+
+### Order admission — the six rules
+
+| Rule | Question |
+|---|---|
+| `TICK_GRID` | Is the price on the exchange's price-dependent grid? |
+| `ROUND_LOT` | Is the size a multiple of the lot (100 cash, 1 derivative)? |
+| `BAND_LIMIT` | Is the price inside `[floor, ceiling]`? Stateless. |
+| `BAND_LOCK` | Is this a *marketable* order into a *locked* band? Fillability. |
+| `FOREIGN_ROOM` | Does a foreign buy fit the remaining ownership room? |
+| `SESSION_SEMANTICS` | Is this order type valid in this session phase? |
+
+`BAND_LIMIT` and `BAND_LOCK` are separate on purpose. An order priced *at* the
+ceiling is admissible — the exchange accepts it; it simply may not fill.
+
+### Position survival — the five events
+
+`MARGIN_CALL`, `FORCED_LIQUIDATION`, `EXIT_BLOCKED`, `POSITION_LIMIT_EXCEEDED`,
+`EXPIRY_SETTLEMENT`.
+
+### Verdicts are three-state
+
+`ADMITTED`, `REJECTED`, `INDETERMINATE`. The third is what keeps the model
+honest: when the data needed to judge a rule is absent, the model says so
+rather than guessing. Every verdict records which rule bound, at what
+timestamp, with what evidence.
+
+### What is measurable, where
+
+| Rule | Parquet corpus | Raw archive |
+|---|---|---|
+| `TICK_GRID`, `ROUND_LOT` | ✅ | ✅ |
+| `BAND_LIMIT` | ✅ 2021-02-05+ | ✅ |
+| `BAND_LOCK` (bar proxy) | ✅ | ✅ |
+| `BAND_LOCK` (observed book) | ❌ | ✅ 2021-01-15+ |
+| `FOREIGN_ROOM` | ❌ → `INDETERMINATE` | ⚠️ cap, not remaining room |
+| `SESSION_SEMANTICS` | ⚠️ forced `CONTINUOUS` | ✅ |
+| Margin / liquidation / expiry | ✅ | ✅ |
+| `POSITION_LIMIT_EXCEEDED` | ❌ no account data anywhere | ❌ |
+
+### Measured results
+
+Reproduce all of these with `python reproduce_measurements.py --data-root ...`.
+
+| Result | Value |
+|---|---|
+| Momentum entries the exchange would not fill, **next session** | **5.84%** (11,543 / 197,521) |
+| Same figure tested on the *signal* session (look-ahead) | 12.90% (25,464 / 197,337) |
+| Front-month VN30F longs margin-called, 10-session hold | **12.60%** (48 / 381) |
+| Tick-grid conformity, library rule vs a flat 0.1 grid | **99.9988%** vs 83.86% |
+| Bar-vs-tick lock agreement | 97.56% on 173,168 ticker-days |
+
+The two momentum figures differ because the first is tradeable and the second
+is not: a close-to-close signal cannot be acted on inside the session that
+produced it. Margin rates are a modelling assumption (17.5% VSD + 5% broker
+buffer); no margin data exists in either corpus.
+
+---
+
 ## Dataset Audit
 
 Real market data carries defects. Plutus characterizes them rather than
@@ -304,7 +390,7 @@ python -m plutus.data.audit --data-root /path/to/dataset
 python -m plutus.data.audit --data-root /path/to/dataset --json report.json
 ```
 
-Nine checks, with the incidence measured on the reference corpus:
+Ten checks, with the incidence measured on the reference corpus:
 
 | Check | Invariant | Violations |
 |---|---|---|
@@ -317,6 +403,7 @@ Nine checks, with the incidence measured on the reference corpus:
 | `ragged_coverage` | *(reported)* | 15 of 28 tables start in 2021 |
 | `vn30_survivorship` | *(reported)* | 53 distinct members across 12 × 30 snapshots |
 | `adjusted_price_degeneracy` | distinct(adjclose)/distinct(close) ≥ 10%, tickers trading ≥250 sessions | 0 of 1,336 (worst retains 85%) |
+| `tick_grid_conformity` | HSX closes lie on the legal tick grid | 13 of 1,101,201 |
 
 Queries apply the two row-level exclusions by default via `strict=True`:
 
@@ -388,7 +475,7 @@ lookups.
 ## Project Status
 
 - **Version**: see `plutus.__version__` (single source: `pyproject.toml`)
-- **Tests**: 450/450 passing ✅
+- **Tests**: 617/617 passing ✅
 - **Production Ready**: DataHub + MCP Server
 
 **Current Features:**
