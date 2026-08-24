@@ -182,10 +182,12 @@ side of a locked band), `POSITION_LIMIT_EXCEEDED`, `EXPIRY_SETTLEMENT`.
 
 Margin is a *rule*, not vendor data. `plutus.market.margin` models the
 mechanics — initial vs maintenance, daily mark-to-market against settlement (or
-close as proxy where settlement is absent) — and takes the rate as a parameter.
-The paper reports margin-call incidence as a **sensitivity sweep** over a
-plausible rate range (e.g. 10–20%), which is stronger than a point estimate and
-honest about the one input the corpus lacks.
+close as proxy where settlement is absent) — and reads the rate from config.
+Defaults are the known Vietnamese figures: **17.5% VSD initial margin, plus a
+5% broker cash buffer** (so a position must post ~22.5% of notional). The
+margin call fires on the maintenance threshold. The paper reports incidence at
+these real rates; a sensitivity sweep over neighbouring rates is retained as an
+optional robustness panel, not a substitute for a number we now have.
 
 `sustains` reports what the exchange would do; it does not liquidate on the
 trader's behalf, re-enter, or compute P&L.
@@ -238,20 +240,28 @@ remain and all serve the new claims as reproducible substrate.
 
 ## 7. Open questions carried in (not resolved by this design)
 
-1. **RIVF deadline unconfirmed** — sizes how much of §5 lands. The cash
-   exchanges plus order admission are the minimum viable paper; derivatives
-   position survival is the elevation. Both are in scope here; sequencing
-   favours the cash exchanges first so a slip degrades gracefully.
-2. **17,274 impossible close-to-close moves** (>15%, any band) sit inside the
-   momentum rule the equity headline rests on. Adjustment does not clear them
-   (§ price-series findings). Must be quantified or filtered before the blocked-
-   fill number is final — candidate for a tenth audit check.
+1. **RIVF deadline ~31 Aug — best-effort accepted.** Not treated as a hard
+   gate; we ship the best version we have by then. The cash exchanges plus
+   order admission are the minimum viable paper; derivatives position survival
+   is the elevation. Sequencing favours the cash exchanges first so a slip
+   degrades gracefully.
+2. **17,274 impossible close-to-close moves** (>15%, any band) — a robustness
+   check on the equity headline, NOT a contribution and NOT a data fix. A naive
+   momentum rule reads a suspension-resumption or listing debut as a huge buy
+   signal that was never tradeable; if such day-pairs inflate the blocked-fill
+   rate, the headline overstates. Handled at measurement time by excluding
+   day-pairs that span a trading gap, then confirming the rate barely moves.
+   The data is left untouched. Verified only that these are NOT corporate
+   actions (adjustment does not remove them); the suspension/listing/bad-print
+   split is unknown and does not need resolving for the paper. Not a blocker;
+   revisit when the equity headline is computed.
 3. **Derivatives corpus is thin**: 28 VN30F contracts, 1,996 daily rows,
    2021-01→2022-12; settlement for only 3 contracts (close used as MTM proxy);
    OI 2021+. Bounds the derivatives claims to daily resolution over ~2 years —
    state it explicitly.
-4. **Margin-rate range** to sweep — needs one external number (VSD published
-   band) to set defensible endpoints; the mechanics don't depend on it.
+4. **Margin rate — RESOLVED.** 17.5% VSD initial + 5% broker cash buffer,
+   carried in config (§3.3). No external lookup needed; the sweep is now
+   optional robustness rather than a stand-in for a missing number.
 
 ## 8. Effort
 
