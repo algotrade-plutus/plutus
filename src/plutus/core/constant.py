@@ -1,4 +1,4 @@
-""""Defines the class Exchange and other related methods."""
+"""Defines the class ExchangeSpec and other related methods."""
 
 import math
 import datetime
@@ -214,8 +214,8 @@ class VietNamTradingSession:
 
 
 @dataclass(init=True, repr=True, eq=True, frozen=True)
-class Exchange:
-    """The class Exchange contains information of a specific exchange.
+class ExchangeSpec:
+    """The class ExchangeSpec contains the published rules of a specific exchange.
 
     The information can be:
         - Trading sessions (ATO, LO, ATC, etc.)
@@ -226,6 +226,9 @@ class Exchange:
 
     name: str
     code: str
+    # NOTE: not a dataclass field -- this is an assignment, not an annotation,
+    # so dataclasses.fields() omits it. Left as-is deliberately: converting it
+    # would change the positional signature of the four instantiations below.
     working_day = (List[int],)
     before_trading_session: Optional[AbstractTradingSession]
     ato_session: Optional[AbstractTradingSession]
@@ -301,7 +304,7 @@ def get_hsx_tick_size(
             return tick_size
 
 
-HSX = Exchange(
+HSX = ExchangeSpec(
     name="HoChiMinh Stock Exchange",
     code=VietnamMarketConstant.HSX,
     before_trading_session=AbstractTradingSession(
@@ -340,7 +343,7 @@ HSX = Exchange(
     tick_size_function=get_hsx_tick_size,
 )
 
-HNX = Exchange(
+HNX = ExchangeSpec(
     name="Hanoi Stock Exchange",
     code=VietnamMarketConstant.HNX,
     before_trading_session=AbstractTradingSession(
@@ -379,7 +382,7 @@ HNX = Exchange(
     tick_size_function=lambda _, __: Decimal("0.1"),
 )
 
-UPCOM = Exchange(
+UPCOM = ExchangeSpec(
     name="Unlisted Public Company Market",
     code=VietnamMarketConstant.UPCOM,
     before_trading_session=AbstractTradingSession(
@@ -410,7 +413,7 @@ UPCOM = Exchange(
     tick_size_function=lambda _, __: Decimal("0.1"),
 )
 
-DS = Exchange(
+DS = ExchangeSpec(
     name="Derivatives Market",
     code=VietnamMarketConstant.DS,
     before_trading_session=AbstractTradingSession(

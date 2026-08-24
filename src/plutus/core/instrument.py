@@ -23,12 +23,12 @@ T = TypeVar("T")
 # TODO: Development Note 1
 #  The property trading_unit and the method tick_size is a little bit troublesome
 #  because they reference to another class which somehow serves as a data container
-#  (the class Exchange where different exchanges are defined as some kind of data).
+#  (the class ExchangeSpec where different exchanges are defined as some kind of data).
 #  Problems arise when more exchanges are available (later) and somehow the class
 #  Instrument need to know about that to function properly.
 #  The exchange property of the Instrument class should only provide logic to
 #  access those data not the data directly. The problem still retain with the
-#  newly defined Exchange class because it is somehow still a data container.
+#  newly defined ExchangeSpec class because it is somehow still a data container.
 
 
 class Instrument:
