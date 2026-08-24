@@ -218,8 +218,12 @@ MARGIN_CALL         first day ratio_t <  maintenance_rate   (default 0.175)
 FORCED_LIQUIDATION  first day ratio_t <= liquidation_rate   (default 0.00)
 ```
 
-`maintenance_rate = 0.175` is derived, not invented: posting 22.5% against a
-17.5% requirement makes the 5% broker buffer exactly the call-trigger distance.
+`maintenance_rate = 0.175` is derived, not invented: it is set to the VSD
+initial requirement, so the broker buffer is what stands between posting and a
+call. Note the trigger is **not** a 5% adverse move -- notional is marked to
+market alongside equity, so the ratio falls more slowly than the price. The
+exact threshold for a long is `(1 - initial) / (1 - maintenance)` =
+0.775/0.825 = 0.9394, i.e. a **6.06%** fall. Verified by test.
 Both thresholds are config keys documented as *modelling assumptions with no
 corpus backing*. Invariant to test: `FORCED_LIQUIDATION` implies a
 `MARGIN_CALL` on the same or an earlier day.
