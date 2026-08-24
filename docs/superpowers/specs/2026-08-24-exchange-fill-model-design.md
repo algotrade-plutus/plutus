@@ -102,7 +102,8 @@ plutus/market/
   verdicts.py     Admissibility, Viability, PositionEvent (+ reason enums)
   exchanges/
     base.py       Exchange ABC: admits() + sustains()
-    cash.py       HSXExchange, HNXExchange, UPCOMExchange
+    cash.py       CashExchange (one class, parameterized by ExchangeSpec;
+                  HSX/HNX/UPCOM are instances, not subclasses)
     derivatives.py HNXDSExchange (margin, position limit, expiry)
   adapters/
     base.py       MarketDataSource protocol
@@ -163,16 +164,31 @@ class Exchange(ABC):
 `admits` checks, in order, short-circuiting on the first breach:
 1. price on the exchange tick grid (`get_hsx_tick_size` for HSX; flat 0.1 else);
 2. size on the round lot (`TRADING_UNIT`: 100 cash, 1 derivatives);
-3. side vs a locked band (no buy at/above a locked ceiling; no sell at/below a
-   locked floor);
-4. foreign room, when the order is flagged foreign and room is known (cash only);
-5. session semantics — ATO/ATC are call auctions; a marketable order there
+3. **BAND_LIMIT** (stateless) — price outside `[floor, ceiling]`. Needs no book.
+4. **BAND_LOCK** (fillability) — a marketable order on the locked side of a band.
+   Requires lock provenance: `MarketState.locked_side` plus `lock_evidence`
+   (`TICK_BOOK` from a forward-filled ladder, `BAR_PROXY` when `last == ceiling`,
+   or `UNKNOWN` → `INDETERMINATE`). An order priced *at* the ceiling is
+   admissible — the exchange accepts it; it simply may not fill. Conflating the
+   two would make the equity headline unmeasurable at bar resolution;
+5. foreign room, when the order is flagged foreign and room is known (cash only);
+6. session semantics — ATO/ATC are call auctions; a marketable order there
    participates in price formation rather than crossing a book.
 
 `Admissibility` is structured, never a bool:
-`(admitted: bool, rule: AdmissionRule | None, binding_constraint, ts,
-regime_tag)`. The `rule` enum IS the rejected-order log — every rejection
-records which rule, at what timestamp, in what regime.
+`(verdict: Verdict, rule: AdmissionRule | None, binding_constraint, ts,
+regime_tag, detail)`. `Verdict` is `ADMITTED | REJECTED | INDETERMINATE` — a
+bool cannot carry the `INDETERMINATE` that honest handling of absent data
+requires. The `rule` enum IS the rejected-order log — every rejection records
+which rule, at what timestamp, in what regime. `regime_tag` is **supplied by
+the caller**, never computed inside `plutus.market` (WP6 is not landed).
+
+All reason enums are declared `class X(str, Enum)`: this is load-bearing, not
+style. `evaluation.contract.json_safe` passes enums and datetimes through
+unchanged and `json.dumps` then raises, so every verdict carries a `to_dict()`
+that isoformats temporals before handing off — mirroring
+`audit.CheckResult.to_dict()`. `json_safe` itself is not modified; 169 tests
+pin it.
 
 ### 3.3 Position management (stateful, derivatives)
 
@@ -180,14 +196,50 @@ records which rule, at what timestamp, in what regime.
 `MARGIN_CALL`, `FORCED_LIQUIDATION`, `EXIT_BLOCKED` (stop level on the wrong
 side of a locked band), `POSITION_LIMIT_EXCEEDED`, `EXPIRY_SETTLEMENT`.
 
-Margin is a *rule*, not vendor data. `plutus.market.margin` models the
-mechanics — initial vs maintenance, daily mark-to-market against settlement (or
-close as proxy where settlement is absent) — and reads the rate from config.
-Defaults are the known Vietnamese figures: **17.5% VSD initial margin, plus a
-5% broker cash buffer** (so a position must post ~22.5% of notional). The
-margin call fires on the maintenance threshold. The paper reports incidence at
-these real rates; a sensitivity sweep over neighbouring rates is retained as an
-optional robustness panel, not a substitute for a number we now have.
+Margin is a *rule*, not vendor data. The distinction that keeps this
+exchange-side: **variation margin** is a quantity the exchange itself computes
+and collects daily; **strategy P&L** is trader-side. `sustains` computes the
+former only, and never nets it against cash, fees, or other positions. That
+resolves the apparent contradiction with §2 ("does not compute P&L") — daily
+mark-to-market of a single position's margin account is the exchange's own
+arithmetic, not the trader's.
+
+The mechanic, fully determined:
+
+```
+q        = +1 long / -1 short, times quantity
+S_t      = settlement on day t (see tiers below)
+N_t      = |q| * multiplier * S_t                        notional
+posted   = initial_rate * N_0    initial_rate = 0.175 (VSD) + 0.05 (broker) = 0.225
+equity_t = posted + q * multiplier * (S_t - S_0)         cumulative variation margin
+ratio_t  = equity_t / N_t
+
+MARGIN_CALL         first day ratio_t <  maintenance_rate   (default 0.175)
+FORCED_LIQUIDATION  first day ratio_t <= liquidation_rate   (default 0.00)
+```
+
+`maintenance_rate = 0.175` is derived, not invented: posting 22.5% against a
+17.5% requirement makes the 5% broker buffer exactly the call-trigger distance.
+Both thresholds are config keys documented as *modelling assumptions with no
+corpus backing*. Invariant to test: `FORCED_LIQUIDATION` implies a
+`MARGIN_CALL` on the same or an earlier day.
+
+**Settlement has three tiers, and every event records which it used**
+(`settlement_source`): `PUBLISHED` (the 5 real `quote_settlementprice` pairs,
+excluding 11 corrupt rows), `TWAP_30M` (time-weighted mean of matched price
+over 14:15–14:45 — recovered empirically, mean error 0.74 index points, raw
+archive only), `CLOSE_PROXY` (`quote_close`, the only tier on the Parquet
+root). **`quote_reference` is NOT in the chain**: it equals the previous close
+on 1,731 of 1,968 VN30F pairs and misses published settlement by up to 5.55
+points, so it is not an independent settlement series.
+
+`EXPIRY_SETTLEMENT` fires on the third Thursday of the contract month (verified
+24/24 in-window) and uses the same tiers with the VN30 index substituted at
+tier 2 — the regulation is index-based. The futures close is *not* the final
+settlement on any of the 28 expiries (basis −27.79…+8.43).
+
+The paper reports incidence at the real rates; a sweep over neighbouring rates
+is a robustness panel, not a substitute for the number we have.
 
 `sustains` reports what the exchange would do; it does not liquidate on the
 trader's behalf, re-enter, or compute P&L.
@@ -225,15 +277,20 @@ remain and all serve the new claims as reproducible substrate.
 - `admits` unit-tested per rule per exchange, including the 8-char C/E/F
   warrant-ETF tick exception and the 1-contract derivatives lot.
 - Property test: every price `admits` accepts on HSX lies on the legal grid.
-- Replaying the naive momentum rule through `HSXExchange.admits` reproduces the
-  measured blocked-entry rate (stocks-only, inverted bands filtered) within
-  tolerance — the test that ties code to the paper's equity headline.
-- `HNXDSExchange.sustains` on a known 2022 drawdown path emits `MARGIN_CALL` at
+- Replaying the naive momentum rule through the HSX `CashExchange` reproduces
+  the measured blocked-entry rate exactly — **25,464 blocked of 197,337
+  attempts (12.9038%)**, stocks-only, inverted bands filtered. Asserted as
+  integers, not a tolerance. This is the test that ties code to the paper's
+  equity headline, and it supersedes the handoff's unreproduced 12.96%/191,454.
+- `HNXDSExchange.sustains` on `VN30F2212` (entry 2022-04-22 @1441.8; first call
+  2022-05-09; liquidated 2022-10-03) emits `MARGIN_CALL` at
   rates where it should and none where it shouldn't; incidence is monotonic in
   the rate.
 - Bar-vs-tick divergence is reported with n for each.
-- Every verdict/event is machine-readable and JSON-serialisable (reuses the
-  WP2 `contract.json_safe` guard).
+- Every verdict/event round-trips through `json.dumps` under the strict
+  `parse_constant` idiom, via its own `to_dict()` (str-mixin enums + isoformat
+  temporals, then `json_safe`). `json_safe` alone is insufficient — it passes
+  enums and datetimes through and `dumps` raises.
 - `INDETERMINATE` returned, never a guess, when a needed book is absent.
 - `ExchangeSpec` rename leaves the full suite green.
 - New numbers reproducible from `reproduce_measurements.py`.
@@ -256,7 +313,8 @@ remain and all serve the new claims as reproducible substrate.
    split is unknown and does not need resolving for the paper. Not a blocker;
    revisit when the equity headline is computed.
 3. **Derivatives corpus is thin**: 28 VN30F contracts, 1,996 daily rows,
-   2021-01→2022-12; settlement for only 3 contracts (close used as MTM proxy);
+   2021-01→2022-12; published settlement for only 2 contracts + VN30INDEX
+   (5 (date, contract) pairs, 11 corrupt rows), so TWAP_30M or close proxies it;
    OI 2021+. Bounds the derivatives claims to daily resolution over ~2 years —
    state it explicitly.
 4. **Margin rate — RESOLVED.** 17.5% VSD initial + 5% broker cash buffer,
