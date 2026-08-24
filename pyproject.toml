@@ -92,7 +92,7 @@ exclude = [
 "src/plutus/py.typed" = "plutus/py.typed"
 
 [tool.pytest.ini_options]
-pythonpath = ["src"]
+pythonpath = ["src", "."]   # "." so tests can import the measurements package
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
