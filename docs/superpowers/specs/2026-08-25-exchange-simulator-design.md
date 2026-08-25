@@ -690,10 +690,17 @@ They carry their own register in §15.1, which is the text the paper draws on. A
 future work adds to that register must state what it buys, what it gives up, and what
 would trigger revisiting it.
 
-1. **Production parity awaits the post-KRX rulebook.** §1's claim that the same strategy
-   code runs against history and production does not hold today: KRX went live on HOSE
-   on 2025-05-05 and changed several modelled rules. §13 defers that rulebook, so §1 is
-   conditional until it exists.
+1. **The KRX cutover is a dated rule set, not a migration** (author's decision).
+   Both rule sets ship and both stay. The rulebook resolves at the instant being
+   simulated: a run dated before 2025-05-05 gets pre-KRX rules, a run dated on or after
+   gets post-KRX, and a run spanning the boundary gets each on its own side. This is
+   not a special case — it is the same `rulebook.at(ts)` mechanism the round lot and the
+   margin ratio already use, with a larger delta hanging off one date. Populating the
+   post-KRX values is Tier 2 work; the resolution mechanism is Tier 1.
+
+   The **foreign-ownership** half of the KRX delta stays deferred with T1: the cutover
+   changed room enforcement from fill-to-room-then-cancel to reject-at-entry, and since
+   this iteration never classifies an account as foreign, neither branch is reachable.
 2. **Landing Tier 1 does not retro-validate the published numbers.** `admits()` has zero
    non-test callers today, and three of the project's five headline figures come from
    DuckDB SQL that parallels the rules rather than calling them. §10 makes `admits()`
@@ -741,7 +748,7 @@ design.
 | # | The simplification | What it buys | Fidelity given up | Revisit trigger |
 |---|---|---|---|---|
 | T1 | Domestic investor only; foreign-ownership room is never enforced (§15.3) | Removes an entire date-switched control flow — pre-KRX *fill-to-room-then-cancel* vs post-KRX *reject-at-entry* — plus the room time series from the hot path | A foreign account's orders would, in reality, be partially filled or rejected on room. We admit them in full. Verified as a real constraint, not a vacuous one: **34,653 room observations sit below a single 100-share lot**; FPT on 2022-12-30 runs down to 11 shares | Any strategy or paper result that claims to represent a foreign account; or the post-KRX rulebook landing, which is when the two branches must both exist anyway |
-| T2 | Final settlement price = the data source's `close` on expiry day (§15.4) | Collapses the index-referenced trimmed-mean computation to a single data read, and removes the VN30 dissemination-frequency dependency entirely | The published final settlement is computed from the index over a defined window, not from the contract's own close. Measured against the **official settlement series** in the production DB (`quote.settlementprice`): VN30F2206 on its 2022-06-16 expiry settled at **1283.21** against a close of **1286.00** — the close overstates by **0.217%**. Still one true expiry; the tail is unmeasured | Any result whose P&L is materially sensitive to expiry-day pricing; or a systematic measurement of the gap, now blocked on data rather than method — see below |
+| T2 | Final settlement price = the data source's `close` on expiry day (§15.4) | Collapses the index-referenced averaging computation to a single data read | The published final settlement is an **average over a 30-minute window**, not the contract's close. On VN30F2206's 2022-06-16 expiry the window mean was **1281.36** against a close of **1286.00** — the close overstates by **0.36%**. One expiry, and the settlement *basis* itself changed mid-corpus (see §15.2) | Any result whose P&L is materially sensitive to expiry-day pricing; or the systematic measurement described in §15.2 |
 
 **How these are reported.** Each is stated in the paper as a scoped simplification with
 its measured cost attached — T2 with the 0.4% figure and the sample size (n=1, a stated
@@ -751,31 +758,53 @@ described as a modelling result. Reporting them this way is worth more than hidi
 them: it is direct evidence that the fidelity claim elsewhere is audited rather than
 asserted.
 
-**Before the paper cites T2, widen the sample — and note what stands in the way.**
-The production DB carries an official `quote.settlementprice` series, which is what
-produced the 0.217% figure. But it holds only **three symbols**: `VN30F2206`,
-`VN30F2208` and `VN30INDEX`, and only one of those two contract series covers a real
-expiry day. So the direct comparison cannot be widened from that table as it stands.
+### 15.2 What `quote.settlementprice` actually is, and the dated basis change
 
-Two ways forward, in cost order:
+**It is not a settlement-price series.** It is the **sample series that feeds the
+settlement average** — the observations taken across the averaging window, one row
+every few seconds, captured **only on expiry days** (55 days across four years). Read
+correctly, it does not give us a settlement price to read off; it gives us the inputs
+and expects us to do the arithmetic.
 
-1. **Reconstruct the settlement price from the index.** `quote.vn30` carries the index
-   level; recomputing the published averaging window on each expiry day yields a
-   comparison across every expiry in the window. This is the cheap path and it is a
-   measurement, not a rebuild.
-2. **Ask whoever maintains the pipeline why `settlementprice` covers three symbols.**
-   If the exchange publishes it per contract and we are simply not ingesting it, this
-   tradeoff can be closed outright rather than measured — the simulator would read a
-   real settlement price and T2 disappears.
+A prior revision of this document reported 1283.21 as "the official final settlement"
+for VN30F2206. That was the **last sample** in the window, not the settlement. The
+window mean is **1281.36**. The corrected close-vs-settlement gap is **0.36%**, not the
+0.217% previously stated.
 
-**A second finding sits underneath T2 and is arguably larger.** `VN30F2208`'s last row
-is dated 2022-08-16 — *not* an expiry day, so it is a **daily** settlement price (DSP),
-and it differs from that day's close by **0.146%**. Vietnam marks derivatives margin to
-the DSP every session, not to the close. So the close-as-settlement substitution is not
-confined to expiry day: it perturbs the daily margin mark across the whole holding
-period. Any margin-incidence figure computed on close-as-settlement inherits that, and
-§7.4's account-level model should read a DSP series rather than a close where one
-exists.
+Measured shape of the window, consistent across 2022, 2024, 2025 and 2026:
+
+| Property | Value |
+|---|---|
+| Window | **14:15 → 14:45**, i.e. the last 30 minutes including the ATC |
+| Duration | **30 minutes** (not 15) |
+| Sampling | ~180–260 observations per expiry day |
+
+**The subject being averaged changed mid-corpus, and the boundary is visible to the
+day.** The last futures-tracked row is dated **2022-08-16**; the first `VN30INDEX` row
+is **2022-08-17**. They are adjacent, which is what a methodology cutover looks like in
+a capture pipeline:
+
+- **Up to 2022-08-16** the pipeline sampled the **expiring contract's own price** over
+  the window.
+- **From 2022-08-17** it samples the **VN30 index**.
+
+This matters more than the gap figure does, because it means the settlement rule is
+**dated**, exactly like the round lot and the margin ratio. `SettlementResolver` must
+resolve the basis at the expiry date rather than applying one formula to all history —
+the same per-instant discipline §11 item 1 imposes on venue resolution.
+
+**Open, and load-bearing.** Which quantity the exchange actually *published* as the
+final settlement for a pre-cutover contract is not settled by this data. The pipeline
+sampling the contract does not prove the exchange averaged the contract; the older rule
+may have been the VN30 closing index value, with the contract capture serving some
+other purpose. Resolving it needs the HNX/VSD decision that made the change, which is
+a rulebook question, not a data question. Until it is resolved, **do not report a
+pre-2022-08-17 settlement figure as authoritative.**
+
+**How to widen the sample.** `quote.vn30` carries the index level; recomputing the
+14:15–14:45 mean on each expiry day yields a distribution across every expiry rather
+than the single point we have. That is a measurement, not a rebuild, and it should be
+done before the paper cites T2.
 
 ## 16. Stated assumptions
 
