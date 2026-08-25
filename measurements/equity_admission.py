@@ -68,7 +68,7 @@ def measure_blocked_entries(
 
     The ``ce.price >= fl.price`` predicate excludes the 1,272 inverted-band
     rows. That filter is load-bearing rather than cosmetic: 1,226 of them are
-    cash stock ticker-days.
+    equity ticker-days.
     """
     if lag not in (0, 1):
         raise ValueError('lag must be 0 (same session) or 1 (next session)')

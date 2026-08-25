@@ -1,11 +1,11 @@
-"""Cash-exchange admission: all six rules."""
+"""Equity-exchange admission: all six rules."""
 
 from datetime import datetime
 from decimal import Decimal
 
 import pytest
 
-from plutus.market.exchanges.cash import (
+from plutus.market.exchanges.equity import (
     HNX_EXCHANGE, HSX_EXCHANGE, UPCOM_EXCHANGE,
 )
 from plutus.market.protocol import (
@@ -94,7 +94,7 @@ def test_unmatched_price_yields_indeterminate_not_a_crash():
 
 
 @pytest.mark.parametrize('exchange', [HNX_EXCHANGE, UPCOM_EXCHANGE])
-def test_non_hsx_cash_exchanges_use_a_flat_tenth(exchange):
+def test_non_hsx_equity_exchanges_use_a_flat_tenth(exchange):
     state = _state(reference=Decimal('25'), ceiling=Decimal('30'),
                    floor=Decimal('20'), last=Decimal('25'))
     assert exchange.admits(_order(limit_price=Decimal('25.1')),
@@ -109,7 +109,7 @@ def test_non_hsx_cash_exchanges_use_a_flat_tenth(exchange):
 @pytest.mark.parametrize('qty, admitted',
                          [(100, True), (1000, True), (150, False),
                           (1, False), (0, False)])
-def test_cash_round_lot_is_one_hundred(qty, admitted):
+def test_equity_round_lot_is_one_hundred(qty, admitted):
     r = HSX_EXCHANGE.admits(_order(quantity=qty), _state())
     if admitted:
         assert r.verdict is Verdict.ADMITTED

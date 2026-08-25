@@ -327,7 +327,7 @@ print(verdict.verdict, verdict.rule)   # Verdict.ADMITTED None
 | Rule | Question |
 |---|---|
 | `TICK_GRID` | Is the price on the exchange's price-dependent grid? |
-| `ROUND_LOT` | Is the size a multiple of the lot (100 cash, 1 derivative)? |
+| `ROUND_LOT` | Is the size a multiple of the lot (100 equity, 1 derivative)? |
 | `BAND_LIMIT` | Is the price inside `[floor, ceiling]`? Stateless. |
 | `BAND_LOCK` | Is this a *marketable* order into a *locked* band? Fillability. |
 | `FOREIGN_ROOM` | Does a foreign buy fit the remaining ownership room? |

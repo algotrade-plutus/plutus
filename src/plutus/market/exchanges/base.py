@@ -14,7 +14,7 @@ class Exchange(ABC):
     """Models one exchange's decisions about orders and positions.
 
     Two method families, deliberately separate because they bind on different
-    exchanges: :meth:`admits` (stateless order admission) dominates the cash
+    exchanges: :meth:`admits` (stateless order admission) dominates the equity
     exchanges, :meth:`sustains` (stateful position survival) dominates the
     derivatives exchange. That asymmetry is the central empirical finding, and
     it is visible here in the architecture rather than only in the prose.
@@ -46,7 +46,7 @@ class Exchange(ABC):
     ) -> Viability:
         """Would this exchange let this position survive this path?
 
-        Cash exchanges impose no margin, no position limit and no expiry, so
+        Equity exchanges impose no margin, no position limit and no expiry, so
         the base implementation reports unconditional survival. The derivatives
         exchange overrides it.
         """

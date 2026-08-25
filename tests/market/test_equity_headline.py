@@ -71,7 +71,7 @@ def test_the_lead_is_computed_over_the_full_series_not_the_filtered_one(
 
 @requires_corpus
 def test_inverted_bands_are_excluded_and_the_count_is_reported(next_session):
-    """1,226 of the 1,272 inverted pairs are cash stock ticker-days, so this
+    """1,226 of the 1,272 inverted pairs are equity ticker-days, so this
     filter is load-bearing rather than cosmetic."""
     assert next_session.excluded_inverted == 1272
 

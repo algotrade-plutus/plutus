@@ -4,7 +4,7 @@ Admission here is nearly trivial, and that is the finding. The round lot is one
 contract so the lot rule never binds; the tick grid is a flat 0.1 so the grid
 rule is uninteresting; there is no foreign-ownership cap at all. What binds
 instead is position survival -- margin, forced liquidation, blocked exits,
-position limits and expiry -- none of which has a cash-equity analogue.
+position limits and expiry -- none of which has a equity analogue.
 
 Everything here reports what the **exchange** would do. It does not liquidate
 on the trader's behalf, re-enter, roll, or compute strategy P&L.

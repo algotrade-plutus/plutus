@@ -1,4 +1,4 @@
-"""The cash exchanges: HSX, HNX, UPCOM.
+"""The equity exchanges: HSX, HNX, UPCOM.
 
 One class parameterized by :class:`ExchangeSpec`. The three exchanges differ
 only in fields the rulebook already carries -- trading unit, daily trading
@@ -20,11 +20,11 @@ from plutus.market.protocol import (
 )
 from plutus.market.verdicts import Admissibility, AdmissionRule, Verdict
 
-__all__ = ['CashExchange', 'HSX_EXCHANGE', 'HNX_EXCHANGE', 'UPCOM_EXCHANGE']
+__all__ = ['EquityExchange', 'HSX_EXCHANGE', 'HNX_EXCHANGE', 'UPCOM_EXCHANGE']
 
 
-class CashExchange(Exchange):
-    """Order admission for a Vietnamese cash equity exchange."""
+class EquityExchange(Exchange):
+    """Order admission for a Vietnamese equity exchange."""
 
     def admits(
         self,
@@ -182,6 +182,6 @@ class CashExchange(Exchange):
         return None
 
 
-HSX_EXCHANGE = CashExchange(HSX)
-HNX_EXCHANGE = CashExchange(HNX)
-UPCOM_EXCHANGE = CashExchange(UPCOM)
+HSX_EXCHANGE = EquityExchange(HSX)
+HNX_EXCHANGE = EquityExchange(HNX)
+UPCOM_EXCHANGE = EquityExchange(UPCOM)

@@ -8,7 +8,7 @@
 ## 1. Thesis
 
 A backtest is only as faithful as its model of the exchange. Vietnam's four
-exchanges — HSX, HNX, UPCOM (cash) and HNXDS (derivatives) — each enforce a
+exchanges — HSX, HNX, UPCOM (equity) and HNXDS (derivatives) — each enforce a
 distinct set of **admission** rules (will the exchange accept this order?) and
 **position** rules (will the exchange let this position survive?) that no
 general-purpose backtester encodes.
@@ -31,7 +31,7 @@ Nobody has written those semantics for Vietnam.
 
 The two rule families bind on **different** exchanges:
 
-| Rule | Cash (HSX/HNX/UPCOM) | Derivatives (HNXDS) |
+| Rule | Equity (HSX/HNX/UPCOM) | Derivatives (HNXDS) |
 |---|---|---|
 | Round lot | 100 shares — **binds** | 1 contract — vanishes |
 | Tick grid | price-dependent — **binds** | flat 0.1 — trivial |
@@ -41,10 +41,10 @@ The two rule families bind on **different** exchanges:
 | Margin (initial + maintenance, daily MTM) | none | **binds** |
 | Expiry / forced settlement | none | **binds** |
 
-Order-admission dominates the cash exchanges; position-survival dominates the
+Order-admission dominates the equity exchanges; position-survival dominates the
 derivatives exchange. One exchange is an observation; the pair is the framework.
 This asymmetry is why derivatives is a co-equal contribution, not a section — it
-exercises the half of the framework the cash exchanges cannot.
+exercises the half of the framework the equity exchanges cannot.
 
 ## 2. Non-goals — exchange-side, not trader-side (Rule 2)
 
@@ -102,7 +102,7 @@ plutus/market/
   verdicts.py     Admissibility, Viability, PositionEvent (+ reason enums)
   exchanges/
     base.py       Exchange ABC: admits() + sustains()
-    cash.py       CashExchange (one class, parameterized by ExchangeSpec;
+    equity.py     EquityExchange (one class, parameterized by ExchangeSpec;
                   HSX/HNX/UPCOM are instances, not subclasses)
     derivatives.py HNXDSExchange (margin, position limit, expiry)
   adapters/
@@ -163,7 +163,7 @@ class Exchange(ABC):
 
 `admits` checks, in order, short-circuiting on the first breach:
 1. price on the exchange tick grid (`get_hsx_tick_size` for HSX; flat 0.1 else);
-2. size on the round lot (`TRADING_UNIT`: 100 cash, 1 derivatives);
+2. size on the round lot (`TRADING_UNIT`: 100 equity, 1 derivatives);
 3. **BAND_LIMIT** (stateless) — price outside `[floor, ceiling]`. Needs no book.
 4. **BAND_LOCK** (fillability) — a marketable order on the locked side of a band.
    Requires lock provenance: `MarketState.locked_side` plus `lock_evidence`
@@ -171,7 +171,7 @@ class Exchange(ABC):
    or `UNKNOWN` → `INDETERMINATE`). An order priced *at* the ceiling is
    admissible — the exchange accepts it; it simply may not fill. Conflating the
    two would make the equity headline unmeasurable at bar resolution;
-5. foreign room, when the order is flagged foreign and room is known (cash only);
+5. foreign room, when the order is flagged foreign and room is known (equity only);
 6. session semantics — ATO/ATC are call auctions; a marketable order there
    participates in price formation rather than crossing a book.
 
@@ -290,7 +290,7 @@ remain and all serve the new claims as reproducible substrate.
 - `admits` unit-tested per rule per exchange, including the 8-char C/E/F
   warrant-ETF tick exception and the 1-contract derivatives lot.
 - Property test: every price `admits` accepts on HSX lies on the legal grid.
-- Replaying the naive momentum rule through the HSX `CashExchange` reproduces
+- Replaying the naive momentum rule through the HSX `EquityExchange` reproduces
   the measured blocked-entry rate exactly — **25,464 blocked of 197,337
   attempts (12.9038%)**, stocks-only, inverted bands filtered. Asserted as
   integers, not a tolerance. This is the test that ties code to the paper's
@@ -311,9 +311,9 @@ remain and all serve the new claims as reproducible substrate.
 ## 7. Open questions carried in (not resolved by this design)
 
 1. **RIVF deadline ~31 Aug — best-effort accepted.** Not treated as a hard
-   gate; we ship the best version we have by then. The cash exchanges plus
+   gate; we ship the best version we have by then. The equity exchanges plus
    order admission are the minimum viable paper; derivatives position survival
-   is the elevation. Sequencing favours the cash exchanges first so a slip
+   is the elevation. Sequencing favours the equity exchanges first so a slip
    degrades gracefully.
 2. **17,274 impossible close-to-close moves** (>15%, any band) — a robustness
    check on the equity headline, NOT a contribution and NOT a data fix. A naive
@@ -336,7 +336,7 @@ remain and all serve the new claims as reproducible substrate.
 
 ## 8. Effort
 
-~8–10 focused days before drafting: protocol+verdicts ~1, cash `admits` ~1.5,
+~8–10 focused days before drafting: protocol+verdicts ~1, equity `admits` ~1.5,
 derivatives `sustains`+margin ~3, datahub adapter ~1, tick-resolution
 measurement ~1.5, derivatives measurement ~1. The `ExchangeSpec` rename is
 hours, not days. Reorganizes WP3's scope around exchanges rather than adding to

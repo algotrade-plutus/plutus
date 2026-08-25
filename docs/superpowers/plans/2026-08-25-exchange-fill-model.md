@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build an executable model of Vietnamese exchange fill rules — order admission for the cash exchanges (HSX/HNX/UPCOM) and position survival for the derivatives exchange (HNXDS) — and measure what ignoring them costs.
+**Goal:** Build an executable model of Vietnamese exchange fill rules — order admission for the equity exchanges (HSX/HNX/UPCOM) and position survival for the derivatives exchange (HNXDS) — and measure what ignoring them costs.
 
 **Architecture:** A new `plutus.market` package. One `Exchange` ABC with two method families: `admits(order, state) -> Admissibility` (stateless) and `sustains(position, path) -> Viability` (stateful). Exchanges read a static `ExchangeSpec` rulebook from `plutus.core.constant`. All market data crosses a granularity-agnostic `MarketState` boundary supplied by an adapter, so the same rules run at daily-bar and tick resolution and the package never imports a data vendor.
 
@@ -40,7 +40,7 @@ Every task's requirements implicitly include this section.
 | `src/plutus/market/protocol.py` | Value types: `Side`, `OrderType` re-export, `Order`, `Position`, `BookLevel`, `OrderBook`, `MarketState`, `InstrumentSpec`, `InstrumentKind`, `SessionPhase`, `LockEvidence`, `BandSource`, `Resolution`. |
 | `src/plutus/market/verdicts.py` | Outcome types: `Verdict`, `AdmissionRule`, `Admissibility`, `PositionEventKind`, `SettlementSource`, `PositionEvent`, `Viability`, and their `to_dict()`. |
 | `src/plutus/market/exchanges/base.py` | `Exchange` ABC. |
-| `src/plutus/market/exchanges/cash.py` | `CashExchange` — one class parameterized by `ExchangeSpec`; HSX/HNX/UPCOM are instances. |
+| `src/plutus/market/exchanges/equity.py` | `EquityExchange` — one class parameterized by `ExchangeSpec`; HSX/HNX/UPCOM are instances. |
 | `src/plutus/market/exchanges/derivatives.py` | `HNXDSExchange` — margin, position limit, expiry. |
 | `src/plutus/market/margin.py` | `MarginConfig`, variation-margin arithmetic. |
 | `src/plutus/market/expiry.py` | Third-Thursday expiry, contract-code parsing. |
@@ -56,7 +56,7 @@ Every task's requirements implicitly include this section.
 
 ---
 
-## Phase A — Foundation and the cash exchanges (Tasks 1–8)
+## Phase A — Foundation and the equity exchanges (Tasks 1–8)
 
 Delivers order admission and the equity headline. This is the minimum viable paper; a slip after Phase A degrades gracefully.
 
@@ -880,19 +880,19 @@ git commit -m "Add exchange verdict types with a working JSON contract"
 
 ---
 
-### Task 4: `Exchange` ABC and `CashExchange` — tick grid and round lot
+### Task 4: `Exchange` ABC and `EquityExchange` — tick grid and round lot
 
 **Files:**
 - Create: `src/plutus/market/exchanges/__init__.py`
 - Create: `src/plutus/market/exchanges/base.py`
-- Create: `src/plutus/market/exchanges/cash.py`
-- Test: `tests/market/test_cash_admission.py`
+- Create: `src/plutus/market/exchanges/equity.py`
+- Test: `tests/market/test_equity_admission.py`
 
 **Interfaces:**
 - Consumes: `protocol.Order`, `protocol.MarketState`, `protocol.InstrumentSpec`, `verdicts.*`, `plutus.core.constant.ExchangeSpec` (Task 1).
-- Produces: `Exchange` (ABC with `admits`/`sustains`), `CashExchange`, and module-level instances `HSX_EXCHANGE`, `HNX_EXCHANGE`, `UPCOM_EXCHANGE`.
+- Produces: `Exchange` (ABC with `admits`/`sustains`), `EquityExchange`, and module-level instances `HSX_EXCHANGE`, `HNX_EXCHANGE`, `UPCOM_EXCHANGE`.
 
-**One class, not three.** HSX/HNX/UPCOM differ only in fields already inside `ExchangeSpec` (`trading_unit`, `daily_trading_limit`, `tick_size_function`), so they are instances of one `CashExchange`, not three subclasses.
+**One class, not three.** HSX/HNX/UPCOM differ only in fields already inside `ExchangeSpec` (`trading_unit`, `daily_trading_limit`, `tick_size_function`), so they are instances of one `EquityExchange`, not three subclasses.
 
 **Two traps, both verified:**
 - `get_hsx_tick_size` returns **`None`** for a price no band matches (e.g. negative, or `Infinity`) despite being annotated `-> Decimal`. The predicate must map `None` to `INDETERMINATE`, not assume a `Decimal`.
@@ -901,15 +901,15 @@ git commit -m "Add exchange verdict types with a working JSON contract"
 - [ ] **Step 1: Write the failing test**
 
 ```python
-# tests/market/test_cash_admission.py
-"""Cash-exchange admission: tick grid and round lot."""
+# tests/market/test_equity_admission.py
+"""Equity-exchange admission: tick grid and round lot."""
 
 from datetime import datetime
 from decimal import Decimal
 
 import pytest
 
-from plutus.market.exchanges.cash import HNX_EXCHANGE, HSX_EXCHANGE, UPCOM_EXCHANGE
+from plutus.market.exchanges.equity import HNX_EXCHANGE, HSX_EXCHANGE, UPCOM_EXCHANGE
 from plutus.market.protocol import MarketState, Order, SessionPhase, Side
 from plutus.market.verdicts import AdmissionRule, Verdict
 
@@ -999,7 +999,7 @@ def test_unmatched_price_yields_indeterminate_not_a_crash():
 
 
 @pytest.mark.parametrize('exchange', [HNX_EXCHANGE, UPCOM_EXCHANGE])
-def test_non_hsx_cash_exchanges_use_a_flat_tenth(exchange):
+def test_non_hsx_equity_exchanges_use_a_flat_tenth(exchange):
     state = _state(reference=Decimal('25'), ceiling=Decimal('30'),
                    floor=Decimal('20'), last=Decimal('25'))
     assert exchange.admits(_order(limit_price=Decimal('25.1')), state).verdict \
@@ -1013,7 +1013,7 @@ def test_non_hsx_cash_exchanges_use_a_flat_tenth(exchange):
 
 @pytest.mark.parametrize('qty, admitted', [(100, True), (1000, True),
                                            (150, False), (1, False), (0, False)])
-def test_cash_round_lot_is_one_hundred(qty, admitted):
+def test_equity_round_lot_is_one_hundred(qty, admitted):
     result = HSX_EXCHANGE.admits(_order(quantity=qty), _state())
     if admitted:
         assert result.verdict is Verdict.ADMITTED
@@ -1037,7 +1037,7 @@ def test_rule_order_is_tick_then_lot():
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `PYTHONPATH=src /Users/nadan/.pyenv/versions/3.12.4/bin/python3 -m pytest tests/market/test_cash_admission.py -q`
+Run: `PYTHONPATH=src /Users/nadan/.pyenv/versions/3.12.4/bin/python3 -m pytest tests/market/test_equity_admission.py -q`
 Expected: FAIL — `ModuleNotFoundError: No module named 'plutus.market.exchanges'`
 
 - [ ] **Step 3: Write the implementation**
@@ -1047,14 +1047,14 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'plutus.market.exchange
 """Exchange models: one per Vietnamese exchange."""
 
 from plutus.market.exchanges.base import Exchange
-from plutus.market.exchanges.cash import (
+from plutus.market.exchanges.equity import (
     HNX_EXCHANGE,
     HSX_EXCHANGE,
     UPCOM_EXCHANGE,
-    CashExchange,
+    EquityExchange,
 )
 
-__all__ = ['Exchange', 'CashExchange', 'HSX_EXCHANGE', 'HNX_EXCHANGE',
+__all__ = ['Exchange', 'EquityExchange', 'HSX_EXCHANGE', 'HNX_EXCHANGE',
            'UPCOM_EXCHANGE']
 ```
 
@@ -1077,7 +1077,7 @@ class Exchange(ABC):
     """Models one exchange's decisions about orders and positions.
 
     Two method families, deliberately separate because they bind on different
-    exchanges: :meth:`admits` (stateless order admission) dominates the cash
+    exchanges: :meth:`admits` (stateless order admission) dominates the equity
     exchanges, :meth:`sustains` (stateful position survival) dominates the
     derivatives exchange.
     """
@@ -1108,7 +1108,7 @@ class Exchange(ABC):
     ) -> Viability:
         """Would this exchange let this position survive this path?
 
-        Cash exchanges impose no margin, no position limit and no expiry, so
+        Equity exchanges impose no margin, no position limit and no expiry, so
         the base implementation reports unconditional survival. The derivatives
         exchange overrides it.
         """
@@ -1124,8 +1124,8 @@ class Exchange(ABC):
 ```
 
 ```python
-# src/plutus/market/exchanges/cash.py
-"""The cash exchanges: HSX, HNX, UPCOM.
+# src/plutus/market/exchanges/equity.py
+"""The equity exchanges: HSX, HNX, UPCOM.
 
 One class parameterized by :class:`ExchangeSpec`. The three exchanges differ
 only in fields the rulebook already carries -- trading unit, daily trading
@@ -1140,11 +1140,11 @@ from plutus.market.exchanges.base import Exchange
 from plutus.market.protocol import InstrumentSpec, MarketState, Order
 from plutus.market.verdicts import Admissibility, AdmissionRule, Verdict
 
-__all__ = ['CashExchange', 'HSX_EXCHANGE', 'HNX_EXCHANGE', 'UPCOM_EXCHANGE']
+__all__ = ['EquityExchange', 'HSX_EXCHANGE', 'HNX_EXCHANGE', 'UPCOM_EXCHANGE']
 
 
-class CashExchange(Exchange):
-    """Order admission for a Vietnamese cash equity exchange."""
+class EquityExchange(Exchange):
+    """Order admission for a Vietnamese equity exchange."""
 
     def admits(
         self,
@@ -1182,14 +1182,14 @@ class CashExchange(Exchange):
         return verdict(Verdict.ADMITTED)
 
 
-HSX_EXCHANGE = CashExchange(HSX)
-HNX_EXCHANGE = CashExchange(HNX)
-UPCOM_EXCHANGE = CashExchange(UPCOM)
+HSX_EXCHANGE = EquityExchange(HSX)
+HNX_EXCHANGE = EquityExchange(HNX)
+UPCOM_EXCHANGE = EquityExchange(UPCOM)
 ```
 
 - [ ] **Step 4: Run tests**
 
-Run: `PYTHONPATH=src /Users/nadan/.pyenv/versions/3.12.4/bin/python3 -m pytest tests/market/test_cash_admission.py -q`
+Run: `PYTHONPATH=src /Users/nadan/.pyenv/versions/3.12.4/bin/python3 -m pytest tests/market/test_equity_admission.py -q`
 Expected: PASS (all parametrizations)
 
 Full suite expected: `493 passed`.
@@ -1197,8 +1197,8 @@ Full suite expected: `493 passed`.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/plutus/market/exchanges tests/market/test_cash_admission.py
-git commit -m "Add Exchange ABC and CashExchange tick-grid and round-lot admission"
+git add src/plutus/market/exchanges tests/market/test_equity_admission.py
+git commit -m "Add Exchange ABC and EquityExchange tick-grid and round-lot admission"
 ```
 
 ---
@@ -1206,12 +1206,12 @@ git commit -m "Add Exchange ABC and CashExchange tick-grid and round-lot admissi
 ### Task 5: `BAND_LIMIT` and `BAND_LOCK` — the split that makes the headline measurable
 
 **Files:**
-- Modify: `src/plutus/market/exchanges/cash.py` (extend `admits`)
+- Modify: `src/plutus/market/exchanges/equity.py` (extend `admits`)
 - Test: `tests/market/test_band_rules.py`
 
 **Interfaces:**
 - Consumes: everything from Task 4, plus `protocol.BandSource`, `protocol.LockEvidence`.
-- Produces: no new public names; `CashExchange.admits` now enforces rules 3 and 4.
+- Produces: no new public names; `EquityExchange.admits` now enforces rules 3 and 4.
 
 **This is the task the whole design turns on.** Two different questions were originally one rule:
 
@@ -1233,7 +1233,7 @@ from decimal import Decimal
 
 import pytest
 
-from plutus.market.exchanges.cash import HSX_EXCHANGE
+from plutus.market.exchanges.equity import HSX_EXCHANGE
 from plutus.market.protocol import (
     BandSource, LockEvidence, MarketState, Order, SessionPhase, Side,
 )
@@ -1366,9 +1366,9 @@ def test_band_limit_precedes_band_lock():
 Run: `PYTHONPATH=src /Users/nadan/.pyenv/versions/3.12.4/bin/python3 -m pytest tests/market/test_band_rules.py -q`
 Expected: FAIL — the first band test fails with `Verdict.ADMITTED` because no band rule exists yet.
 
-- [ ] **Step 3: Extend `CashExchange.admits`**
+- [ ] **Step 3: Extend `EquityExchange.admits`**
 
-Insert these two blocks in `src/plutus/market/exchanges/cash.py` **after** the round-lot block and **before** `return verdict(Verdict.ADMITTED)`. Add `BandSource`, `LockEvidence`, `Side` to the imports from `plutus.market.protocol`.
+Insert these two blocks in `src/plutus/market/exchanges/equity.py` **after** the round-lot block and **before** `return verdict(Verdict.ADMITTED)`. Add `BandSource`, `LockEvidence`, `Side` to the imports from `plutus.market.protocol`.
 
 ```python
         # --- 3. BAND_LIMIT: stateless, needs no book ----------------------
@@ -1411,7 +1411,7 @@ Insert these two blocks in `src/plutus/market/exchanges/cash.py` **after** the r
 
 - [ ] **Step 4: Run tests**
 
-Run: `PYTHONPATH=src /Users/nadan/.pyenv/versions/3.12.4/bin/python3 -m pytest tests/market/test_band_rules.py tests/market/test_cash_admission.py -q`
+Run: `PYTHONPATH=src /Users/nadan/.pyenv/versions/3.12.4/bin/python3 -m pytest tests/market/test_band_rules.py tests/market/test_equity_admission.py -q`
 Expected: PASS, both modules.
 
 Full suite expected: `504 passed`.
@@ -1419,7 +1419,7 @@ Full suite expected: `504 passed`.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/plutus/market/exchanges/cash.py tests/market/test_band_rules.py
+git add src/plutus/market/exchanges/equity.py tests/market/test_band_rules.py
 git commit -m "Split band admission from band fillability (BAND_LIMIT vs BAND_LOCK)"
 ```
 
@@ -1428,12 +1428,12 @@ git commit -m "Split band admission from band fillability (BAND_LIMIT vs BAND_LO
 ### Task 6: `FOREIGN_ROOM` and `SESSION_SEMANTICS`
 
 **Files:**
-- Modify: `src/plutus/market/exchanges/cash.py`
+- Modify: `src/plutus/market/exchanges/equity.py`
 - Test: `tests/market/test_room_and_session.py`
 
 **Interfaces:**
 - Consumes: Task 5 output.
-- Produces: rules 5 and 6 on `CashExchange.admits`.
+- Produces: rules 5 and 6 on `EquityExchange.admits`.
 
 **Availability warning that must be stated in the docstring:** `has_field('foreign_room')` is **`False`** on the shipped Parquet root. Rule 5 therefore returns `INDETERMINATE` for every state built from that corpus. It is implemented and unit-tested against synthetic states; it is **not** measurable there, and no measurement task may assume it is.
 
@@ -1450,7 +1450,7 @@ from decimal import Decimal
 
 import pytest
 
-from plutus.market.exchanges.cash import HSX_EXCHANGE, UPCOM_EXCHANGE
+from plutus.market.exchanges.equity import HSX_EXCHANGE, UPCOM_EXCHANGE
 from plutus.market.protocol import (
     BandSource, MarketState, Order, OrderType, SessionPhase, Side,
 )
@@ -1576,7 +1576,7 @@ def test_unknown_session_yields_indeterminate():
 Run: `PYTHONPATH=src /Users/nadan/.pyenv/versions/3.12.4/bin/python3 -m pytest tests/market/test_room_and_session.py -q`
 Expected: FAIL — foreign/session tests report `ADMITTED`.
 
-- [ ] **Step 3: Extend `CashExchange.admits`**
+- [ ] **Step 3: Extend `EquityExchange.admits`**
 
 Add `OrderType` to the `plutus.market.protocol` import. Insert **after** the `BAND_LOCK` block and **before** `return verdict(Verdict.ADMITTED)`:
 
@@ -1676,7 +1676,7 @@ Full suite expected: `517 passed`.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/plutus/market/exchanges/cash.py tests/market/test_room_and_session.py
+git add src/plutus/market/exchanges/equity.py tests/market/test_room_and_session.py
 git commit -m "Add foreign-room and call-auction session admission rules"
 ```
 
@@ -2309,7 +2309,7 @@ The claimed 12.96% reproduces **only** when the ceiling lock is tested on the *s
 
 Both are computed. `lag=1` is the honest headline; `lag=0` is reported alongside it as the figure prior work quoted, with the look-ahead stated. The claimed 12.96% on n=191,454 is **not reproducible under any filter tried** (nearest: 12.44% on n=191,780 after excluding calendar gaps and >15% moves) and is superseded.
 
-Exact rule: per-ticker close series from `quote_close`; signal on day *t* where `close_t > close_{t-1}` via `lag() OVER (PARTITION BY tickersymbol ORDER BY datetime)`; join `quote_ceil`/`quote_floor` on the *attempt* day; require `ceil >= floor` (excludes the 1,272 inverted rows, of which **1,226 are cash stock ticker-days** — this filter is load-bearing, not cosmetic); blocked iff `close == ceiling` on the attempt day. Stocks-only adds `JOIN quote_ticker ON instrumenttype = 'stock'`.
+Exact rule: per-ticker close series from `quote_close`; signal on day *t* where `close_t > close_{t-1}` via `lag() OVER (PARTITION BY tickersymbol ORDER BY datetime)`; join `quote_ceil`/`quote_floor` on the *attempt* day; require `ceil >= floor` (excludes the 1,272 inverted rows, of which **1,226 are equity ticker-days** — this filter is load-bearing, not cosmetic); blocked iff `close == ceiling` on the attempt day. Stocks-only adds `JOIN quote_ticker ON instrumenttype = 'stock'`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -2366,7 +2366,7 @@ def test_the_lag_more_than_halves_the_rate(same_session, next_session):
 
 @requires_corpus
 def test_inverted_bands_are_excluded_and_the_count_is_reported(next_session):
-    """1,226 of the 1,272 inverted pairs are cash stock ticker-days."""
+    """1,226 of the 1,272 inverted pairs are equity ticker-days."""
     assert next_session.excluded_inverted > 0
 
 
@@ -2592,13 +2592,13 @@ git add measurements/__init__.py measurements/equity_admission.py tests/market/t
 git commit -m "Measure blocked entries at both lags; the tradeable rate is 5.84%, not 12.9%"
 ```
 
-**Phase A is complete here.** The library admits or rejects cash orders under six rules, the boundary is vendor-independent, and the paper's equity number is computed by code and defended by CI.
+**Phase A is complete here.** The library admits or rejects equity orders under six rules, the boundary is vendor-independent, and the paper's equity number is computed by code and defended by CI.
 
 ---
 
 ## Phase B — The derivatives exchange (Tasks 9–12)
 
-Delivers position survival: margin, forced liquidation, blocked exits, expiry. This is the co-equal contribution — it exercises the half of the framework the cash exchanges cannot, because the lot and tick rules that bind on cash *vanish* on futures while margin and expiry have no cash analogue.
+Delivers position survival: margin, forced liquidation, blocked exits, expiry. This is the co-equal contribution — it exercises the half of the framework the equity exchanges cannot, because the lot and tick rules that bind on equity *vanish* on futures while margin and expiry have no equity analogue.
 
 ---
 
@@ -3360,7 +3360,7 @@ Admission here is nearly trivial and that is the point. The round lot is one
 contract so the lot rule never binds; the tick grid is a flat 0.1 so the grid
 rule is uninteresting; there is no foreign-ownership cap at all. What binds
 instead is position survival -- margin, forced liquidation, blocked exits,
-position limits and expiry -- none of which has a cash-equity analogue.
+position limits and expiry -- none of which has a equity analogue.
 
 Everything here reports what the **exchange** would do. It does not liquidate
 on the trader's behalf, re-enter, roll, or compute strategy P&L.
@@ -3549,7 +3549,7 @@ Then extend `src/plutus/market/exchanges/__init__.py`:
 ```python
 from plutus.market.exchanges.derivatives import HNXDS_EXCHANGE, HNXDSExchange
 
-__all__ = ['Exchange', 'CashExchange', 'HSX_EXCHANGE', 'HNX_EXCHANGE',
+__all__ = ['Exchange', 'EquityExchange', 'HSX_EXCHANGE', 'HNX_EXCHANGE',
            'UPCOM_EXCHANGE', 'HNXDSExchange', 'HNXDS_EXCHANGE']
 ```
 
@@ -3836,7 +3836,7 @@ git add measurements/margin_incidence.py tests/market/test_margin_incidence.py
 git commit -m "Measure front-month margin-call incidence with a stated entry policy"
 ```
 
-**Phase B is complete here.** Both halves of the framework are implemented and measured: order admission on the cash exchanges, position survival on the derivatives exchange.
+**Phase B is complete here.** Both halves of the framework are implemented and measured: order admission on the equity exchanges, position survival on the derivatives exchange.
 
 ---
 
@@ -3935,4 +3935,4 @@ Define the naive baseline explicitly as **a flat 0.1 grid over HSX closes** (83.
 | 5 of 8 `core/*.py` unimportable | bare `import utils` | Only `constant`, `instrument`, `order` are safe |
 | Shared DuckDB connection | `ohlc_query.py:54` | Never hold two live iterators from one query object |
 | 87 tickers absent from the master | `quote_ticker` | `instrument()` must never raise |
-| 1,272 inverted bands, 1,226 of them cash stocks | `quote_ceil`/`quote_floor` | The `ceil >= floor` filter is load-bearing on the equity headline |
+| 1,272 inverted bands, 1,226 of them equities | `quote_ceil`/`quote_floor` | The `ceil >= floor` filter is load-bearing on the equity headline |
