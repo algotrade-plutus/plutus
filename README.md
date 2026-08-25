@@ -4,7 +4,7 @@
 
 [![Python](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-617%20passing-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/tests-630%20passing-brightgreen.svg)]()
 
 PLUTUS is a data analytics framework for the Vietnamese stock market with **three ways to access a 21 GB historical archive**: Python API, command-line tools, and natural language queries through LLM integration.
 
@@ -21,7 +21,7 @@ PLUTUS provides **zero-setup access** to Vietnamese market data without database
 - **⚡ High Performance**: Optional Parquet conversion — 10-30x faster on real queries, 81.8% smaller
 - **🔧 Triple Interface**: Python API + CLI + LLM integration (MCP)
 - **🤖 AI-Powered**: Query data using natural language through Claude, Gemini, or other MCP clients
-- **✅ Production Ready**: 617 tests, comprehensive documentation
+- **✅ Production Ready**: 630 tests, comprehensive documentation
 
 ---
 
@@ -475,7 +475,7 @@ lookups.
 ## Project Status
 
 - **Version**: see `plutus.__version__` (single source: `pyproject.toml`)
-- **Tests**: 617/617 passing ✅
+- **Tests**: 630/630 passing ✅
 - **Production Ready**: DataHub + MCP Server
 
 **Current Features:**

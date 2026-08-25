@@ -741,7 +741,7 @@ design.
 | # | The simplification | What it buys | Fidelity given up | Revisit trigger |
 |---|---|---|---|---|
 | T1 | Domestic investor only; foreign-ownership room is never enforced (§15.3) | Removes an entire date-switched control flow — pre-KRX *fill-to-room-then-cancel* vs post-KRX *reject-at-entry* — plus the room time series from the hot path | A foreign account's orders would, in reality, be partially filled or rejected on room. We admit them in full. Verified as a real constraint, not a vacuous one: **34,653 room observations sit below a single 100-share lot**; FPT on 2022-12-30 runs down to 11 shares | Any strategy or paper result that claims to represent a foreign account; or the post-KRX rulebook landing, which is when the two branches must both exist anyway |
-| T2 | Final settlement price = the data source's `close` on expiry day (§15.4) | Collapses the index-referenced trimmed-mean computation to a single data read, and removes the VN30 dissemination-frequency dependency entirely | The published final settlement is computed from the index over a defined window, not from the contract's own close. Measured gap: **~0.4%** on the one contract checked (VN30F2206, 2022-06-16 — close 1286.0 vs index-window mean 1281.4). One sample; the tail is unmeasured | Any result whose P&L is materially sensitive to expiry-day pricing; or a systematic measurement of the gap across all contracts, which is cheap and should be done before the paper leans on it |
+| T2 | Final settlement price = the data source's `close` on expiry day (§15.4) | Collapses the index-referenced trimmed-mean computation to a single data read, and removes the VN30 dissemination-frequency dependency entirely | The published final settlement is computed from the index over a defined window, not from the contract's own close. Measured against the **official settlement series** in the production DB (`quote.settlementprice`): VN30F2206 on its 2022-06-16 expiry settled at **1283.21** against a close of **1286.00** — the close overstates by **0.217%**. Still one true expiry; the tail is unmeasured | Any result whose P&L is materially sensitive to expiry-day pricing; or a systematic measurement of the gap, now blocked on data rather than method — see below |
 
 **How these are reported.** Each is stated in the paper as a scoped simplification with
 its measured cost attached — T2 with the 0.4% figure and the sample size (n=1, a stated
@@ -751,10 +751,31 @@ described as a modelling result. Reporting them this way is worth more than hidi
 them: it is direct evidence that the fidelity claim elsewhere is audited rather than
 asserted.
 
-**Before the paper cites T2, widen the sample.** Running the close-vs-index-window
-comparison across every expiry in the corpus turns "~0.4% on one contract" into a
-distribution. That is a few hours of work and it converts the register's weakest row
-into a defensible number.
+**Before the paper cites T2, widen the sample — and note what stands in the way.**
+The production DB carries an official `quote.settlementprice` series, which is what
+produced the 0.217% figure. But it holds only **three symbols**: `VN30F2206`,
+`VN30F2208` and `VN30INDEX`, and only one of those two contract series covers a real
+expiry day. So the direct comparison cannot be widened from that table as it stands.
+
+Two ways forward, in cost order:
+
+1. **Reconstruct the settlement price from the index.** `quote.vn30` carries the index
+   level; recomputing the published averaging window on each expiry day yields a
+   comparison across every expiry in the window. This is the cheap path and it is a
+   measurement, not a rebuild.
+2. **Ask whoever maintains the pipeline why `settlementprice` covers three symbols.**
+   If the exchange publishes it per contract and we are simply not ingesting it, this
+   tradeoff can be closed outright rather than measured — the simulator would read a
+   real settlement price and T2 disappears.
+
+**A second finding sits underneath T2 and is arguably larger.** `VN30F2208`'s last row
+is dated 2022-08-16 — *not* an expiry day, so it is a **daily** settlement price (DSP),
+and it differs from that day's close by **0.146%**. Vietnam marks derivatives margin to
+the DSP every session, not to the close. So the close-as-settlement substitution is not
+confined to expiry day: it perturbs the daily margin mark across the whole holding
+period. Any margin-incidence figure computed on close-as-settlement inherits that, and
+§7.4's account-level model should read a DSP series rather than a close where one
+exists.
 
 ## 16. Stated assumptions
 

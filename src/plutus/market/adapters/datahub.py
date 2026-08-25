@@ -22,7 +22,9 @@ from typing import Callable, Dict, Iterator, List, Optional, Tuple, Union
 
 import duckdb
 
-from plutus.core.constant import DS, HNX, HSX, UPCOM, VietnamMarketConstant
+from plutus.core.constant import (
+    DS, HNX, HSX, UPCOM, VietnamMarketConstant, is_covered_warrant, is_etf,
+)
 from plutus.datahub.config import DataHubConfig
 from plutus.market.protocol import (
     BandSource, InstrumentKind, InstrumentSpec, LockEvidence, MarketState,
@@ -245,10 +247,18 @@ class DataHubSource:
                 multiplier=Decimal('100000'), expiry=expiry, underlying='VN30',
             )
 
-        if len(ticker) == 8 and ticker[0] in ('C', 'E', 'F'):
+        # Shares the classifier with the tick-size rule so the two cannot drift
+        # apart. The old test here -- 8 chars starting C, E or F -- also caught
+        # closed-end fund certificates (FUCTVGF1, FUCVREIT) and typed them
+        # WARRANT. They now fall through to the ticker master below, which
+        # types them FUND, and to the banded tick grid, which is the grid their
+        # prices actually lie on.
+        if is_covered_warrant(ticker) or is_etf(ticker):
             return InstrumentSpec(
                 ticker=ticker, exchange_code='HSX',
-                kind=InstrumentKind.WARRANT, trading_unit=100,
+                kind=(InstrumentKind.WARRANT if is_covered_warrant(ticker)
+                      else InstrumentKind.FUND),
+                trading_unit=100,
                 daily_trading_limit=self._limit_for('HSX'),
             )
 

@@ -45,14 +45,26 @@ def test_a_flat_path_survives_with_no_events():
     assert v.days_evaluated == 5
 
 
-def test_the_call_threshold_is_six_percent_not_five():
-    """Notional is marked to market alongside equity, so the ratio falls more
-    slowly than the price. The exact trigger for a long is
-    (1 - initial) / (1 - maintenance) = 0.775/0.825 = 0.9394, a 6.06% fall --
-    not the 5% the buffer alone would suggest.
+def test_the_legacy_call_threshold_follows_its_own_arithmetic():
+    """Pins the LEGACY per-position model against its own formula.
+
+    .. warning::
+
+       This is **not** how Vietnam calls margin. There is no published
+       maintenance margin ratio; the real test is utilisation,
+       ``MR / margin assets`` where ``MR = IM + VM`` over the whole account,
+       against a broker's threshold ladder. This test therefore pins an
+       internal consistency of the legacy walk, not a market behaviour, and
+       dies with that walk when the account-level model lands.
+
+    Within the legacy model: notional is marked to market alongside equity, so
+    the ratio falls more slowly than the price, and the trigger for a long is
+    ``(1 - initial) / (1 - maintenance)``.
     """
+    cfg = MarginConfig.VN30F_DEFAULT
     entry = Decimal('1441.8')
-    threshold = entry * Decimal('0.775') / Decimal('0.825')
+    threshold = (entry * (Decimal('1') - cfg.initial_rate)
+                 / (Decimal('1') - cfg.maintenance_rate))
 
     just_above = HNXDS_EXCHANGE.sustains(
         _long(), _path([float(entry), float(threshold * Decimal('1.001'))]))

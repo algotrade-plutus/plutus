@@ -20,3 +20,5 @@ idocs
 docs/_build/
 docs/_static/
 docs/_templates/
+# DuckDB spill files from corpus queries
+.tmp/

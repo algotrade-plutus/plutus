@@ -119,6 +119,30 @@ def test_equity_round_lot_is_one_hundred(qty, admitted):
         assert r.binding_constraint == 100
 
 
+@pytest.mark.parametrize('day, qty, admitted', [
+    # HOSE's minimum lot was 10 shares until 2021-01-03 ...
+    (datetime(2020, 6, 15, 10, 15), 10, True),
+    (datetime(2020, 6, 15, 10, 15), 50, True),
+    (datetime(2020, 6, 15, 10, 15), 5, False),
+    # ... and 100 from 2021-01-04.
+    (datetime(2021, 1, 4, 10, 15), 10, False),
+    (datetime(2021, 1, 4, 10, 15), 100, True),
+])
+def test_the_hsx_round_lot_is_resolved_at_the_order_instant(day, qty, admitted):
+    """A date-blind lot rejects orders the real HOSE accepted.
+
+    The corpus holds 94,675 HSX stock closes in 2020, so a lot of 100 applied
+    to all history refuses legal 10-share orders across most of a year of the
+    equity sample.
+    """
+    r = HSX_EXCHANGE.admits(_order(quantity=qty), _state(ts=day))
+    if admitted:
+        assert r.verdict is Verdict.ADMITTED
+    else:
+        assert r.verdict is Verdict.REJECTED
+        assert r.rule is AdmissionRule.ROUND_LOT
+
+
 def test_rule_order_is_tick_then_lot():
     """Both broken: the tick grid is reported, because it is checked first."""
     r = HSX_EXCHANGE.admits(
@@ -263,10 +287,41 @@ def test_limit_order_during_the_noon_break_is_rejected():
     assert r.rule is AdmissionRule.SESSION_SEMANTICS
 
 
-def test_plain_limit_order_in_an_auction_is_rejected():
-    """ATO/ATC are call auctions: a continuous-trading order has no book."""
+@pytest.mark.parametrize('phase', [SessionPhase.OPENING_AUCTION,
+                                   SessionPhase.CLOSING_AUCTION])
+def test_a_limit_order_is_legal_in_a_call_auction(phase):
+    """HOSE's session table reads "LO, ATO" and "LO, ATC".
+
+    An LO submitted into a call auction joins the auction book and matches at
+    the auction price. This module used to reject every LO in every auction on
+    every venue, which refuses a legal order.
+    """
     r = HSX_EXCHANGE.admits(_order(order_type=OrderType.LIMIT),
+                            _state(session=phase))
+    assert r.verdict is Verdict.ADMITTED
+
+
+@pytest.mark.parametrize('order_type', [
+    OrderType.MARKET_WITH_LEFTOVER_AS_LIMIT,
+    OrderType.MARKET_FILL_OR_KILL,
+    OrderType.MARKET_IMMEDIATE_OR_CANCEL,
+    OrderType.MARKET,
+])
+def test_the_market_order_family_is_rejected_in_a_call_auction(order_type):
+    """MTL/MOK/MAK/MKT sweep a resting book and kill the remainder. A call
+    auction has no resting book while it accumulates, so their semantics have
+    nothing to act on."""
+    r = HSX_EXCHANGE.admits(_order(order_type=order_type, limit_price=None),
                             _state(session=SessionPhase.OPENING_AUCTION))
+    assert r.verdict is Verdict.REJECTED
+    assert r.rule is AdmissionRule.SESSION_SEMANTICS
+
+
+def test_an_atc_order_is_rejected_in_the_opening_auction():
+    """The right auction type, the wrong auction."""
+    r = HSX_EXCHANGE.admits(
+        _order(order_type=OrderType.AT_THE_CLOSE, limit_price=None),
+        _state(session=SessionPhase.OPENING_AUCTION))
     assert r.verdict is Verdict.REJECTED
     assert r.rule is AdmissionRule.SESSION_SEMANTICS
 

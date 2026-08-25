@@ -12,7 +12,7 @@ determine the per-rule composition of the rejection log, so it is normative.
 
 from typing import Optional
 
-from plutus.core.constant import HNX, HSX, UPCOM
+from plutus.core.constant import HNX, HSX, UPCOM, get_trading_unit
 from plutus.market.exchanges.base import Exchange
 from plutus.market.protocol import (
     InstrumentSpec, LockEvidence, MarketState, Order, OrderType, SessionPhase,
@@ -21,6 +21,23 @@ from plutus.market.protocol import (
 from plutus.market.verdicts import Admissibility, AdmissionRule, Verdict
 
 __all__ = ['EquityExchange', 'HSX_EXCHANGE', 'HNX_EXCHANGE', 'UPCOM_EXCHANGE']
+
+#: Order types a call auction accepts.
+#:
+#: **A limit order is legal in both auctions.** HOSE's own session table reads
+#: "LO, ATO" for the opening call and "LO, ATC" for the closing call, and HNX's
+#: closing call reads "LO, ATC" likewise -- an LO submitted into an auction
+#: joins the auction book and matches at the auction price if it is at or
+#: through it. This module previously admitted only the matching auction type
+#: and rejected every LO, which refuses a legal order in every call auction on
+#: every venue.
+#:
+#: What a call auction genuinely does not accept is the continuous-session
+#: market family -- MTL, MOK, MAK and MKT -- whose semantics (sweep the book,
+#: kill the remainder) presuppose a resting book that a call auction does not
+#: have while it is accumulating.
+_OPENING_AUCTION_TYPES = frozenset({OrderType.AT_THE_OPENING, OrderType.LIMIT})
+_CLOSING_AUCTION_TYPES = frozenset({OrderType.AT_THE_CLOSE, OrderType.LIMIT})
 
 
 class EquityExchange(Exchange):
@@ -56,7 +73,16 @@ class EquityExchange(Exchange):
                 return verdict(Verdict.REJECTED, AdmissionRule.TICK_GRID, tick)
 
         # --- 2. ROUND_LOT -------------------------------------------------
-        unit = instrument.trading_unit if instrument else self.spec.trading_unit
+        # Resolved at the state's instant, not at load: HOSE's minimum lot was
+        # 10 shares until 2021-01-03 and 100 from 2021-01-04. An explicit
+        # instrument overrides the venue default.
+        if instrument is not None:
+            unit = instrument.trading_unit
+        else:
+            unit = get_trading_unit(
+                self.spec.code,
+                state.ts.date() if state.ts is not None else None,
+            )
         if order.quantity <= 0 or (order.quantity % unit) != 0:
             return verdict(Verdict.REJECTED, AdmissionRule.ROUND_LOT, unit)
 
@@ -98,9 +124,19 @@ class EquityExchange(Exchange):
 
         # --- 5. FOREIGN_ROOM ----------------------------------------------
         # Room limits acquisition, not disposal, so only a foreign BUY is
-        # constrained. NOTE: has_field('foreign_room') is False on the shipped
-        # Parquet corpus, so this returns INDETERMINATE for every state built
-        # from it. Implemented and unit-tested; not measurable there.
+        # constrained.
+        #
+        # This iteration assumes a DOMESTIC investor: `order.is_foreign`
+        # defaults False and the rule short-circuits, so no trade is ever
+        # blocked on room. That is a declared scope cut, not a finding that
+        # room does not bind -- it does. `quote_foreignroom` carries the
+        # REMAINING room (it decrements tick-by-tick within a session; HPG on
+        # 2022-11-15 walks 1753953772 -> 1753951472 -> 1753949172), and
+        # 34,653 observations sit below a single 100-share lot.
+        #
+        # An earlier comment here claimed the corpus has no such field. It is
+        # false: the field exists, and `adapters/datahub.py` simply hardcodes
+        # `foreign_room=None` when building state.
         if order.is_foreign and order.side is Side.BUY:
             if state.foreign_room is None:
                 return verdict(
@@ -152,20 +188,24 @@ class EquityExchange(Exchange):
             if self.spec.ato_session is None:
                 return reject(phase=phase.value,
                               reason=f'{self.spec.code} has no opening auction')
-            if order.order_type is not OrderType.AT_THE_OPENING:
+            if order.order_type not in _OPENING_AUCTION_TYPES:
                 return reject(phase=phase.value,
                               order_type=order.order_type.value,
-                              reason='call auction accepts ATO orders only')
+                              accepts=[t.value for t in _OPENING_AUCTION_TYPES],
+                              reason='order type not accepted in the opening '
+                                     'call auction')
             return None
 
         if phase is SessionPhase.CLOSING_AUCTION:
             if self.spec.atc_session is None:
                 return reject(phase=phase.value,
                               reason=f'{self.spec.code} has no closing auction')
-            if order.order_type is not OrderType.AT_THE_CLOSE:
+            if order.order_type not in _CLOSING_AUCTION_TYPES:
                 return reject(phase=phase.value,
                               order_type=order.order_type.value,
-                              reason='call auction accepts ATC orders only')
+                              accepts=[t.value for t in _CLOSING_AUCTION_TYPES],
+                              reason='order type not accepted in the closing '
+                                     'call auction')
             return None
 
         if phase is SessionPhase.POST_CLOSE_PLO:

@@ -16,7 +16,7 @@ from .conftest import requires_corpus
 @requires_corpus
 @pytest.mark.parametrize(
     'holding_days, entries, called',
-    [(5, 381, 28), (10, 381, 48), (20, 381, 56)],
+    [(5, 381, 29), (10, 381, 48), (20, 381, 56)],
 )
 def test_incidence_reproduces_exactly(corpus_root, holding_days, entries, called):
     r = measure_margin_incidence(str(corpus_root), holding_days=holding_days)
@@ -29,7 +29,7 @@ def test_the_published_rate_gives_a_non_degenerate_headline(corpus_root):
     """12.60% at a 10-session hold: neither saturated nor empty."""
     r = measure_margin_incidence(str(corpus_root), holding_days=10)
     assert r.call_rate == pytest.approx(Decimal('0.126'), abs=Decimal('0.001'))
-    assert r.initial_rate == Decimal('0.225')
+    assert r.initial_rate == Decimal('0.22')
 
 
 @requires_corpus
