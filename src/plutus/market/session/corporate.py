@@ -39,6 +39,21 @@ place in the package where two money conventions meet:
   dividend on a 25.5 close into a reference of ``-1974.5``; the error is
   invisible in a ratio and fatal in a band.
 
+**The event conserves money, and one of its legs is a purchase.** What the
+unsourced algebra encodes -- and the one thing the sources agree on
+(:data:`ARITHMETIC`) -- is that market capitalisation is unchanged across the
+event: the reference falls by exactly the value that left the company or
+diluted in. Three legs move value one way only: a cash dividend pays out, a
+stock dividend and a bonus issue dilute. The fourth does not. **Rights shares
+are bought, not given**, at ``subscription_price`` per share, and the price
+formula already assumes the money went in -- ``Pa * a`` sits in its numerator.
+So the engine debits the subscription when, and only when, the caller states
+that the rights were taken up, and it refuses to guess
+(:meth:`CorporateActionEngine.apply`). Crediting the shares without debiting
+what they cost creates money out of the event, and it is the one arithmetic
+error here that no downstream number would reveal: the holding is larger, the
+cash is untouched, and every invariant in the package still holds.
+
 **What is gazetted and what is not.** The distinction runs through every
 docstring below and it is the one claim this package cannot afford to blur.
 The *principle* is gazetted: on the ex-rights date the reference is the most
@@ -54,7 +69,7 @@ data, not as prose, so a published result can print it.
 
 from dataclasses import dataclass, replace
 from datetime import date, datetime
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_FLOOR, ROUND_HALF_UP, Decimal
 from enum import Enum
 from typing import (Dict, FrozenSet, Iterable, List, Mapping, Optional,
                     Protocol, Sequence, Tuple)
@@ -82,6 +97,7 @@ __all__ = [
     'ReferenceAdjustment',
     'RestingOrderOutcome',
     'RestingOrderPolicy',
+    'RightsSubscriptionUnfunded',
     'SessionView',
     'UnhandledCorporateAction',
     'UnhandledCorporateActionError',
@@ -89,6 +105,7 @@ __all__ = [
     'adjusted_reference',
     'quantity_factor',
     'round_to_quotation_unit',
+    'subscription_shares',
 ]
 
 
@@ -270,6 +287,20 @@ PROVENANCE: Mapping[str, str] = {
                            'registered balance, which is the total, so the '
                            'two differ by at most one lot-fraction per open '
                            'parcel. Reported as `fractional_residue`.',
+    'rights_subscription': 'THE ONE LEG THAT COSTS MONEY, and the take-up '
+                           'decision itself is UNSOURCED -- it is a portfolio '
+                           'decision, not a market rule, so the engine '
+                           'refuses to default it. When the caller states a '
+                           'take-up the engine DEBITS shares x '
+                           'subscription_price from settled cash, because the '
+                           'alternative -- crediting rights shares nobody '
+                           'paid for -- creates money out of the event. The '
+                           'charge is on the per-parcel FLOORED entitlement, '
+                           'never on the fractional one; in a combined event '
+                           'the floor cannot be split between the rights and '
+                           'stock legs and the residue is attributed to the '
+                           'free leg, so the holder is never billed for a '
+                           'share the ledger did not credit.',
     'dividend_withholding_tax': 'NOT APPLIED, and not in the rulebook. The '
                                 'cash leg is credited GROSS. The 5% dividend '
                                 'withholding is a charge row and the rulebook '
@@ -299,6 +330,20 @@ class UnsourcedCorporateAction(LookupError):
     mode where nothing is known must be a refusal and not a default. The one
     branch that reaches it today is a cash dividend at or above the base price
     before 2022-03-31 -- see :func:`adjusted_reference`.
+    """
+
+
+class RightsSubscriptionUnfunded(ValueError):
+    """A rights take-up costs more than the account can pay.
+
+    A ``ValueError`` because it is the same class of caller error as applying
+    an event before its ex-date, and a *named* one because it has an obvious
+    remedy the caller may want to take automatically: apply the same action
+    with ``take_up=False`` and let the rights lapse.
+
+    Raised **before any leg is applied**. A refusal that had already scaled the
+    holding would be the same fabrication this exception exists to prevent,
+    only harder to see.
     """
 
 
@@ -407,16 +452,26 @@ class CorporateAction:
             operative instant in a T+2 market.
         note: free text carried into the report.
 
-    **Rights issues are modelled as fully taken up.** The formula's ``a`` is
-    "new shares per existing share from a rights issue at subscription price
-    Pa", and the reference is adjusted on the *entitlement*, not on what the
-    holder chooses to do -- the exchange adjusts the whole market's reference
-    before anyone has subscribed. The holder's cash outlay for the
-    subscription is therefore **not** debited by this module: whether the
-    right is exercised, sold or lapsed is a portfolio decision, and design
-    section 3 puts every portfolio decision on the caller's side. A caller who
-    lets rights lapse must not apply the quantity leg, and
-    :meth:`CorporateActionEngine.apply` takes ``take_up`` for exactly that.
+    **The price leg of a rights issue is unconditional; the quantity leg is a
+    purchase.** The formula's ``a`` is "new shares per existing share from a
+    rights issue at subscription price Pa", and the reference is adjusted on
+    the *entitlement*, not on what the holder chooses to do -- the exchange
+    adjusts the whole market's reference before anyone has subscribed. The
+    holding is the other half and does not follow: rights shares are **bought**
+    at ``subscription_price``, so applying the quantity leg without paying for
+    it credits shares out of nothing, and the fabricated amount is exactly
+    ``a x subscription_price`` per share held -- largest, not smallest, on the
+    deep-discount issue that is the ordinary Vietnamese case.
+
+    So the two legs are decided separately and the module never applies the
+    second one on its own initiative. Whether a right is exercised, sold or
+    lapsed remains a portfolio decision on the caller's side (design section
+    3), which is why :meth:`CorporateActionEngine.apply` **refuses to default**
+    ``take_up`` for an action with a rights leg. What the engine does own is
+    the arithmetic of the decision once it is stated: ``take_up=True`` credits
+    the shares *and* debits what they cost, in the same call, so the two can
+    never be separated; ``take_up=False`` does neither. See
+    ``PROVENANCE['rights_subscription']``.
     """
 
     ticker: str
@@ -604,7 +659,7 @@ class CorporateAction:
 # --------------------------------------------------------------------------
 
 def quantity_factor(action: CorporateAction, *,
-                    take_up: bool = True) -> Decimal:
+                    take_up: bool = False) -> Decimal:
     """The multiplier on every holding of ``action.ticker``.
 
     Rulebook 3.6, the "matching quantity rule" clause of the same row as the
@@ -618,11 +673,48 @@ def quantity_factor(action: CorporateAction, *,
     not make. ``take_up=False`` drops the ``a`` term from the quantity while
     leaving the price adjustment alone, which is the asymmetry a caller who
     lets rights lapse actually experiences.
+
+    **It defaults to False, and that is not the conservative-by-habit
+    choice.** This function moves no money, so its default is only ever a
+    reported number -- but ``1 + a`` is the claim that the holder *received*
+    the rights shares, and receiving them costs ``a x subscription_price`` per
+    share held. A caller who marks a position off this factor without having
+    paid that is holding shares nobody bought. The stock leg needs no such
+    decision because it is free. Where the money actually moves, no default
+    exists at all: :meth:`CorporateActionEngine.apply` refuses to guess.
     """
     if action.kind.is_ratio_event:
         return Decimal(action.ratio_to) / Decimal(action.ratio_from)
     rights = action.rights_ratio if take_up else Decimal('0')
     return Decimal('1') + rights + action.stock_ratio
+
+
+def subscription_shares(action: CorporateAction, holding: Holding) -> int:
+    """Whole rights shares ``holding`` subscribes for, floored **per parcel**.
+
+    The quantity the subscription is charged on, and it is deliberately not
+    ``holding.total * a``. ``HoldingsLedger.apply_corporate_action`` floors the
+    entitlement on each tranche separately -- locked shape 3 forbids collapsing
+    parcels, so the distinct settlement instants survive the adjustment -- and
+    the holder therefore receives ``sum_i floor(q_i * a)`` new shares, not
+    ``floor(sum_i q_i * a)``. Charging the unfloored figure would bill for a
+    share the ledger never credited; see ``PROVENANCE['fractional_residue']``
+    for why the residue is reported and never priced.
+
+    **A combined event cannot attribute its floor and this module says so.**
+    The ledger applies one factor per parcel, ``floor(q * (1 + a + b))``, and
+    nothing sourced says whether a lost fraction came off the rights leg or the
+    free stock leg. This attributes it to the free leg -- ``floor(q * a)`` is
+    never more than the parcel's total gain -- so the charge is never for more
+    shares than the rights leg alone would have produced. The opposite reading
+    would bill the holder for a share that may not exist.
+    """
+    if not action.rights_ratio:
+        return 0
+    parcels = (holding.settled,) + tuple(t.quantity for t in holding.unsettled)
+    return sum(
+        int((Decimal(q) * action.rights_ratio).to_integral_value(ROUND_FLOOR))
+        for q in parcels)
 
 
 def round_to_quotation_unit(price: Decimal, tick: Optional[Decimal], *,
@@ -704,7 +796,7 @@ def adjusted_reference(
     venue: Venue,
     tick: Optional[Decimal] = None,
     rounding: str = ROUND_HALF_UP,
-    take_up: bool = True,
+    take_up: bool = False,
 ) -> ReferenceAdjustment:
     """The reference price on ``action.ex_date``, with its provenance.
 
@@ -725,7 +817,11 @@ def adjusted_reference(
     before 2025-05-05 an unadjusted prior close rolls forward through a
     no-trade session and silently undoes this adjustment.
 
-    ``take_up`` reaches only the quantity factor; see :func:`quantity_factor`.
+    ``take_up`` reaches only the quantity factor and never the price: the
+    reference here is the *market's*, and the exchange adjusts it on the full
+    entitlement before anyone has subscribed. It defaults to ``False`` so that
+    the factor reported alongside the price never claims shares the holder has
+    not paid for; see :func:`quantity_factor`.
 
     Raises:
         UnsourcedCorporateAction: when a cash dividend at or above
@@ -822,6 +918,22 @@ def _no_adjustment_case(
     not a boolean: HOSE's treasury carve-out starts 2021-07-05, HNX's only
     with QD 17 on 2022-03-31, UPCoM's with QD 34 on 2022-11-16, and the
     outsized-cash-dividend case is new at 2022-03-31 everywhere.
+
+    **The outsized-cash test is ``C >= P`` and nothing else, which is wider
+    than its own justification on a combined event.** The sourced test is
+    against the prior close (:data:`NO_ADJUSTMENT_LARGE_CASH_HSX_HNX`) and the
+    reason given for it is that adjusting "would drive the reference to zero
+    or negative". On a cash-only row the two coincide. On HOSE ex-rights code
+    06 or 07 they do not: a rights leg puts ``+Pa*a`` in the numerator, so
+    ``P = 25``, ``C = 30`` and ``a = 1`` at ``Pa = 40`` adjusts to a perfectly
+    positive ``(25 + 40 - 30)/2 = 17.5``, and this function still takes the
+    no-adjustment arm and leaves the reference at 25. The gazetted text names
+    a cash dividend and tests a close; **nothing sourced says what a combined
+    outsized-dividend-plus-rights session does**, and narrowing the test to the
+    numerator would be inventing the rule rather than reading it. So the
+    sourced test is applied as written and the limit is recorded here. A caller
+    who meets one of these -- they are rare, and rarer still inside the corpus
+    window -- is looking at a reference no document supports either way.
 
     Returns ``(widened_band_case, reason, citation)`` or ``None``.
 
@@ -1007,11 +1119,13 @@ class RestingOrderPolicy(str, Enum):
       a record of what actually traded and must not be rewritten, so
       ``filled + remaining == original`` (section 12 invariant 1) forces the
       whole scaling onto the remainder: a 1,000-share order half filled and
-      then doubled has 500 filled and 1,500 remaining, not 1,000 and 1,000.
-      The already-filled 500 shares do grow -- in the *holding*, where the
-      same factor reaches them -- so nothing is lost, but the order's own
-      numbers no longer read as a clean multiple. **Nothing sourced settles
-      this**; it is the only arrangement the invariant permits;
+      then doubled has 500 filled and 1,000 remaining, and an *original* of
+      1,500 rather than 2,000. The already-filled 500 shares do grow -- in the
+      *holding*, where the same factor reaches them -- so nothing is lost, but
+      the order's own numbers no longer read as a clean multiple. **Nothing
+      sourced settles this**; it is the only arrangement the invariant permits
+      that does not scale a pre-event quantity as though it were a post-event
+      one;
     * it keeps alive an order the market's own time-in-force rule had already
       ended.
     """
@@ -1072,6 +1186,13 @@ class CorporateActionApplied:
     cash leg and the quantity leg are both potentially overstated. It is a
     fidelity warning, not an error, and it is on the record rather than in a
     log line.
+
+    ``cash_leg`` and ``subscription_outlay`` are the event's **two** money
+    legs and they move in opposite directions: the dividend is credited, the
+    subscription is debited, and :attr:`net_cash_leg` is what the account
+    actually saw. Both are on the record for the same reason
+    :attr:`cash_leg_is_gross` is a field rather than a comment -- a money fact
+    a report can omit is a money fact a report will omit.
     """
 
     action: CorporateAction
@@ -1086,7 +1207,9 @@ class CorporateActionApplied:
     resting_orders: Tuple[RestingOrderOutcome, ...] = ()
     reference: Optional[ReferenceAdjustment] = None
     late: bool = False
-    take_up: bool = True
+    take_up: bool = False
+    subscription_shares: int = 0
+    subscription_outlay: Decimal = Decimal('0')
 
     @property
     def ticker(self) -> str:
@@ -1103,6 +1226,31 @@ class CorporateActionApplied:
         it themselves and say which rate they used.
         """
         return True
+
+    @property
+    def subscription_outlay_is_debited(self) -> bool:
+        """Always True, and stated as a field for the mirror-image reason.
+
+        ``cash_leg_is_gross`` exists so a report cannot silently omit a charge
+        this module did *not* take. This exists so a report cannot silently
+        omit a payment this module *did*: whenever
+        :attr:`subscription_outlay` is non-zero, that money has already left
+        ``account.cash_ledger`` at :attr:`ts`. A caller who wants the rights
+        to lapse instead asks for it at ``apply(take_up=False)``; there is no
+        arrangement in which the shares arrive and the payment does not.
+        """
+        return True
+
+    @property
+    def net_cash_leg(self) -> Decimal:
+        """``cash_leg - subscription_outlay``: what the account actually saw.
+
+        Negative on a rights issue, and on HOSE ex-rights code 06 (rights plus
+        cash dividend) it is the difference between the two legs on one
+        session. It is derived rather than stored so it cannot disagree with
+        the two ledger movements it summarises.
+        """
+        return self.cash_leg - self.subscription_outlay
 
 
 class CorporateActionEngine:
@@ -1194,7 +1342,7 @@ class CorporateActionEngine:
         venues: Optional[Mapping[str, Venue]] = None,
         ticks: Optional[Mapping[str, Decimal]] = None,
         lots: Optional[Mapping[str, int]] = None,
-        take_up: bool = True,
+        take_up: Optional[bool] = None,
     ) -> Tuple[CorporateActionApplied, ...]:
         """Apply every action due at ``ts``, in ``(ex_date, ticker)`` order.
 
@@ -1206,6 +1354,14 @@ class CorporateActionEngine:
         the venue at ``ts`` and must come from a ``SymbolRouter``, never from
         a ticker-keyed cache (locked shape 1). ``ticks`` and ``lots`` come
         from ``rulebook.at(ts)``.
+
+        ``take_up`` is **one decision for every rights issue due at this
+        instant**, which is why it is not a mapping like the other four: it is
+        a portfolio decision and not a per-ticker datum the engine could look
+        up. It is passed straight through to :meth:`apply`, including its
+        refusal to guess -- a caller with rights on two names on one session
+        who wants to subscribe to one and lapse the other must drive
+        :meth:`apply` per action rather than have this method invent a policy.
         """
         results: List[CorporateActionApplied] = []
         for action in self.due(ts):
@@ -1232,7 +1388,7 @@ class CorporateActionEngine:
         venue: Optional[Venue] = None,
         tick: Optional[Decimal] = None,
         lot: Optional[int] = None,
-        take_up: bool = True,
+        take_up: Optional[bool] = None,
     ) -> CorporateActionApplied:
         """Apply one event to the account, and to any order still live.
 
@@ -1256,14 +1412,48 @@ class CorporateActionEngine:
         entitlement is that it is not in the holding yet. Driven late, the
         result is marked ``late=True`` rather than silently overstated.
 
+        **A rights take-up is a purchase, and this method will not guess at
+        one.** ``take_up`` has no default for an action carrying a rights leg:
+        whether the holder subscribes, sells the right or lets it lapse is a
+        portfolio decision (design section 3), and it is the only decision
+        here that spends the account's cash. Stated ``True``, the shares and
+        the payment move together in this one call --
+        ``subscription_shares(action, holding) x subscription_price`` debited
+        from settled cash -- so no caller can end up holding rights shares
+        nobody paid for. Stated ``False``, neither moves and the lapse shows up
+        honestly as a price adjustment with no matching quantity. The price leg
+        is unaffected either way: the exchange adjusts the whole market's
+        reference before anyone has subscribed.
+
+        This module is exchange-side and the caller owns the portfolio, so
+        moving cash here is a small impurity -- but it is the same impurity the
+        gross cash leg already makes for a dividend, and the two legs of one
+        event belong on the same side of that line. The alternative, reporting
+        the outlay and trusting the caller to debit it, was rejected for one
+        reason: it fails open. A caller who ignores the field gets a bigger
+        position and unchanged cash, every invariant in the package still
+        holds, and nothing downstream can detect it.
+
         The order of operations, and none of it is arbitrary:
 
-        1. the holding and the cash leg, through
+        1. the subscription is **priced and funded before anything moves**.
+           The entitlement is computed on the pre-event holding and tested
+           against ``Cash.available``; an unaffordable take-up raises
+           :class:`RightsSubscriptionUnfunded` with the account untouched,
+           because a refusal that had already scaled the holding would be the
+           same fabrication by another route. ``available`` and not
+           ``settled_balance``: design section 7.0 owns the definition of
+           spendable cash, and cash committed to a live buy order is already
+           promised. The dividend leg of the *same* event does not fund the
+           subscription -- this module credits it at the ex-date while the
+           real payment lands weeks later, and letting that credit pay for the
+           shares would build the simplification into a money movement;
+        2. the holding and the cash leg, through
            ``HoldingsLedger.apply_corporate_action`` -- the additive Tier 1
            hook, used rather than retrofitted, so a split scales every parcel
            including the unsettled ones and their settlement instants survive;
-        2. the cash credit, gross;
-        3. the live orders. Last, because a reservation is not a holding and
+        3. the cash credit, gross, and the subscription debit;
+        4. the live orders. Last, because a reservation is not a holding and
            cannot change the entitlement, and because scaling a share
            reservation before the parcel it names has grown would briefly
            commit more than is settled.
@@ -1276,13 +1466,17 @@ class CorporateActionEngine:
                 no-adjustment carve-outs are per venue.
             tick: the quotation unit, for rounding the adjusted reference.
             lot: the round lot, used only on the ``SCALE`` branch.
-            take_up: whether a rights entitlement is subscribed. See
-                :func:`quantity_factor`.
+            take_up: whether the rights entitlement is subscribed for.
+                **Required for an action with a rights leg**; ignored, and
+                needed by nothing, for every other kind.
 
         Raises:
             ValueError: if the event has already been applied, if ``ts`` is
-                before the ex-date, or if ``base_price`` is given without a
-                ``venue``.
+                before the ex-date, if ``base_price`` is given without a
+                ``venue``, or if the action carries a rights leg and
+                ``take_up`` was not stated.
+            RightsSubscriptionUnfunded: if the stated take-up costs more than
+                the account has available. Nothing is applied.
             UnsourcedCorporateAction: see :func:`adjusted_reference`.
         """
         if action.key in self._applied:
@@ -1301,16 +1495,37 @@ class CorporateActionEngine:
                 'a VND cash leg into quote units is per venue (1,000 at the '
                 'three cash venues), and so is each no-adjustment carve-out. '
                 'Resolve it with SymbolRouter.venue(ticker, ts)')
+        subscribed = self._resolve_take_up(action, take_up)
 
         reference: Optional[ReferenceAdjustment] = None
         if base_price is not None and venue is not None:
             reference = adjusted_reference(
                 action, base_price, venue=venue, tick=tick,
-                rounding=self._rounding, take_up=take_up)
+                rounding=self._rounding, take_up=subscribed)
 
-        factor = quantity_factor(action, take_up=take_up)
+        factor = quantity_factor(action, take_up=subscribed)
         holdings = account.holdings_ledger
         before = holdings.holding(action.ticker)
+
+        # Priced and funded before a single leg moves. See the docstring: a
+        # refusal that had already scaled the holding fabricates exactly what
+        # this check exists to prevent.
+        rights_shares = (subscription_shares(action, before) if subscribed
+                         else 0)
+        outlay = Decimal(rights_shares) * action.subscription_price
+        if outlay:
+            available = account.cash().available
+            if outlay > available:
+                raise RightsSubscriptionUnfunded(
+                    f'{action}: taking up {rights_shares} rights shares at '
+                    f'{action.subscription_price} VND costs {outlay} VND and '
+                    f'the account has {available} available. Nothing has been '
+                    f'applied. A rights issue is not free money -- an account '
+                    f'that cannot pay for the shares has not subscribed -- so '
+                    f'either fund the account before the ex-date or apply the '
+                    f'same action with take_up=False and let the rights '
+                    f'lapse. Partial take-up is NOT modelled: nothing sourced '
+                    f'says how a partly funded subscription is allotted')
 
         cash_leg, tranches = holdings.apply_corporate_action(
             action.ticker, factor, action.cash_per_share, ts)
@@ -1333,6 +1548,14 @@ class CorporateActionEngine:
                 f'corporate action {action} cash leg, GROSS of the 5% '
                 f'dividend withholding, which is a charge row the rulebook '
                 f'does not carry')
+        if outlay:
+            account.cash_ledger.debit(
+                outlay, ts,
+                f'corporate action {action} rights subscription: '
+                f'{rights_shares} shares at {action.subscription_price} VND, '
+                f'taken up at the caller\'s instruction. The shares are '
+                f'credited by the same call; neither leg exists without the '
+                f'other')
 
         outcomes: Tuple[RestingOrderOutcome, ...] = ()
         if book is not None:
@@ -1346,9 +1569,45 @@ class CorporateActionEngine:
             holding_before=before, holding_after=after,
             tranches_after=tranches, fractional_residue=residue,
             resting_orders=outcomes, reference=reference,
-            late=ts.date() > action.ex_date, take_up=take_up)
+            late=ts.date() > action.ex_date, take_up=subscribed,
+            subscription_shares=rights_shares, subscription_outlay=outlay)
         self._applied[action.key] = applied
         return applied
+
+    @staticmethod
+    def _resolve_take_up(action: CorporateAction,
+                         take_up: Optional[bool]) -> bool:
+        """Turn a three-state ``take_up`` into a decision, or refuse to.
+
+        ``None`` means *not stated*, and for an action with a rights leg that
+        is the one thing this engine will not resolve for itself. Both arms
+        are defensible and they differ by real money, so choosing either as a
+        default would be the module deciding a portfolio question -- and the
+        expensive default is the one that reads as harmless, since crediting
+        the shares without the payment leaves every invariant intact.
+
+        For every other kind of action the flag reaches nothing:
+        :func:`quantity_factor` ignores it without a rights ratio, and there
+        is no subscription to pay. Demanding a decision there would be
+        ceremony, and ceremony is what teaches a caller to pass the flag
+        without reading it.
+        """
+        if not action.rights_ratio:
+            return bool(take_up)
+        if take_up is None:
+            raise ValueError(
+                f'{action} carries a rights leg and take_up was not stated. '
+                f'Pass take_up=True to subscribe -- the engine will credit '
+                f'the shares AND debit '
+                f'{action.subscription_price} VND per share for them in the '
+                f'same call -- or take_up=False to let the rights lapse, '
+                f'which leaves the quantity alone while the reference still '
+                f'adjusts. There is no default: whether a right is exercised, '
+                f'sold or lapsed is a portfolio decision (design section 3), '
+                f'it is the only leg of a corporate action that COSTS money, '
+                f'and a deep-discount rights issue -- the ordinary Vietnamese '
+                f'case -- is exactly where guessing wrong is most expensive')
+        return bool(take_up)
 
     def _adjust_resting(
         self,
@@ -1427,16 +1686,34 @@ class CorporateActionEngine:
         left alone and only the quantity moves, which is reported.
 
         Falls back to :meth:`_cancel` when the scaled order would be
-        degenerate -- nothing left, or less than is already filled -- because
-        ``filled + remaining == original`` is invariant 1 and an order cannot
-        be amended below what it has already traded.
+        degenerate -- nothing left after scaling, or nothing left after the
+        round lot is enforced on it -- because an order with no remainder is
+        not an order and one off the lot can never fill.
 
-        **A partially filled order takes the whole scaling on its
-        remainder.** Its fills record what traded and are not rewritten, so
-        ``filled + remaining == original`` leaves no other arrangement: 500
-        filled of 1,000, doubled, is 500 filled and 1,500 remaining. The
-        filled 500 grow in the holding, where the same factor reaches them.
-        Nothing sourced settles this -- see :class:`RestingOrderPolicy`.
+        **The factor multiplies the remainder, and the remainder only.** This
+        is the whole of the unit discipline on this branch and it is easy to
+        get backwards. ``original`` is ``filled + remaining``; ``filled``
+        records what actually traded, in *pre-event* shares, and the event does
+        not reach back and rewrite it. So the event scales ``remaining``, and
+        ``original`` is whatever the two then sum to: 400 filled of 1,000,
+        doubled, is 400 filled, 1,200 remaining and an original of 1,600.
+
+        Scaling ``original`` instead and taking ``remaining`` as the leftover
+        mixes the two units -- it subtracts a pre-event ``filled`` from a
+        post-event total -- and inflates the remainder by exactly
+        ``filled x (factor - 1)`` shares. That is not a rounding-scale error:
+        on a 10->1 consolidation it goes *negative* for any order more than
+        ``1/m`` filled, so an ordinary 20%-filled order is cancelled as
+        "nothing left" while 80% of it is still working. On a split it commits
+        the account to shares it never bought, and the cash reservation
+        re-taken below grows with it.
+
+        The already-filled shares are not lost by this. They grow in the
+        **holding**, where the same factor reaches them; growing them here as
+        well would count them twice. Nothing sourced settles the arrangement --
+        see :class:`RestingOrderPolicy` -- but only one arrangement keeps
+        ``filled + remaining == original`` (section 12 invariant 1) without
+        rewriting a fill.
 
         **The reservation is released and re-taken here**, since the book's
         ``amend`` does not touch encumbrances (an amendment that changed a
@@ -1450,19 +1727,25 @@ class CorporateActionEngine:
         """
         before_qty = record.remaining_quantity
         before_price = record.order.limit_price
-        scaled_original = int(Decimal(record.original_quantity) * factor)
+        remaining_after = int(
+            (Decimal(before_qty) * factor).to_integral_value(ROUND_FLOOR))
         lot_enforced = bool(lot and lot > 1)
         if lot_enforced:
-            scaled_original = (scaled_original // lot) * lot
-        remaining_after = scaled_original - record.filled_quantity
-        if remaining_after <= 0 or scaled_original < record.filled_quantity:
+            # The lot is enforced on the REMAINDER: that is the quantity that
+            # has to match, and an order whose remainder is off the lot can
+            # never fill however tidy its headline number is.
+            remaining_after = (remaining_after // lot) * lot
+        scaled_original = record.filled_quantity + remaining_after
+        if remaining_after <= 0:
             return replace(
                 self._cancel(book, record, ts, phase,
                              'RestingOrderPolicy.SCALE'),
                 policy=RestingOrderPolicy.SCALE,
-                reason=f'scaling by {factor} leaves {remaining_after} of '
-                       f'{record.original_quantity}, which is not an order; '
-                       f'cancelled instead')
+                reason=f'scaling the {before_qty} still working by {factor} '
+                       f'leaves {remaining_after}'
+                       + (f' once the {lot}-share lot is enforced'
+                          if lot_enforced else '')
+                       + f', which is not an order; cancelled instead')
 
         new_price = before_price
         if before_price is not None and reference is not None:

@@ -32,6 +32,7 @@ from plutus.market.session.corporate import (ARITHMETIC, PROVENANCE,
                                              CorporateActionKind,
                                              CorporateActionSchedule,
                                              RestingOrderPolicy,
+                                             RightsSubscriptionUnfunded,
                                              UnhandledCorporateActionError,
                                              UnsourcedCorporateAction,
                                              adjusted_reference,
@@ -194,14 +195,22 @@ def test_a_bonus_issue_has_the_same_arithmetic_as_a_stock_dividend():
 def test_a_rights_issue_carries_the_subscription_price_into_the_numerator():
     """``P' = (P + Pa*a) / (1 + a)``. The subscription price is VND per share
     like every other money field, so a 10,000d subscription against a 25.0
-    close is 10.0 in quote units: (25 + 10*0.5) / 1.5 = 20."""
+    close is 10.0 in quote units: (25 + 10*0.5) / 1.5 = 20.
+
+    ``take_up=True`` is stated rather than defaulted: the price leg is
+    unconditional, the quantity leg is not, and the default is the arm that
+    cannot report shares nobody paid for."""
     action = CorporateAction.rights_issue(
         'FPT', EX_DATE, Decimal('0.5'), Decimal('10000'))
 
-    adj = adjusted_reference(action, Decimal('25'), venue=Venue.HSX)
+    adj = adjusted_reference(action, Decimal('25'), venue=Venue.HSX,
+                             take_up=True)
 
     assert adj.reference_price == Decimal('20')
     assert adj.quantity_factor == Decimal('1.5')
+    # The price leg does not depend on the holder's decision.
+    assert adjusted_reference(
+        action, Decimal('25'), venue=Venue.HSX).reference_price == Decimal('20')
 
 
 def test_a_split_divides_the_reference_and_a_consolidation_multiplies_it():
@@ -261,7 +270,8 @@ def test_rights_that_lapse_leave_the_quantity_alone_but_still_move_the_price():
     action = CorporateAction.rights_issue(
         'FPT', EX_DATE, Decimal('0.5'), Decimal('10000'))
 
-    taken = adjusted_reference(action, Decimal('25'), venue=Venue.HSX)
+    taken = adjusted_reference(action, Decimal('25'), venue=Venue.HSX,
+                               take_up=True)
     lapsed = adjusted_reference(action, Decimal('25'), venue=Venue.HSX,
                                 take_up=False)
 
@@ -269,6 +279,26 @@ def test_rights_that_lapse_leave_the_quantity_alone_but_still_move_the_price():
     assert taken.quantity_factor == Decimal('1.5')
     assert lapsed.quantity_factor == Decimal('1')
     assert quantity_factor(action, take_up=False) == Decimal('1')
+
+
+def test_an_unstated_take_up_never_reports_shares_nobody_paid_for():
+    """**The pure-arithmetic half of the rights defect.** ``quantity_factor``
+    and :func:`adjusted_reference` move no money, so a default here is safe --
+    but only one default is. ``1 + a`` says the holder received the rights
+    shares, and receiving them costs ``a x Pa`` per share held; reporting that
+    factor without anyone having stated the subscription is the number that
+    lets a caller mark a position they never paid for. The default is
+    therefore the lapse, and the take-up has to be asked for."""
+    action = CorporateAction.rights_issue(
+        'FPT', EX_DATE, Decimal('0.5'), Decimal('10000'))
+
+    assert quantity_factor(action) == Decimal('1')
+    assert adjusted_reference(
+        action, Decimal('25'), venue=Venue.HSX).quantity_factor == Decimal('1')
+    # A stock leg is free and needs no such decision.
+    assert quantity_factor(
+        CorporateAction.stock_dividend('FPT', EX_DATE, Decimal('0.1'))
+    ) == Decimal('1.1')
 
 
 # --------------------------------------------------------------------------
@@ -359,6 +389,30 @@ def test_a_cash_dividend_at_or_above_the_close_is_not_adjusted_from_2022():
     assert adj.reference_price == Decimal('25.5')
     assert adj.cash_per_share == Decimal('30000')
     assert adj.widened_band_case == 'cash_dividend_ge_reference'
+
+
+def test_the_large_cash_carve_out_is_wider_than_its_own_reason_on_a_combined_event():
+    """**A documented limit, pinned so it cannot drift into an invention.** The
+    carve-out's gazetted test is ``C >= P`` against the prior close, and the
+    reason given for it is that adjusting "would drive the reference to zero or
+    negative". On HOSE ex-rights code 06 the two part company: a rights leg
+    puts ``+Pa*a`` in the numerator, so (25 + 40 - 30) / 2 = 17.5 is a
+    perfectly ordinary reference and the carve-out fires anyway.
+
+    Narrowing the test to the numerator would be **inventing** the rule -- the
+    text names a cash dividend and tests a close -- so the sourced test is
+    applied as written and the limit is recorded rather than papered over."""
+    action = CorporateAction.combined(
+        'FPT', EX_DATE, cash_per_share=Decimal('30000'),
+        rights_ratio=Decimal('1'), subscription_price=Decimal('40000'))
+
+    adj = adjusted_reference(action, Decimal('25'), venue=Venue.HSX,
+                             take_up=True)
+
+    assert adj.adjusted is False
+    assert adj.reference_price == Decimal('25')          # not the 17.5 below
+    assert adj.widened_band_case == 'cash_dividend_ge_reference'
+    assert action.hose_code == '06'
 
 
 def test_the_same_dividend_before_the_carve_out_refuses_to_invent_a_reference():
@@ -576,6 +630,169 @@ def test_applying_an_action_to_an_unheld_ticker_leaves_no_trace():
 
 
 # --------------------------------------------------------------------------
+# The rights subscription -- the one leg of the formula that COSTS money
+# --------------------------------------------------------------------------
+
+def test_a_taken_up_rights_issue_debits_what_the_subscription_cost():
+    """**Money conservation across the event, which is the whole claim of the
+    arithmetic.** ``ARITHMETIC`` records that what the unsourced formula
+    encodes is that market capitalisation is unchanged across it: the price
+    falls by exactly the value the new shares dilute in, and for a rights issue
+    part of that value is *paid in*, not given. 1,000 VIC at 45.0 is 45m on a
+    150m cash balance; a 1-for-1 rights issue at 10,000d takes the reference to
+    (45 + 10)/2 = 27.5 and the holding to 2,000, which is 55m -- and the extra
+    10m is the subscription, which has to leave the cash balance or the
+    position is worth 10m more than it was a moment earlier for no reason.
+
+    A deep-discount rights issue is the ordinary Vietnamese case, so this is
+    not an edge: it is the shape of most of them."""
+    acct = account(cash='150000000', holdings={'VIC': 1000})
+    action = CorporateAction.rights_issue(
+        'VIC', EX_DATE, Decimal('1'), Decimal('10000'))
+
+    applied = engine().apply(action, account=acct, ts=T0,
+                             base_price=Decimal('45.0'), venue=Venue.HSX,
+                             tick=HSX_TICK_50, take_up=True)
+
+    assert applied.subscription_shares == 1000
+    assert applied.subscription_outlay == Decimal('10000000')
+    assert applied.subscription_outlay_is_debited is True
+    assert acct.cash().settled_balance == Decimal('140000000')
+    assert acct.holding('VIC').total == 2000
+
+    unit = Decimal(1000)                       # HSX quotes thousands of dong
+    before = Decimal('150000000') + Decimal('1000') * Decimal('45.0') * unit
+    after = (acct.cash().settled_balance
+             + Decimal(acct.holding('VIC').total)
+             * applied.reference.reference_price * unit)
+    assert before == after == Decimal('195000000')
+
+
+def test_rights_that_lapse_cost_nothing_and_grow_nothing():
+    """The other arm, and the one that needs no cash. The price leg still
+    lands -- the exchange adjusts the whole market's reference before anyone
+    has subscribed -- so a lapsed right is a real loss, visible in the mark and
+    not hidden by a quantity that grew for free."""
+    acct = account(cash='150000000', holdings={'VIC': 1000})
+    action = CorporateAction.rights_issue(
+        'VIC', EX_DATE, Decimal('1'), Decimal('10000'))
+
+    applied = engine().apply(action, account=acct, ts=T0,
+                             base_price=Decimal('45.0'), venue=Venue.HSX,
+                             tick=HSX_TICK_50, take_up=False)
+
+    assert applied.subscription_shares == 0
+    assert applied.subscription_outlay == Decimal('0')
+    assert acct.cash().settled_balance == Decimal('150000000')
+    assert acct.holding('VIC').total == 1000
+    assert applied.reference.reference_price == Decimal('27.5')
+
+
+def test_the_engine_refuses_to_guess_whether_the_holder_subscribed():
+    """**Nothing sourced settles this and the engine does not invent it.**
+    Whether a right is exercised, sold or lapsed is a portfolio decision, and
+    design section 3 puts every portfolio decision on the caller's side -- so
+    the one place where the decision spends the holder's cash is the one place
+    that must not have a default. The refusal names both arms and the money."""
+    acct = account(cash='150000000', holdings={'VIC': 1000})
+    action = CorporateAction.rights_issue(
+        'VIC', EX_DATE, Decimal('1'), Decimal('10000'))
+
+    with pytest.raises(ValueError, match='take_up'):
+        engine().apply(action, account=acct, ts=T0)
+
+    with pytest.raises(ValueError, match='take_up'):
+        engine(action).apply_due(T0, account=acct)
+
+    # Nothing moved: the refusal is before any leg is applied.
+    assert acct.holding('VIC').total == 1000
+    assert acct.cash().settled_balance == Decimal('150000000')
+
+
+def test_an_event_with_no_rights_leg_needs_no_decision():
+    """``take_up`` is a rights-leg question. A cash dividend, a stock dividend
+    and a split carry no subscription, so demanding a decision there would be
+    ceremony -- and ceremony is what trains a caller to pass the flag without
+    reading it."""
+    acct = account(cash='0', holdings={'FPT': 1000})
+
+    applied = engine().apply(
+        CorporateAction.stock_dividend('FPT', EX_DATE, Decimal('0.1')),
+        account=acct, ts=T0)
+
+    assert applied.subscription_outlay == Decimal('0')
+    assert acct.holding('FPT').total == 1100
+
+
+def test_a_subscription_the_account_cannot_fund_is_refused_before_anything_moves():
+    """A rights issue is not free money and an account that cannot pay for it
+    has not subscribed. The check is made **before** the holdings leg, because
+    a refusal that leaves the quantity scaled and the cash untouched is the
+    same fabrication by another route.
+
+    ``Cash.available`` is the test -- design section 7.0's one definition of
+    spendable cash -- not the settled balance, because cash committed to a
+    live buy order is already promised."""
+    acct = account(cash='9000000', holdings={'VIC': 1000})
+    action = CorporateAction.rights_issue(
+        'VIC', EX_DATE, Decimal('1'), Decimal('10000'))
+    eng = engine()
+
+    with pytest.raises(RightsSubscriptionUnfunded) as exc:
+        eng.apply(action, account=acct, ts=T0, take_up=True)
+
+    assert '10000000' in str(exc.value) and 'take_up=False' in str(exc.value)
+    assert acct.holding('VIC').total == 1000
+    assert acct.cash().settled_balance == Decimal('9000000')
+    assert eng.applied() == ()                 # nothing was recorded either
+
+
+def test_the_subscription_is_charged_only_on_whole_rights_shares():
+    """The entitlement is floored per parcel (locked shape 3), so the holder
+    receives whole shares and must be charged for whole shares. 105 settled and
+    105 unsettled at a = 0.5 receive 52 each: charging the unfloored 105 would
+    bill the holder for a share the ledger never credited.
+
+    In a **combined** event the per-parcel floor cannot be split between the
+    rights leg and the free stock leg without inventing a rule nobody sourced.
+    The module attributes the residue to the free leg, so the charge is never
+    for more shares than the rights leg alone would have produced."""
+    acct = account(cash='150000000', holdings={'VIC': 105})
+    acct.holdings_ledger.credit_unsettled('VIC', 105, SETTLES, CUM_DATE)
+    action = CorporateAction.rights_issue(
+        'VIC', EX_DATE, Decimal('0.5'), Decimal('10000'))
+
+    applied = engine().apply(action, account=acct, ts=T0, take_up=True)
+
+    assert applied.subscription_shares == 104          # 52 + 52, not 105
+    assert applied.subscription_outlay == Decimal('1040000')
+    assert acct.holding('VIC').total == 314            # 157 + 157
+    assert acct.cash().settled_balance == Decimal('148960000')
+
+
+def test_the_subscription_outlay_is_on_the_record_beside_the_gross_cash_leg():
+    """``cash_leg_is_gross`` exists because a money fact a report can omit is a
+    money fact a report will omit. The subscription is the same kind of fact
+    and is carried the same way: the shares, the outlay, and the net of the two
+    cash legs on a combined rights-plus-dividend event (HOSE ex-rights code
+    06), where the dividend credit and the subscription debit move in opposite
+    directions on one session."""
+    acct = account(cash='150000000', holdings={'VIC': 1000})
+    action = CorporateAction.combined(
+        'VIC', EX_DATE, rights_ratio=Decimal('1'),
+        subscription_price=Decimal('10000'), cash_per_share=Decimal('2000'))
+
+    applied = engine().apply(action, account=acct, ts=T0, take_up=True)
+
+    assert action.hose_code == '06'
+    assert applied.cash_leg == Decimal('2000000')
+    assert applied.subscription_outlay == Decimal('10000000')
+    assert applied.net_cash_leg == Decimal('-8000000')
+    assert acct.cash().settled_balance == Decimal('142000000')
+    assert 'THE ONE LEG THAT COSTS MONEY' in PROVENANCE['rights_subscription']
+
+
+# --------------------------------------------------------------------------
 # The open question: a resting order across the ex-date
 # --------------------------------------------------------------------------
 
@@ -691,11 +908,10 @@ def test_scaling_a_cash_reservation_preserves_its_value_not_its_quantity():
 
 
 def test_a_scaled_order_with_nothing_left_is_cancelled_instead():
-    """``filled + remaining == original`` is section 12 invariant 1, and an
-    order cannot be amended below what it has already traded. A 10->1
-    consolidation takes a 1,000-share order to 100, which is less than the 500
-    already filled, so the scaling branch falls back to cancelling and says
-    which arm it took."""
+    """A remainder that scales below the round lot is not an order. A 10->1
+    consolidation takes the 500 shares still working down to 50, and an order
+    off the lot can never fill (``ROUND_LOT``), so the scaling branch falls
+    back to cancelling and says which arm it took."""
     acct = account(holdings={'FPT': 10000})
     bk = book(acct)
     order = an_order(quantity=1000)
@@ -716,10 +932,71 @@ def test_a_scaled_order_with_nothing_left_is_cancelled_instead():
     assert bk.get(order_id).state.value == 'cancelled'
 
 
-def _a_fill(order_id, quantity, price='96.0'):
+def test_a_consolidation_scales_the_remainder_rather_than_killing_the_order():
+    """**The unit defect.** The factor belongs to the shares still working, not
+    to the order's headline quantity: ``original`` is
+    ``filled + remaining``, and ``filled`` is a pre-event number that the event
+    does not touch. Scaling ``original`` and then subtracting the *unscaled*
+    ``filled`` subtracts pre-consolidation units from post-consolidation units,
+    and the difference is ``filled x (factor - 1)`` shares of pure arithmetic
+    error -- here 2,000 x (0.1 - 1) = -1,800, which is why a perfectly ordinary
+    20%-filled order came out negative and was cancelled as "nothing left"
+    while 8,000 shares were still working. 8,000 remaining consolidated 10->1
+    is 800 remaining, and the order lives."""
+    acct = account(holdings={'FPT': 20000})
+    bk = book(acct)
+    order = an_order(quantity=10000)
+    order_id = OrderId('SELL-4')
+    enc = acct.reserve_for_sell(order_id, order, Venue.HSX, CUM_DATE)
+    bk.accept(order, Venue.HSX, CUM_DATE, order_id=order_id, encumbrances=(enc,))
+    bk.rest(order_id, CUM_DATE)
+    bk.apply_fill(order_id, _a_fill(order_id, 2000))
+
+    applied = engine(resting_orders=RestingOrderPolicy.SCALE).apply(
+        CorporateAction.consolidation('FPT', EX_DATE, of=10),
+        account=acct, ts=T0, book=bk, lot=100)
+
+    outcome, = applied.resting_orders
+    record = bk.get(order_id)
+    assert record.state.value == 'partially_filled'    # alive, not cancelled
+    assert record.is_terminal is False
+    assert (outcome.quantity_before, outcome.quantity_after) == (8000, 800)
+    assert (record.filled_quantity, record.remaining_quantity) == (2000, 800)
+    assert record.original_quantity == 2800        # filled + remaining, exactly
+
+
+def test_scaling_a_partly_filled_buy_preserves_the_value_it_reserved():
+    """The money face of the same defect. A buy reserves cash, and a 1->2 split
+    doubles the working quantity while halving the price, so the reservation is
+    the same money before and after. Scaling the order's headline quantity
+    instead inflates the remainder by ``filled x (factor - 1)`` -- 400 extra
+    shares here -- and the re-taken cash reservation grows with it, committing
+    money the order can never spend and refusing buys the caller can afford."""
+    acct = account(cash='150000000')
+    bk = book(acct)
+    order = an_order(side=Side.BUY, price='95.5')
+    order_id = OrderId('BUY-2')
+    acct.encumbrances.take(order_id, Pool.SECURITIES, ResourceKind.CASH,
+                           CUM_DATE, amount=Decimal('95500000'), ticker='FPT',
+                           order_quantity=1000)
+    bk.accept(order, Venue.HSX, CUM_DATE, order_id=order_id)
+    bk.rest(order_id, CUM_DATE)
+    bk.apply_fill(order_id, _a_fill(order_id, 400, side=Side.BUY))
+
+    engine(resting_orders=RestingOrderPolicy.SCALE).apply(
+        CorporateAction.split('FPT', EX_DATE, into=2),
+        account=acct, ts=T0, book=bk, base_price=Decimal('95.5'),
+        venue=Venue.HSX, lot=100)
+
+    assert acct.cash().committed == Decimal('95500000')
+    assert bk.get(order_id).order.limit_price == Decimal('47.75')
+    assert bk.get(order_id).remaining_quantity == 1200
+
+
+def _a_fill(order_id, quantity, price='96.0', side=Side.SELL):
     from plutus.market.session.types import Fill, FillEvidence
     return Fill(fill_id=f'F-{order_id}', order_id=order_id, ticker='FPT',
-                venue=Venue.HSX, side=Side.SELL, quantity=quantity,
+                venue=Venue.HSX, side=side, quantity=quantity,
                 price=Decimal(price), ts=CUM_DATE,
                 evidence=FillEvidence.TRADED_THROUGH)
 
@@ -957,8 +1234,11 @@ def test_scaling_a_partly_filled_order_puts_the_whole_factor_on_the_remainder():
     to emerge. A fill is a record of what actually traded and is not
     rewritten, so ``filled + remaining == original`` (section 12 invariant 1)
     leaves one arrangement: 400 filled of 1,000, doubled, is 400 filled and
-    1,600 remaining -- not 800 and 1,200. The already-filled 400 shares do
-    grow, in the holding, where the same factor reaches them; the order's own
+    1,200 remaining, and the order's *original* becomes 1,600 -- not 2,000.
+    The factor multiplies the 600 shares still working; it cannot also
+    multiply the 400 that already traded, because those grew in the **holding**
+    instead, where the same factor reaches them, and growing them twice would
+    put shares on the order that the account never received. The order's own
     numbers simply stop reading as a clean multiple. It is a fourth reason
     ``SCALE`` is not the default."""
     acct = account(holdings={'FPT': 5000})
@@ -976,6 +1256,7 @@ def test_scaling_a_partly_filled_order_puts_the_whole_factor_on_the_remainder():
 
     outcome, = applied.resting_orders
     record = bk.get(order_id)
-    assert (outcome.quantity_before, outcome.quantity_after) == (600, 1600)
-    assert (record.filled_quantity, record.remaining_quantity) == (400, 1600)
-    assert record.original_quantity == 2000
+    assert (outcome.quantity_before, outcome.quantity_after) == (600, 1200)
+    assert (record.filled_quantity, record.remaining_quantity) == (400, 1200)
+    assert record.original_quantity == 1600
+    assert acct.holding('FPT').settled == 10000    # the filled 400 grew HERE
