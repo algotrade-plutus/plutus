@@ -14,51 +14,89 @@ The guardrail list in §4.3 is binding: the words "pluggable", "swappable",
 "hard/soft/probabilistic family", "the spread is the reported result" and "no prior art for
 an indeterminate outcome" must not appear.
 
+**Two further prohibitions, added by the prior-art pass of 2026-08-26.** Neither is
+negotiable and both have a named refutation:
+
+- **Never write any form of "first to combine call auctions, price limits and a settlement
+  cycle."** EvoMarket (arXiv:2604.18046, April 2026) does exactly that for China A-shares.
+- **Never write "first matching-engine simulation of a Vietnamese exchange" unhedged.**
+  Lê Đức Hùng's 2013 VNU-UET thesis is an HNX matching-engine test double.
+
+**And the lead claim changed.** `literature-review.md` §4.0 is now the sentence the title,
+the abstract's gap move and the conclusion are all built on: **effective-dated rule
+editions** — backtesting 2024 and 2026 under the rules that actually applied to each. §4.1
+was re-narrowed accordingly; its superseded form is recorded struck-through in that
+document and must not be re-derived. Vo & Doan (2023), a difference-in-differences study of
+HOSE's real 12 Sep 2016 tick-size change, is the empirical warrant and should appear
+wherever the lead claim does.
+
 ---
 
 ## 1. Title options
 
-Ranked. Each leads with what survived the attacks, not with what was refuted.
+Ranked. Each leads with what survived the attacks, not with what was refuted. **The ranking
+changed after the prior-art pass: the title must now lead with dated rule editions, because
+that is the only claim with no near neighbour.**
 
-1. **Effective-Dated Exchange Rules and Indeterminate Fills: A Vietnamese Exchange
-   Simulator with a Broker-Facing API** — most accurate; leads with the two surviving
-   contributions.
-2. **What the Data Cannot Decide: Per-Order Indeterminacy in a Rule-Dated Simulator of the
-   Vietnamese Exchange** — leads with the strongest single novelty.
+1. **Backtesting Under the Rules That Applied: Effective-Dated Exchange Rule Editions in a
+   Vietnamese Exchange Simulator** — leads with the strongest claim and states it as a
+   capability rather than a priority claim. Preferred.
+2. **Effective-Dated Exchange Rules and Indeterminate Fills: A Vietnamese Exchange
+   Simulator with a Broker-Facing API** — the previous first choice; still accurate, leads
+   with both surviving contributions.
 3. **Plutus: A Dated Order-Admission Rulebook for HOSE, HNX, UPCoM and HNXDS** — most
    concrete, least ambitious; good if the venue prefers systems papers.
-4. **From Trading Calendar to Settlement Calendar: Modelling Vietnamese T+2, Price Bands
+4. **What the Data Cannot Decide: Per-Order Indeterminacy in a Rule-Dated Simulator of the
+   Vietnamese Exchange** — leads with indeterminacy. Demoted because Claeys (2026) is now
+   verified prior art on intrabar ambiguity, so this title invites the comparison first.
+5. **From Trading Calendar to Settlement Calendar: Modelling Vietnamese T+2, Price Bands
    and Segregated Derivatives Margin** — leads with the one mechanism no other engine wires
    correctly.
-5. **An Exchange, Not a Backtester: Simulating Vietnamese Market Rules Behind a Broker
+6. **An Exchange, Not a Backtester: Simulating Vietnamese Market Rules Behind a Broker
    API** — best for a practitioner audience; weakest for a reviewer looking for novelty.
 
-Avoid: anything containing "high-fidelity" unqualified (EvoMarket used it in April 2026),
-"data-source agnostic" (refuted), or "pluggable fill model" (refuted).
+Avoid: anything containing "high-fidelity" unqualified (EvoMarket's own title is *"A
+High-Fidelity and Scalable Financial Market Simulator"*, April 2026 — using the phrase
+invites a direct comparison and looks derivative), "data-source agnostic" (refuted),
+"pluggable fill model" (refuted), and any "first simulator to…" construction naming
+auctions, bands or settlement (refuted by EvoMarket).
 
 ## 2. Abstract sketch
 
 Six moves, roughly one sentence each.
 
 1. **Problem.** The gap between a backtest and live trading is dominated by execution
-   assumptions, and those assumptions are national and dated — a tick grid, a band, a lot,
-   an auction eligibility rule, a settlement cycle, a margin regime. Anchor to Patton &
-   Weller's 2.2–8.5% momentum cost range and Menkveld et al.'s finding that non-standard
-   errors are "on par with standard errors".
-2. **What exists.** Credit generously and specifically: LEAN models T+N and a Reg NMS
+   assumptions, and those assumptions are national **and dated** — a tick grid, a band, a
+   lot, an auction eligibility rule, a settlement cycle, a margin regime, each of which
+   changes on a gazetted date. Anchor to Patton & Weller's 2.2–8.5% momentum cost range and
+   Menkveld et al.'s finding that non-standard errors are "on par with standard errors",
+   then to Vo & Doan (2023), whose difference-in-differences study of HOSE's real 12 Sep
+   2016 tick-size change shows that **a dated edition of one rule moves measured trading
+   costs on this very market.**
+2. **What exists.** Credit generously and specifically, and name the two nearest
+   neighbours rather than letting a reviewer find them: LEAN models T+N and a Reg NMS
    price-dependent tick grid; RQAlpha enforces China's bands, call auction and T+1 with
-   segregated stock/future accounts and date-resolved margin ratios; NautilusTrader, LEAN,
-   Zipline, RQAlpha and hftbacktest all let the user replace fill determination; Forex
-   Strategy Builder reported an ambiguity count in 2011.
-3. **The gap.** Dated rule editions exist for calendars and parameters, never for order
-   admission; and no engine distinguishes "this order did not fill" from "this data cannot
-   establish whether this order filled" at per-order granularity through the order status
-   the caller receives.
+   segregated stock/future accounts and date-resolved margin ratios; **EvoMarket (April
+   2026) implements market calendars, opening call auctions, price limits and T+1
+   settlement for China A-shares**; MarS ships an MIT-licensed matching engine that omits
+   the institutional rules by design; NautilusTrader, LEAN, Zipline, RQAlpha and
+   hftbacktest all let the user replace fill determination; Forex Strategy Builder reported
+   an ambiguity count in 2011 and **Claeys (2026) reports an 18.47% intrabar-ambiguity rate
+   on 2.06 million E-mini bars**.
+3. **The gap.** **Rules are carried as constants, not as editions.** Dated editions exist
+   for calendars and parameters, never for order admission — including in EvoMarket, whose
+   rules are fixed constants with no versioning — so no simulator can answer "what would
+   this have done under the rules in force in 2024?" across a real regime change. Secondly,
+   no engine distinguishes "this order did not fill" from "this data cannot establish
+   whether this order filled" at per-order granularity through the order status the caller
+   receives.
 4. **What we built.** A simulated Vietnamese exchange behind a broker-shaped API, with a
-   400-row dated rulebook resolved per simulated instant, a VSDC settlement-business-day
-   calendar wired to unsettled cash and unsettled shares, MR = IM + VM tested as
-   utilisation in a segregated deposit account, and INDETERMINATE as a per-order status
-   attributed to the rule that could not be evaluated.
+   400-row **dated** rulebook resolved per simulated instant — spanning the KRX cutover of
+   2025-05-05, three equity venues with different bands, a price-dependent tick grid and
+   first-day and post-suspension band exceptions — a VSDC settlement-business-day calendar
+   wired to unsettled cash and unsettled shares, MR = IM + VM tested as utilisation in a
+   segregated deposit account, and INDETERMINATE as a per-order status attributed to the
+   rule that could not be evaluated.
 5. **Results, one line.** The headline numbers from §7 — the blocked-entry rate at the
    tradeable lag, the tick-grid conformity contrast, the bar-vs-tick lock divergence, the
    margin-call incidence — each stated with the assumption it rests on.
@@ -67,8 +105,10 @@ Six moves, roughly one sentence each.
    unvalidated, which is why an ignorance bound is reported rather than a fill rate.
 
 **Word budget note.** If the abstract must be short, move (2) is the one to compress —
-but it may not be deleted. A reviewer who knows LEAN has `DelayedSettlementModel` and sees
-no acknowledgement of it will discard the paper.
+but it may not be deleted, and **EvoMarket may not be the thing cut from it**. A reviewer
+who knows LEAN has `DelayedSettlementModel`, or who has seen EvoMarket on arXiv, and finds
+no acknowledgement in the abstract will discard the paper. The minimum surviving form of
+move (2) is one clause naming LEAN/RQAlpha, one naming EvoMarket, and one naming Claeys.
 
 ---
 
@@ -79,21 +119,90 @@ no acknowledgement of it will discard the paper.
 Three paragraphs. (a) The backtest-to-live gap as an assumption problem, not a statistics
 problem, with the cost literature cited. (b) Why the missing part is jurisdictional: the
 rules that refuse an order are national and dated, and general engines are portable by
-design, so they omit them. (c) Contributions, stated as the three narrowed sentences and
-nothing wider, with a forward reference to the threats-to-validity section so the scope
-cuts arrive in the reader's first impression, not the last.
+design, so they omit them — **and, being dated, a portable engine that did encode them
+would encode exactly one edition**. (c) Contributions, **led by dated rule editions**, then
+the other two narrowed sentences and nothing wider, with a forward reference to the
+threats-to-validity section so the scope cuts arrive in the reader's first impression, not
+the last. The nearest neighbours (EvoMarket, Claeys) are named in this paragraph, not
+deferred to §2 — a reviewer who meets them first in related work has already formed a
+worse impression.
 
 ### §2 Related work
 
-Drawn wholesale from `literature-review.md` §§1–3. Must contain the two comparison tables
-with per-cell citations, and must state prior art before novelty in every subsection.
-Subsections: (2.1) backtest reliability and cost-assumption sensitivity; (2.2) exchange-rule
-enforcement in general-purpose engines; (2.3) emerging-market rule engines, with RQAlpha
-and EvoMarket named as the nearest neighbours and vnpy's hard-coded `pre_close * 1.1` as the
-cautionary counter-example; (2.4) fill determination as a user-replaceable component, and
-the 2011 Forex Strategy Builder ambiguity precedent; (2.5) Vietnam specifically — the
-research that describes the constraints and drops them, and the three broker paper-trading
-products that enforce the current edition.
+Drawn wholesale from `literature-review.md` §§1–3. Must contain **all three** comparison
+tables with per-cell citations, and must state prior art before novelty in every
+subsection. Subsections:
+
+- **(2.1) Backtest reliability and cost-assumption sensitivity.** Unchanged.
+- **(2.2) Exchange-rule enforcement in general-purpose engines.** Table T1.
+- **(2.3) Emerging-market rule engines and LOB simulators.** Table T2. Open with the Jain
+  et al. LOB-simulation survey for framing. **EvoMarket and RQAlpha are the nearest
+  neighbours and must be described before any claim of ours is stated**; MarS is the
+  MIT-licensed matching engine that omits the institutional rules by design; vnpy's
+  hard-coded `pre_close * 1.1` is the cautionary counter-example; ABIDES has no
+  price-limit and no call-auction mechanism, only the maintainer comment *"This can
+  probably go away once we code the opening cross auction"*. Close with the fact that **no
+  ABM has been localised to any emerging market's real rulebook** (India, Brazil,
+  Indonesia, Thailand, Korea, Taiwan all empty), which is what makes EvoMarket the
+  exception worth naming.
+- **(2.4) Fill determination as a user-replaceable component**, the 2011 Forex Strategy
+  Builder ambiguity precedent, and **Claeys (2026)** — cited with his numbers, and with the
+  concession in `literature-review.md` §4.3 made *before* our own framing is introduced.
+- **(2.5) Vietnam specifically.** The research that describes the constraints and drops
+  them (Huang/Liu/Shu; Nguyen et al.); **Pham, Luu & Tran (2021)**, the only indexed paper
+  using the phrase "Vietnamese stock market simulator", disposed of with their own sentence
+  *"We use daily return as input data for training process"*; **Lê Đức Hùng (2013)**, the
+  HNX matching-engine test double that predates derivatives, T+2, bands and auctions;
+  **Vo & Doan (2023)** as the empirical warrant, given prominence rather than a passing
+  cite; the **JICCE 2025 dashboard** as the state of practice; and Table T2b, the
+  Vietnamese product landscape — Vietstock Đấu trường (the only one publishing a tick grid,
+  bands and a participation cap), vnstockgame, the **defunct** SSI iWin, VPS SmartEasy, and
+  the live-money-only broker APIs. Our own arXiv:2505.14050 is cited here as the
+  non-overlapping reproducibility self-citation.
+- **(2.6) Priority risks and how we position against them.** New, and mandatory — see the
+  subsection specified immediately below.
+
+#### §2.6 Priority risks and how we position against them
+
+**Purpose.** Two published works sit closest to this paper, and a reviewer will find both.
+This subsection names them, concedes what they establish, and states the residual
+difference — before §3 begins. It is written as scope comparison, never as critique.
+Roughly half a page.
+
+**Risk 1 — EvoMarket (Zhong, Yang, Liu, Tang & Yang, arXiv:2604.18046, 20 April 2026).**
+It is our structural thesis one market over and four months ahead: a discrete-event
+multi-agent simulator with *"explicit institutional mechanisms (market calendars, opening
+call auctions, price limits, and T+1 settlement)"*, validated on China A-share order-flow
+and LOB data. **Concede the combination outright.** The residual differences, all
+verifiable and all about the shape of the rulebook rather than about priority:
+
+| What EvoMarket has | What differs here |
+|---|---|
+| One symmetric ±10% band, uniform ¥0.01 tick, T+1 — the rules China actually has | Three equity venues with different bands, a **price-dependent** tick grid, first-day and post-suspension band exceptions, plus a **separate derivatives venue with IM + VM margin** |
+| Rules as fixed constants | Rules as **effective-dated editions**, spanning a real regime change (KRX, 2025-05-05) |
+| No code released | Open source, with `reproduce_measurements.py` regenerating every number |
+| Equities only | Equities **and** derivatives, with a segregated margin account |
+| An experiment harness for mechanism studies | A **broker-API endpoint a strategy connects to** |
+
+**Risk 2 — Claeys (2026), SSRN 6240638.** 2,064,460 one-minute E-mini NASDAQ-100 bars,
+2020–2025; 18.47% ambiguous for a 10-point stop / 10-point target; best-case/worst-case
+spread of 3,695 NQ points ($73,900) per 1,000 trades; five platforms compared, none
+provably correct without tick data. **Concede the intrabar-ambiguity framing explicitly.**
+Then state the difference in one sentence: we enforce the exchange's rules first, so the
+spread is bounded by **admissibility** rather than only by OHLC geometry — an order the
+tick grid, lot, band or session would have refused contributes no spread because it never
+rested — and his scope is one instrument and one ambiguity where ours is one measurement
+among ten. Disclose in the same breath that his full text is unreachable and that we
+therefore never name the five platforms.
+
+**Risk 3, social rather than intellectual — the JICCE 2025 platform.** Lee et al.
+(UEL/VNU-HCM), *J. Inf. Commun. Converg. Eng.* 23(4):327–335, 31 Dec 2025, is a web
+dashboard with ARIMA/RF/LSTM forecasting and no microstructure of any kind. It is **not** a
+competitor, and it is a legitimate citation for dashboard-and-backtest-tab tooling being
+the state of practice in Vietnam. **This group published at RIVF 2025 and we are submitting
+to RIVF'26; assume they are in the reviewer pool.** Describe scope, never quality. Do not
+repeat the earlier misreading that their platform uses EUR/USD data — that sentence is in
+their literature review, about someone else's work.
 
 ### §3 The Vietnamese rule surface
 
@@ -107,7 +216,11 @@ from 2024-11-02; foreign-ownership room and its pre-/post-KRX rejection triggers
 derivatives regime — segregated deposit, MR = IM + VM, VM loss-only, utilisation tiers at
 80/90/100%, and **no published maintenance ratio**. Each with its dated citation and its
 confidence level from the rulebook. Close with the KRX cutover of 2025-05-05 presented as a
-dated rule edition rather than a migration.
+dated rule edition rather than a migration — **and with Vo & Doan (2023) as the evidence
+that a dated edition is not bookkeeping**: their difference-in-differences study of the
+12 Sep 2016 HOSE tick-size change finds trading costs fell, and fell non-uniformly across
+price bands. This is the section where the lead claim earns its warrant, so the citation
+belongs here as well as in §2.
 
 ### §4 Design
 
@@ -165,8 +278,11 @@ trade and no order ids exist.
 
 ### §10 Conclusion
 
-Restate the three narrowed contributions and nothing wider. Do not reintroduce a broad
-claim in the conclusion — that is where over-claiming usually re-enters.
+Restate the three narrowed contributions, **leading with dated rule editions**, and nothing
+wider. Do not reintroduce a broad claim in the conclusion — that is where over-claiming
+usually re-enters, and the two phrases most likely to re-enter here are "first to combine
+call auctions, price limits and settlement" and "first Vietnamese matching engine". Both
+are prohibited; see the header of this outline.
 
 ---
 
@@ -301,10 +417,27 @@ series currently arrives through the same pipeline we maintain.
 - **No corporate-action engine.** A run spanning an ex-date is wrong for that instrument
   until the adjustment formulas land.
 - **Absence claims about other tools are module-scoped.** No repository-wide grep was
-  possible during the survey; every "does not have X" in §2 names the modules read.
-- **Three external documents are unread and are cited as unverified**: the ResearchGate
-  March 2026 HOSE/HNX simulation-platform paper, the Claeys 2026 SSRN working paper, and
-  EvoMarket's source. Two of them bear directly on our novelty claims.
+  possible during the engine survey; every "does not have X" in §2 names the modules read.
+  Where an absence rests on a GitHub *repository-search* query — as with "no open-source
+  Vietnamese exchange simulator exists" — say so, and state the weaker thing it proves: no
+  repository is named or described as such a tool, not that no such code exists.
+- **The novelty claim is scoped by a preprint we cannot inspect.** EvoMarket **releases no
+  code**, so every statement we make about it is read from its paper. If its
+  implementation turns out to carry dated rule editions, the lead claim narrows further.
+  Disclose this rather than let it be discovered.
+- **One external document remains unread and is cited as unverified**: the full text of
+  Claeys (2026), which is Cloudflare-blocked. Its abstract is verified from the Crossref
+  deposit and its four headline numbers are safe to cite; **the five platforms he compares
+  are unknown to us and are never named.**
+- **Two documents previously listed here as unread are now closed.** The item recorded as
+  "the ResearchGate March 2026 HOSE/HNX simulation-platform paper" was identified as the
+  JICCE 2025 dashboard, read in full, and found to contain no microstructure — it was a
+  false alarm, and the earlier claim that it uses EUR/USD data was a misreading of *their*
+  literature review. EvoMarket's paper has been read in full, including appendix and
+  acknowledgments; only its source is unavailable, because none exists publicly.
+- **Vietstock Đấu trường's current rules are unverifiable.** Our rule model for it is the
+  2022 Wayback capture; the Dec 2025 relaunch added derivatives and put the rules behind a
+  login. Any statement about its present rule set is unverified and must be marked so.
 
 ---
 
@@ -313,7 +446,9 @@ series currently arrives through the same pipeline we maintain.
 | # | Artefact | Section |
 |---|---|---|
 | T1 | Capability × tool comparison, general engines (from `literature-review.md` §2.1) | §2 |
-| T2 | Capability × tool comparison, specialist systems (§2.2) | §2 |
+| T2 | Capability × tool comparison, specialist systems incl. **EvoMarket and MarS** (§2.2) | §2 |
+| T2b | Capability × product comparison, **the Vietnamese landscape** (§2.5) — Vietstock Đấu trường, vnstockgame, SSI iWin (defunct), VPS SmartEasy, DNSE/SSI live APIs, the JICCE 2025 dashboard | §2 |
+| T2c | **EvoMarket vs Plutus**, rule-surface differences only (from §2.6 of this outline) | §2.6 |
 | T3 | Dated rule editions in force across the simulated window, with effective dates and confidence | §3 |
 | F1 | The order state machine, with INDETERMINATE shown as an event on the resting arc, not a leaf | §4 |
 | F2 | Indeterminate rate by data resolution and by binding rule | §5 |
@@ -325,7 +460,13 @@ series currently arrives through the same pipeline we maintain.
 
 - RIVF'26's 31 Aug deadline is explicitly **non-binding** for this work; the working
   horizon is Sep 2026 – Feb 2027. Do not compress §5 or §8 to hit a date.
+- **If the venue is RIVF, the reviewer pool probably includes the JICCE 2025 authors**
+  (same group, RIVF 2025). That does not change what we claim; it changes how their work is
+  described. State scope, cite the DOI, and use no evaluative adjective about their paper
+  anywhere in the submission.
 - If the venue is a systems track, promote §4 and §6 and compress §2 to one page plus T1.
+  **§2.6 is not compressible** — it is half a page that pre-empts the two strongest
+  reviewer objections, and cutting it saves less than it costs.
 - If the venue is a finance track, promote §1 and §7, and lead the abstract with the
   Menkveld non-standard-errors framing.
 - Either way, §8 stays at full length. It is the section that makes the fidelity claim

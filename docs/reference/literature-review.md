@@ -6,6 +6,25 @@ attacked adversarially in 2026-08-26 survey passes and **all three had to be nar
 The narrowed forms are recorded here verbatim in §4, and no broader form of any of them
 appears anywhere in this document or may appear in the paper.
 
+**A fifth pass (prior-art verification, 2026-08-26) changed the shape of the argument.**
+Three items that were carried as unverified are now resolved, and one competitor that
+appeared on no earlier list was found:
+
+- **EvoMarket (arXiv:2604.18046) is real, verified, and one market over.** It ships market
+  calendars, opening call auctions, price limits and T+1 settlement for China A-shares. The
+  consequence is stated once and enforced everywhere: **no claim of the form "the first
+  simulator to combine call auctions, price limits and a settlement cycle" may appear in
+  this document, in the paper, or in any talk.** See §2.3 item 9.
+- **The ResearchGate priority risk was a false alarm.** The paper is a JICCE 2025 web
+  dashboard with zero microstructure (§3.1). It is a legitimate, and respectful, citation
+  for the state of practice in Vietnam — not a competitor.
+- **Claeys (SSRN 6240638) is verified at the abstract and genuinely overlaps** our
+  bar-vs-tick divergence measurement. We concede his framing explicitly and reframe (§2.4).
+- **The lead claim is now dated, versioned rule editions** — the ability to backtest 2024
+  and 2026 under the rules that actually applied to each. Nothing found anywhere keys an
+  *admission* rule to an effective date, and Vo & Doan (2023) supplies the empirical
+  warrant that a dated tick-grid edition changes measured outcomes (§3.1).
+
 ---
 
 ## 0. How to read this document
@@ -23,21 +42,34 @@ Every factual claim about another tool carries one of these markers.
 
 ### Provenance and the limits of the survey
 
-Verification was performed in four survey passes on **2026-08-26**, reading default
+Verification was performed in five survey passes on **2026-08-26**, reading default
 branches (`master`/`main`/`develop`) via `raw.githubusercontent.com`, official
-documentation sites, and extracted PDF text — not tagged PyPI releases. Three limits
-constrain every absence claim below and must be stated if challenged:
+documentation sites, and extracted PDF text — not tagged PyPI releases. The fifth pass
+(prior art) additionally downloaded publisher PDFs, fetched full paper HTML including
+footnotes, appendices and acknowledgments, read archived Wayback captures of dead
+products, and queried the Crossref and GitHub APIs directly; absence claims sourced to a
+GitHub *code/repository search API* query are marked as such and name the query string.
+Three limits constrain every absence claim below and must be stated if challenged:
 
-1. **No repository-wide grep was possible** in the survey environment (no `gh` CLI;
-   grep.app returned HTTP 429; the GitHub code-search API requires auth). Every **[V-neg]**
-   is scoped to the modules explicitly named in the Sources table, not to the whole
-   repository. A feature could exist in a module we did not open.
+1. **No repository-wide grep was possible** for the engine survey (no `gh` CLI; grep.app
+   returned HTTP 429; the GitHub code-search API requires auth). Every **[V-neg]** is
+   scoped to the modules explicitly named in the Sources table, not to the whole
+   repository. A feature could exist in a module we did not open. The fifth pass did reach
+   the GitHub *search* API for repository-level queries; those results are marked
+   `[V-neg]` with the query string, and they establish that no repository is *named or
+   described* as such a tool, not that no such code exists anywhere.
 2. **Branch, not release.** Behaviour in the current PyPI/NuGet release of any project may
    differ from the branch read. Release recency was not verified for any project. **[U]**
 3. **Closed platforms were assessed from documentation only** — JoinQuant, MT5 internals,
-   TradeStation, vectorbt.pro, SSI iWin, VPS SmartEasy. We make no claim about their
-   source. In particular **no claim whatsoever is made about `vectorbt.pro`**, which was
-   not examined.
+   TradeStation, vectorbt.pro, VPS SmartEasy, Vietstock Đấu trường (whose rules went
+   login-walled at the Dec 2025 relaunch), and SSI iWin (dead since 2022; assessed from
+   Wayback). We make no claim about their source. In particular **no claim whatsoever is
+   made about `vectorbt.pro`**, which was not examined.
+4. **Two competitors publish no source.** EvoMarket releases no code (abstract, full HTML,
+   footnotes, appendix and acknowledgments all checked, **[V-neg]**), so every EvoMarket
+   capability claim is read from its paper, not its implementation; and Claeys's full text
+   is behind a Cloudflare challenge, so his abstract is **[V]** and his five compared
+   platforms are **[U]** — they are never named by us.
 
 A fourth caution applies to quotations. During the literature pass, a fetch-summarising
 model fabricated an "exact quote" attributed to Balch et al. (2019) that occurs **zero**
@@ -133,6 +165,13 @@ That number is the argument for our whole scope. Vietnam's band is ±7% on HOSE,
 widened regimes, degenerate branches and a price-dependent tick grid on top; and the rules
 changed inside our own data window.
 
+**And the dated part is not hypothetical.** Vo & Doan (2023) run a difference-in-differences
+study of HOSE's real tick-size change of **12 September 2016** and find trading cost fell —
+but non-uniformly across price bands **[V]** `[vn-tick]`. A simulator that carries one
+edition of the grid therefore does not merely lose detail on the other side of that date;
+it gets a published, measured effect wrong. This is the empirical warrant for the lead
+claim in §4.0, and it is Vietnamese, peer-reviewed and identifiable by DOI.
+
 ---
 
 ## 2. What existing tools do
@@ -142,6 +181,12 @@ changed inside our own data window.
 Rows are the capabilities Plutus targets. Columns are tools. Each cell carries a source key
 resolved in §6. Cells state **what the tool does**, not what it lacks relative to us —
 several of these tools do a given capability better than we do, and the paper says so.
+
+**There are three tables**: §2.1 general-purpose engines, §2.2 specialist and adjacent
+systems (including EvoMarket and MarS, the two nearest neighbours on rule surface and on
+matching respectively), and §2.5 the Vietnamese product landscape. The third is not
+optional: a Vietnamese reviewer knows every product in it, and several of them enforce real
+rules.
 
 **Two definitional cautions built into the rows:**
 
@@ -171,17 +216,19 @@ several of these tools do a given capability better than we do, and the paper sa
 
 ### 2.2 Specialist and adjacent systems
 
-| Capability | ABIDES | EvoMarket (2026) | vnpy (`alpha`) | Hummingbot | PyAlgoTrade | bt / QSTrader | Forex Strategy Builder (2011) |
-|---|---|---|---|---|---|---|---|
-| **Order-admission gate** | Market open/close only; orders after `mkt_close` refused `[V]` `[A-ex]` | Band-based rejection or truncation of out-of-band orders `[R]` `[E-paper]` | None `[V-neg]` `[VN-alpha]` | `TradingRule` quantisation at submission: `min_price_increment`, `min_base_amount_increment`, `min_notional_size` `[V]` `[HB-rule]` | No cash check at `submitOrder()`; checked at `commitOrderExecution()` and **retried on later bars** `[V]` `[PA-bt]` | bt: no order object at all `[V]` `[BT-core]`; QSTrader: none, warns and proceeds with negative cash `[V]` `[QS-port]` | n/a (retail FX) |
-| **Dated rule editions** | None `[V-neg]` `[A-ord]` | Not described `[R]` `[E-paper]` | **Hard-coded** `pre_close * 1.1` / `* 0.9`, ±10% only, no ChiNext/STAR/ST/BSE variants, no effective date `[V]` `[VN-alpha]` | None `[V-neg]` `[HB-rule]` | None `[V-neg]` `[PA-bt]` | None `[V-neg]` | None |
-| **Settlement cycle** | None `[V-neg]` `[A-ord]` | **T+1**, available/pending share decomposition `[R]` `[E-paper]` | None `[V-neg]` `[VN-alpha]` | None `[V-neg]` `[HB-pt]` | None `[V-neg]` `[PA-bt]` | None `[V-neg]` | n/a |
-| **Tick / lot grid** | `tick_size` appears **only** inside `adaptive_market_maker_agent.py`, never as an exchange-enforced grid `[V]` `[A-ord]` | Flat RMB 0.01 tick `[R]` `[E-paper]` | `pricetick` used in the band rounding `[V]` `[VN-alpha]` | Per-pair constant increment `[V]` `[HB-rule]` | None `[V-neg]` `[PA-bt]` | bt `integer_positions=True` `[V]` `[BT-core]` | n/a |
-| **Price limits** | None; zero hits for `price_limit\|limit_up\|limit_down\|circuit` in the markets package `[V-neg]` `[A-ord]` | **Yes**: `p_min = (1−η)p_ref`, `p_max = (1+η)p_ref` `[R]` `[E-paper]` | **Yes**, undated ±10% `[V]` `[VN-alpha]` | None `[V-neg]` `[HB-pt]` | None `[V-neg]` `[PA-bt]` | None `[V-neg]` | n/a |
-| **Call auctions** | **Not implemented**; `exchange_agent.py:219` carries *"This can probably go away once we code the opening cross auction"* `[V]` `[A-ex]` | **Yes**, opening call auction `[R]` `[E-paper]` | None `[V-neg]` `[VN-alpha]` | None `[V-neg]` `[HB-pt]` | None `[V-neg]` `[PA-bt]` | None `[V-neg]` | n/a |
-| **Segregated margin** | None; holdings are `Dict[str, int]` with a `"CASH"` key `[V]` `[A-ord]` | None `[R]` `[E-paper]` | None `[V-neg]` `[VN-alpha]` | `PerpetualBudgetChecker` leverage, no IM+VM account `[R]` `[HB-pt]` | `__allowNegativeCash` flag only `[V]` `[PA-bt]` | None `[V-neg]` | n/a |
-| **User-replaceable fill determination** | No — you change *who trades* (agent population), not how fills are decided `[V]` `[A-ob]` | No; deterministic CDA `[R]` `[E-paper]` | No `[V-neg]` `[VN-alpha]` | **No** — hard-coded in Cython `cdef` methods, not overridable from Python `[V]` `[HB-pt]` | **Yes** — `FillStrategy` ABC with `fillMarketOrder`/`fillLimitOrder`/`fillStopOrder`/`fillStopLimitOrder`, installed via `setFillStrategy()`, each returning `FillInfo` **or `None`** `[V]` `[PA-fill]` | bt: cost only (`set_commissions`) `[V]` `[BT-core]`; QSTrader: `slippage_model`/`market_impact_model` are `None` with `# TODO: Implement` `[V]` `[QS-broker]` | **Yes** — `enum InterpolationMethod { Pessimistic, Optimistic, Shortest, Nearest, Random }` `[V]` `[FSB-cmp]` |
-| **Explicit indeterminacy** | No `[V-neg]` `[A-ob]` | No `[R]` `[E-paper]` | No `[V-neg]` `[VN-alpha]` | No `[V-neg]` `[HB-pt]` | No — `FillStrategy` returns fill-or-no-fill `[V]` `[PA-fill]` | No `[V-neg]` | **Yes** — `enum BacktestEval { Error, None, Ambiguous, Unknown, Correct }`, set at 8 sites each commented *"Ambiguous - two orders or order and bar closing"* `[V]` `[FSB-eval]` |
+| Capability | ABIDES | EvoMarket (2026) | MarS (ICLR 2025) | vnpy (`alpha`) | Hummingbot | PyAlgoTrade | bt / QSTrader | Forex Strategy Builder (2011) |
+|---|---|---|---|---|---|---|---|---|
+| **What it is for** | Multi-agent experiment harness for studying market mechanisms and training agents `[V]` `[A-ex]` | Experiment harness for mechanism studies on China A-shares, validated against A-share order-flow and LOB data. **Not a broker-API endpoint a strategy connects to** `[V]` `[E-paper]` | Generative order-flow "world model"; the matching engine exists to serve the generator `[V]` `[mars]` | A-share strategy backtester `[V]` `[VN-alpha]` | Live market-making bot with a paper-trade mode `[V]` `[HB-pt]` | Bar backtester (repo archived 2023) `[V]` `[PA-bt]` | Portfolio backtesters `[V]` `[BT-core]` `[QS-port]` | Retail FX strategy builder `[V]` `[FSB-cmp]` |
+| **Order-admission gate** | Market open/close only; orders after `mkt_close` refused `[V]` `[A-ex]` | Band-based rejection or truncation of out-of-band orders `[V]` `[E-paper]` | Real LOB matching, but **no exchange-rule admission gate — deliberately** `[V-neg]` `[mars]` | None `[V-neg]` `[VN-alpha]` | `TradingRule` quantisation at submission: `min_price_increment`, `min_base_amount_increment`, `min_notional_size` `[V]` `[HB-rule]` | No cash check at `submitOrder()`; checked at `commitOrderExecution()` and **retried on later bars** `[V]` `[PA-bt]` | bt: no order object at all `[V]` `[BT-core]`; QSTrader: none, warns and proceeds with negative cash `[V]` `[QS-port]` | n/a (retail FX) |
+| **Dated rule editions** | None `[V-neg]` `[A-ord]` | **None — the rules are fixed constants** (one band, one tick, T+1) with no effective date and no versioning `[V-neg]` `[E-paper]` | None `[V-neg]` `[mars]` | **Hard-coded** `pre_close * 1.1` / `* 0.9`, ±10% only, no ChiNext/STAR/ST/BSE variants, no effective date `[V]` `[VN-alpha]` | None `[V-neg]` `[HB-rule]` | None `[V-neg]` `[PA-bt]` | None `[V-neg]` | None |
+| **Settlement cycle** | None `[V-neg]` `[A-ord]` | **T+1**, available/pending share decomposition `[V]` `[E-paper]` | None — out of scope by design `[V-neg]` `[mars]` | None `[V-neg]` `[VN-alpha]` | None `[V-neg]` `[HB-pt]` | None `[V-neg]` `[PA-bt]` | None `[V-neg]` | n/a |
+| **Tick / lot grid** | `tick_size` appears **only** inside `adaptive_market_maker_agent.py`, never as an exchange-enforced grid `[V]` `[A-ord]` | **Uniform ¥0.01** — which is what China A-shares has; not price-dependent `[V]` `[E-paper]` | None `[V-neg]` `[mars]` | `pricetick` used in the band rounding `[V]` `[VN-alpha]` | Per-pair constant increment `[V]` `[HB-rule]` | None `[V-neg]` `[PA-bt]` | bt `integer_positions=True` `[V]` `[BT-core]` | n/a |
+| **Price limits** | None; zero hits for `price_limit\|limit_up\|limit_down\|circuit` in the markets package `[V-neg]` `[A-ord]` | **Yes — one symmetric band**: `p_min = (1−η)p_ref`, `p_max = (1+η)p_ref`, no venue variants, no first-day or post-suspension exception `[V]` `[E-paper]` | None — deliberately `[V-neg]` `[mars]` | **Yes**, undated ±10% `[V]` `[VN-alpha]` | None `[V-neg]` `[HB-pt]` | None `[V-neg]` `[PA-bt]` | None `[V-neg]` | n/a |
+| **Call auctions** | **Not implemented**; `exchange_agent.py:219` carries *"This can probably go away once we code the opening cross auction"* `[V]` `[A-ex]` | **Yes**, opening call auction `[V]` `[E-paper]` | None — deliberately `[V-neg]` `[mars]` | None `[V-neg]` `[VN-alpha]` | None `[V-neg]` `[HB-pt]` | None `[V-neg]` `[PA-bt]` | None `[V-neg]` | n/a |
+| **Segregated margin / derivatives** | None; holdings are `Dict[str, int]` with a `"CASH"` key `[V]` `[A-ord]` | **None; equities only — no derivatives venue and no margin regime** `[V-neg]` `[E-paper]` | None `[V-neg]` `[mars]` | None `[V-neg]` `[VN-alpha]` | `PerpetualBudgetChecker` leverage, no IM+VM account `[R]` `[HB-pt]` | `__allowNegativeCash` flag only `[V]` `[PA-bt]` | None `[V-neg]` | n/a |
+| **User-replaceable fill determination** | No — you change *who trades* (agent population), not how fills are decided `[V]` `[A-ob]` | No; deterministic CDA `[V]` `[E-paper]` | No — what you replace is the generative order-flow model, not the matcher `[V]` `[mars]` | No `[V-neg]` `[VN-alpha]` | **No** — hard-coded in Cython `cdef` methods, not overridable from Python `[V]` `[HB-pt]` | **Yes** — `FillStrategy` ABC with `fillMarketOrder`/`fillLimitOrder`/`fillStopOrder`/`fillStopLimitOrder`, installed via `setFillStrategy()`, each returning `FillInfo` **or `None`** `[V]` `[PA-fill]` | bt: cost only (`set_commissions`) `[V]` `[BT-core]`; QSTrader: `slippage_model`/`market_impact_model` are `None` with `# TODO: Implement` `[V]` `[QS-broker]` | **Yes** — `enum InterpolationMethod { Pessimistic, Optimistic, Shortest, Nearest, Random }` `[V]` `[FSB-cmp]` |
+| **Explicit indeterminacy** | No `[V-neg]` `[A-ob]` | No `[V-neg]` `[E-paper]` | No `[V-neg]` `[mars]` | No `[V-neg]` `[VN-alpha]` | No `[V-neg]` `[HB-pt]` | No — `FillStrategy` returns fill-or-no-fill `[V]` `[PA-fill]` | No `[V-neg]` | **Yes** — `enum BacktestEval { Error, None, Ambiguous, Unknown, Correct }`, set at 8 sites each commented *"Ambiguous - two orders or order and bar closing"* `[V]` `[FSB-eval]` |
+| **Code released** | Yes, public repo `[V]` `[A-ex]` | **No** — no repository, no licence, and no availability statement in the abstract, full HTML, footnotes, appendix or acknowledgments `[V-neg]` `[E-paper]` | **Yes, MIT** `[V]` `[mars]` | Yes `[V]` `[VN-alpha]` | Yes `[V]` `[HB-pt]` | Yes (archived) `[V]` `[PA-bt]` | Yes `[V]` `[BT-core]` | Yes, 2011 mirror `[V]` `[FSB-eval]` |
 
 ### 2.3 Where prior art is strongest — credit stated plainly
 
@@ -239,26 +286,86 @@ them before making any claim of its own.
    dated margin ratios; segregated stock/future accounts; a 25%-of-bar-volume liquidity
    cap with explicit cancellation reasons **[V]** `[RQ-lim]` `[RQ-match]` `[RQ-pos]`
    `[RQ-port]`.
-9. **A Chinese A-share simulator with the institutional rule surface was published in
-   April 2026.** EvoMarket implements market calendars, opening call auctions, daily price
-   limits, T+1 settlement and a tick size **[R]** `[E-paper]`. **We could not read its
-   source and read only fetched HTML of the paper — treat as [R] and obtain the PDF before
-   submission.** After EvoMarket, "nobody models an Asian emerging market's institutional
-   rule surface" is false.
-10. **Vietnamese brokers already ship rule-enforcing simulators.** vnstockgame's published
-    rules enforce T+2 (*"Tất cả các giao dịch được khớp sẽ được thanh toán theo luật T+2"*),
-    the band (*"Giá đặt mua/bán phải nằm giữa giá trần và giá sàn"*), a lot multiple and a
-    19,990-share cap, ATO/ATC call-auction phases, LO/MP/ATO/ATC order types and a 0.2%
-    fee, matched against real market prices and volumes **[V]** `[vsg]`. SSI iWin markets
-    itself as the first Vietnamese simulated-trading platform covering both cash and
-    derivatives, matching against real market price and volume **[V]** `[iwin]`; VPS
-    SmartEasy markets derivatives simulation **[R]** `[smarteasy]`. All three are
-    live-forward paper trading against today's feed, proprietary, single-edition, with no
-    historical replay and no published rule set — but a Vietnamese reviewer will know them,
-    so the paper names and distinguishes them rather than claiming empty ground.
-    **Caution: vnstockgame's "multiple of 10" lot is that product's own rule and may be a
-    simplification of HOSE's 100-share lot. Cite it as evidence of existence, never as
-    evidence of correct VN rules.**
+9. **EvoMarket is the structural thesis of this paper, one market over and four months
+   ahead — and it is the single most important citation in the document.** Zhong, Yang,
+   Liu, Tang & Yang (Harbin Institute of Technology / SUSTech / Zhongguancun Academy),
+   *"EvoMarket: A High-Fidelity and Scalable Financial Market Simulator,"* arXiv:2604.18046,
+   submitted 20 April 2026 (cs.CE, cs.MA; preprint, no venue yet). It is a discrete-event
+   multi-agent simulator with optimised LOB structures, hierarchical scheduling under
+   propagation delays, asynchronous per-asset matching, and — verbatim — *"explicit
+   institutional mechanisms (market calendars, opening call auctions, price limits, and
+   T+1 settlement)"*, validated on China A-share order-flow and LOB data **[V]** `[E-paper]`.
+
+   **The consequence, stated once and binding everywhere:** any sentence of the form *"the
+   first simulator to combine call auctions, price limits and a settlement cycle"* is
+   **false** and may not appear in this document, in the paper, in a rebuttal or in a talk.
+   The same applies to "nobody models an Asian emerging market's institutional rule
+   surface".
+
+   The differentiators that survive are all verifiable, and all of them are about **what
+   the rulebook is**, not about who got there first:
+   - **China A-shares is a one-band, one-tick, one-venue regime**: a single ±10% main-board
+     band, a **uniform ¥0.01 tick**, and T+1. Vietnam has **three equity venues with
+     different bands** (±7% HOSE / ±10% HNX / ±15% UPCoM), a **price-dependent tick grid**,
+     **first-day and post-suspension band exceptions**, and a **separate derivatives venue
+     with IM + VM margin**. A fixed-constant implementation is adequate for the first and
+     structurally cannot express the second.
+   - **EvoMarket's rules are fixed constants with no versioning and no effective dates**
+     **[V-neg]** `[E-paper]`. It cannot answer "what would this have done under the rules
+     in force in 2024?"
+   - **No code is released** — checked in the abstract, the full HTML, the footnotes, the
+     appendix and the acknowledgments **[V-neg]** `[E-paper]`.
+   - **No derivatives**, hence no margin regime **[V-neg]** `[E-paper]`.
+   - It is an **experiment harness for mechanism studies**, not a broker-API endpoint a
+     strategy connects to. The distinction is the same one §3.3 draws for ABMs generally
+     and must be made explicitly, not implied.
+10. **Vietnamese products enforce rules, but none of them is a matching engine, and the
+    landscape has changed since earlier drafts.** The full matrix is §2.5; four corrections
+    to what this document previously said are load-bearing:
+    - **SSI iWin is dead.** `iwin.ssi.com.vn` is NXDOMAIN, the app-store listings 404, and
+      the last Wayback capture is **2022-03-12** **[V]** `[iwin]`. It is historical prior
+      art with a 2022 death date and **must never be written in the present tense.**
+    - **vnstockgame has no connection to the `vnstock` Python ecosystem** — it is an
+      unrelated PHP site, and conflating the two would be an error a Vietnamese reviewer
+      catches immediately **[V]** `[vsg]`. Its rules page does enforce T+2, bands (the
+      percentages are never stated), lots, ATO/ATC/LO/MP and a session table — but it has
+      no tick grid, no derivatives, no margin, no MTL/MOK/MAK/PLO, no API, no source, and
+      **it is not a matching engine**: it shadow-fills against the real tape (*"Lấy giá và
+      khối lượng khớp trên sàn thật là cơ sở khớp lệnh"*). Its own fee is self-contradictory
+      (0.2% in §6, 0.3% in §9) and its session tables are pre-KRX and stale **[V]** `[vsg]`.
+    - **Vietstock Đấu trường is the strongest Vietnamese prior-art citation**, and the
+      paper should cite it as such: the only Vietnamese product to publish a **tick grid**
+      (HOSE 100/500/1,000đ) *and* **bands** (±7%/±10%, first-day ±20%) *and* a
+      **participation cap** (≤5% of real daily volume) **[V]** `[vietstock]`. It relaunched
+      in Dec 2025 with derivatives, but the rules are now login-walled, so the **2022
+      Wayback capture is the last public rule model**. No API.
+    - **VPS SmartEasy** is a derivatives-only game whose own FAQ states that orders *"không
+      được đẩy vào hệ thống giao dịch của Sở giao dịch, không khớp theo nguyên tắc đối ứng
+      khớp lệnh"* **[V]** `[smarteasy]` — i.e. it says in its own words that it is not an
+      exchange.
+
+    What is true of **all** of them: every one shadow-fills off the real tape, none runs an
+    auction, none models derivatives margin mechanically, none is updated for KRX, none is
+    open source, none has an API, and none is reproducible.
+    **Caution retained: vnstockgame's lot rule is that product's own and may be a
+    simplification of HOSE's 100-share lot. Cite any of these as evidence of existence,
+    never as evidence of correct VN rules.**
+11. **A Vietnamese exchange matching engine was simulated in 2013, so "first" needs a
+    hedge.** Lê Đức Hùng, master's thesis, VNU-UET, 2013: a C#/QuickFIX **HNX matching-engine
+    test double** built to conformance-test broker software
+    (`repository.vnu.edu.vn/handle/VNU_123/5950`) **[V]** `[vn-lehung]`. It predates
+    derivatives (2017) and T+2 (2022) and has no bands, no tick grid and no auctions, and
+    only a 4-page abstract is public — but it exists. **Consequence: no unhedged "first
+    matching-engine simulation of a Vietnamese exchange" may be written.** The defensible
+    form is dated *rule editions*, not first-ever-matching-engine.
+12. **A production-quality matching engine that deliberately omits the institutional rules
+    already exists, and it is MIT-licensed.** Microsoft's **MarS** (ICLR 2025,
+    arXiv:2409.07486) ships a matching engine inside a generative order-flow world model,
+    with **no** price limits, auctions, settlement cycle, tick grid or margin — omitted by
+    design, not by oversight **[V]** / **[V-neg]** `[mars]`. It is the cleanest evidence
+    that a matching engine and an institutional rulebook are separable concerns, and that
+    the second is the part nobody builds. Cite Jain et al., *"Limit Order Book Simulations:
+    A Review"* (arXiv:2402.17359) as the survey that frames the space **[R]** `[jain]`.
 
 ### 2.4 The indeterminacy row, in full — because this is where we were most wrong
 
@@ -289,14 +396,32 @@ mirror `nuggett11/Forex-Strategy-Builder`, created 2011-04-27; shipped `ReadMe.h
 
 That last sentence is our own thesis, published in 2011.
 
-**Claeys (2026)** reportedly repeats the move on modern data: SSRN 6240638, *"When
-Backtests Guess: How Trading Platforms Silently Fabricate Results,"* 14 Feb 2026 —
-reported as 2,064,460 one-minute E-mini NASDAQ-100 bars 2020–2025, **18.47%** of bars
-ambiguous for a 10-point stop / 10-point target setup, and a best-case/worst-case gap of
-**3,695 NQ points ($73,900) per 1,000 trades**. **[U] — SSRN returned ECONNRESET on two
-attempts; title, author, ID and URL are confirmed from two independent search hits, but the
-numbers come from search-engine summaries of the abstract page and were not read in the
-PDF. Obtain and verify before citing.** `[claeys]`
+**Claeys (2026) repeats the move on modern data, and every specific is now verified.**
+Michael Claeys (single author, **no institutional affiliation**), *"When Backtests Guess:
+How Trading Platforms Silently Fabricate Results,"* SSRN 6240638, DOI
+10.2139/ssrn.6240638, **Crossref-deposited 3 April 2026**, 0 citations, non-peer-reviewed
+preprint. Confirmed **verbatim from the Crossref abstract deposit**: 2,064,460 one-minute
+E-mini NASDAQ-100 bars 2020–2025; **18.47%** of bars ambiguous for a 10-point stop /
+10-point target; a best-case versus worst-case spread of **3,695 NQ points ($73,900) per
+1,000 trades**; five platforms compared, with the conclusion that **"none provably correct
+without tick data"** **[V]** `[claeys]`.
+
+**This is a real overlap with our bar-vs-tick divergence measurement and the paper concedes
+it explicitly rather than distinguishing it away.** The position, which §4.3 encodes:
+
+> Claeys (2026) establishes the intrabar-ambiguity framing on 2.06 million E-mini bars and
+> reports the best-case/worst-case spread as the headline result. We do not claim that
+> framing. Our contribution is that the spread is bounded by **admissibility** — whether
+> the exchange's own rules would have let the order rest at all — rather than only by OHLC
+> geometry. Claeys's scope is one instrument and one ambiguity (stop-versus-target ordering
+> inside a bar); ours is order admission, settlement, margin, auctions, bands and a tick
+> grid, of which bar-vs-tick divergence is **one measurement among ten**.
+
+**Two things remain open and must be stated as open. [U]** The full text is behind a
+Cloudflare challenge and could not be retrieved; the **five compared platforms are never
+named by us** because we have not read which they are. Someone with SSRN institutional
+access must pull the PDF before submission — but the abstract is deposited metadata, not a
+search-engine summary, so the four numbers above are safe to cite today.
 
 **Yin, Miki, Lesnichenko & Gural (arXiv:2603.20319, 19 Mar 2026)** run 15 strategies
 through 5 engines × 30 asset buckets × 4 cost regimes and propose engine spread (ES),
@@ -319,6 +444,49 @@ TradeStation's Look-Inside-Bar Backtesting are the same class of declared-fideli
 **Consequences we accept.** After this, none of the following may be written anywhere:
 "no engine has any concept of an indeterminate fill"; "no prior art for an ignorance
 bound"; "nobody runs a strategy under several fill policies and shows the divergence".
+
+### 2.5 The Vietnamese product landscape, in a table
+
+A Vietnamese reviewer will know every product in this table, and several of them enforce
+real rules. The paper names and distinguishes them rather than claiming empty ground. The
+distinguishing fact is not that they are unsophisticated — it is that **every one of them
+determines fills by shadowing the real tape rather than by matching**, and that **none of
+them is dated**: each enforces exactly one edition of the rules, the current one.
+
+| Capability | Vietstock Đấu trường | vnstockgame | SSI iWin (**dead 2022**) | VPS SmartEasy | DNSE LightSpeed / SSI FastConnect | JICCE 2025 platform (Lee et al.) |
+|---|---|---|---|---|---|---|
+| **What it is** | Trading contest; relaunched Dec 2025 with derivatives. Rules are now **login-walled**, so the **2022 Wayback capture is the last public rule model** `[V]` `[vietstock]` | Browser trading game on an unrelated PHP site — **no connection to the `vnstock` Python ecosystem** `[V]` `[vsg]` | Broker simulated-trading app. `iwin.ssi.com.vn` **NXDOMAIN**, store listings 404, last capture **2022-03-12** `[V]` `[iwin]` | Derivatives-only broker game `[V]` `[smarteasy]` | **Real broker APIs**, live money only `[V]` `[vn-brokerapi]` | Web dashboard: ReactJS / FastAPI / Firebase / MongoDB / Airflow, with ARIMA / RF / LSTM forecasting `[V]` `[jicce]` |
+| **How fills are decided** | Shadow-fills off the real tape, with a **participation cap of ≤5% of real daily volume** `[V]` `[vietstock]` | Shadow-fills off the real tape — *"Lấy giá và khối lượng khớp trên sàn thật là cơ sở khớp lệnh"*. **Not a matching engine** `[V]` `[vsg]` | Marketed as matching against real market price and volume; completeness **[U]** `[iwin]` | Its own FAQ: orders *"không được đẩy vào hệ thống giao dịch của Sở giao dịch, không khớp theo nguyên tắc đối ứng khớp lệnh"* `[V]` `[smarteasy]` | Real exchange matching — it is the real exchange `[V]` `[vn-brokerapi]` | Historical replay plus **Monte Carlo resampling**; no order concept at all `[V]` `[jicce]` |
+| **Tick grid** | **Yes — HOSE 100 / 500 / 1,000đ. The only Vietnamese product to publish one** `[V]` `[vietstock]` | None `[V-neg]` `[vsg]` | **[U]** | **[U]** | Documented for live trading `[V]` `[vn-brokerapi]` | None — no tick sizes anywhere in the full text `[V-neg]` `[jicce]` |
+| **Price bands** | **Yes — ±7% / ±10%, first-day ±20%** `[V]` `[vietstock]` | Yes in principle (*"Giá đặt mua/bán phải nằm giữa giá trần và giá sàn"*) but **the percentages are never stated** `[V]` `[vsg]` | **[U]** | **[U]** | Documented `[V]` `[vn-brokerapi]` | None `[V-neg]` `[jicce]` |
+| **T+2 settlement** | **[U]** (rules login-walled) | **Yes** `[V]` `[vsg]` | **[U]** | n/a (derivatives) | Real `[V]` | None `[V-neg]` `[jicce]` |
+| **Auctions (ATO/ATC)** | **[U]** | Order types and a session table exist, but **the tables are pre-KRX and stale** `[V]` `[vsg]` | **[U]** | **[U]** | Documented `[V]` | None `[V-neg]` `[jicce]` |
+| **Full order-type / TIF matrix** | **[U]** | **LO/MP/ATO/ATC only — no MTL, MOK, MAK or PLO** `[V-neg]` `[vsg]` | **[U]** | **[U]** | Best public rule docs in Vietnam `[V]` `[vn-brokerapi]` | None `[V-neg]` `[jicce]` |
+| **Derivatives margin, mechanically** | Derivatives added Dec 2025; margin mechanics **[U]** | None `[V-neg]` `[vsg]` | Marketed for both cash and derivatives; mechanics **[U]** | Derivatives-only, but does not match `[V]` `[smarteasy]` | Real `[V]` | None `[V-neg]` `[jicce]` |
+| **Programmable API** | None `[V-neg]` `[vietstock]` | None `[V-neg]` `[vsg]` | None found `[V-neg]` `[iwin]` | None `[V-neg]` `[smarteasy]` | **Yes — and this is their genuine strength** `[V]` `[vn-brokerapi]` | Dashboard only `[V]` `[jicce]` |
+| **Simulated / sandbox mode** | Yes (it is a game) | Yes | Yes, until 2022 | Yes | **No — live money only.** A 512-line documentation index greps **zero** hits for `demo`, `sandbox`, `paper trading` or `mô phỏng` `[V-neg]` `[vn-brokerapi]` | Yes, but with no exchange |
+| **Historical replay under the edition then in force** | No `[V-neg]` | No `[V-neg]` | No `[V-neg]` | No `[V-neg]` | No `[V-neg]` | Replay yes, **rules no** `[V-neg]` `[jicce]` |
+| **Updated for the KRX cutover (2025-05-05)** | **[U]** | **No — session tables are pre-KRX** `[V-neg]` `[vsg]` | Dead before it `[V]` | **[U]** | Yes (live systems) | Not applicable — no rules `[V-neg]` |
+| **Open source** | No `[V-neg]` | No `[V-neg]` | No `[V-neg]` | No `[V-neg]` | No (client SDKs aside) | **No code released** `[V-neg]` `[jicce]` |
+
+**And there is no open-source Vietnamese exchange simulator.** GitHub repository-search API
+queries for `vietnam stock exchange simulator` and `vietnam stock matching engine` return
+**0 results** **[V-neg]** `[vn-gh-oss]`. The closest artefact found is `toreleon/Azoth`,
+which models T+2 and nothing else **[V]** `[vn-gh-oss]`. Per the survey limits in §0, this
+establishes that no repository is *named or described* as such a tool — not that no such
+code exists on disk anywhere.
+
+**On the JICCE 2025 platform, a note on tone that is not optional.** Lee, Nguyen V-H, Tran
+Q-T, Le D-Q-T, Nguyen T-D-N and Le Hoanh-Su (corresponding author, UEL/VNU-HCM) published
+this group's work in *J. Inf. Commun. Converg. Eng.* 23(4):327–335 on 31 Dec 2025, funded
+by VNU-HCM grant B2023-34-04, and the same group published at **RIVF 2025**
+(DOI 10.1109/rivf68649.2025.11365188) — the venue we are submitting to. **Assume they are
+in the reviewer pool.** The citation must be accurate and respectful: it is a well-scoped
+architecture-and-dashboard paper that its own authors describe as an *educational platform*,
+and it is a legitimate and useful citation for **"dashboard-and-backtest-tab tools are the
+current state of practice in Vietnam."** What it is *not* is a competitor on rule fidelity,
+and the paper should establish that by describing scope, never by disparagement. See §3.1
+for the verified scope.
 
 ---
 
@@ -348,34 +516,74 @@ paper, all results include transaction costs."* Market impact is acknowledged
 qualitatively only. Grep of the full text: **"price limit" 0, "ceiling" 0, "floor" 0,
 "settle" 0, "T+" 0, "tick size" 0** **[V]** `[vn-nsvm]`.
 
-**The one Vietnamese paper that encodes settlement encodes only settlement.** Pham, Luu &
-Tran (*Soft Computing* 25(12), 2021) build a simulator over 10 HOSE stocks plus VN30F1M
-including *"transaction fee, tax, and settlement date of transactions"*, and state
-*"Stocks are only sold after T+2 settlement"* while the futures agent *"can trade
-continuously as it is T+0 settlement market."* No price limits, no matching model, no
-auction, and the fee/tax rates are never quantified **[V]** `[vn-pham]`.
+**The one Vietnamese paper that encodes settlement encodes only settlement — and it is the
+one a reviewer will raise, because of its title.** Pham, Luu & Tran (*Soft Computing*
+25(12):7877–7885, 2021, DOI 10.1007/s00500-021-05801-6) is **the only indexed paper using
+the phrase "Vietnamese stock market simulator"** **[V]** `[vn-pham]`, so it must be cited
+and disposed of early rather than left for the rebuttal. They build a simulator over 10
+HOSE stocks plus VN30F1M including *"transaction fee, tax, and settlement date of
+transactions"*, and state *"Stocks are only sold after T+2 settlement"* while the futures
+agent *"can trade continuously as it is T+0 settlement market."* No price limits, no
+matching model, no auction, and the fee/tax rates are never quantified.
+
+**The disposal is a quotation from their own paper, and nothing else is needed:** *"We use
+daily return as input data for training process."* **[V]** `[vn-pham]` It is a
+fee/tax/settlement-date bookkeeping wrapper over daily bars — a legitimate and correctly
+scoped instrument for the hedging problem they study, and structurally incapable of
+representing an order-admission rule. Cite it that way; the quote does the work.
+
+**A Vietnamese exchange matching engine was already simulated in 2013, and this is why our
+"first" claims are about dated editions and not about matching engines.** Lê Đức Hùng's
+2013 VNU-UET master's thesis builds a C#/QuickFIX **HNX matching-engine test double** for
+conformance-testing broker software (`repository.vnu.edu.vn/handle/VNU_123/5950`) **[V]**
+`[vn-lehung]`. It predates derivatives (2017) and T+2 (2022), and has no bands, no tick
+grid and no auctions; only a 4-page abstract is public, so its internals are **[U]**. It is
+nonetheless dispositive on the phrasing: **no unhedged "first matching-engine simulation of
+a Vietnamese exchange" may be written anywhere.**
 
 **"Bias-free" in this literature means survivorship bias.** Do & Luong (SoICT '23) address
 survivorship bias on VN100 exclusively; no mention of price limits, settlement or fill
 assumptions **[V, abstract only — ACM full text returned 403]** `[vn-doluong]`.
 
-**Vietnam-specific microstructure evidence worth citing as ground truth.** Vo & Doan
-(*PLOS ONE* 18(5):e0285821, 2023) study the 12 Sep 2016 HOSE tick-size change on full
-intraday TAQ and find trading cost fell overall but **not uniformly across price bands** —
-larger trades executing in a larger-tick band did not benefit **[R]** `[vn-tick]`. This is
-direct, Vietnam-specific empirical support for the price-dependent tick grid mattering
-economically. An earlier GARCH study of the 2007–2009 band reductions (1/2/3% on HOSE,
-2/3/4/7% on HNX) confirms the bands were **time-varying policy instruments** **[R]**
+**Vo & Doan (2023) is the empirical warrant for the entire lead claim, and it should be
+featured, not buried.** Vo & Doan, *"Minimum tick size, market quality and costs of trade
+execution in Vietnam,"* *PLOS ONE* 18(5):e0285821, DOI 10.1371/journal.pone.0285821, run a
+**difference-in-differences study of HOSE's real tick-size change of 12 September 2016** on
+full intraday TAQ **[V]** `[vn-tick]`, finding that trading cost fell overall but **not
+uniformly across price bands** — larger trades executing in a larger-tick band did not
+benefit **[R]** `[vn-tick]`.
+
+Read as evidence, this is not merely "a tick grid matters". It is **published empirical
+proof, on the exact market we simulate, that a dated edition of the tick grid changes
+measured outcomes** — that running a 2016-onward strategy under the pre-2016 grid, or vice
+versa, changes the answer by an amount someone bothered to publish a DiD about. That is the
+warrant for effective-dated rule editions, and it is Vietnamese, peer-reviewed and
+identifiable by DOI. Every statement of the lead claim in this document and in the paper
+should carry it.
+
+An earlier GARCH study of the 2007–2009 band reductions (1/2/3% on HOSE, 2/3/4/7% on HNX)
+makes the same point for bands: they were **time-varying policy instruments** **[R]**
 `[vn-band]`. **We found no Vietnam-specific magnet-effect or limit-hit microstructure
 study; searches returned Taiwan, China and Korea only.**
 
-**Vietnamese tooling is data access, not simulation.** The community index's entire
-"Backtesting & Quant Tools" section is three bullets, of which one is "Add your tool";
-all eight listed Python libraries are data access **[V]** `[vn-awesome]`. A GitHub search
-across five phrasings returned nothing implementing matching rules; the most substantive
-find runs VN30F1M *on NautilusTrader* with vnstock data **[V]** `[vn-github]`. DNSE's own
-explainer lists required data as OHLC + volume and disclaims *"kết quả backtest chỉ mang
-tính tham khảo"* **[V]** `[vn-dnse]`. ALGOTRADE's own Knowledge Hub article frames the
+**Vietnamese tooling is data access, real-money APIs, or games — never simulation with
+rules.** The community index's entire "Backtesting & Quant Tools" section is three bullets,
+of which one is "Add your tool"; all eight listed Python libraries are data access **[V]**
+`[vn-awesome]`. A GitHub search across five phrasings returned nothing implementing matching
+rules; the most substantive find runs VN30F1M *on NautilusTrader* with vnstock data **[V]**
+`[vn-github]`, and repository-search API queries for `vietnam stock exchange simulator` and
+`vietnam stock matching engine` return **0 results**, the closest artefact being
+`toreleon/Azoth` (T+2 and nothing else) **[V-neg]** `[vn-gh-oss]`.
+
+**The one genuinely programmable Vietnamese surface is live-money only.** DNSE LightSpeed
+and SSI FastConnect are real, well-documented broker APIs — the **best public rule
+documentation in Vietnam**, and the paper should say so — but a 512-line documentation
+index greps **zero** hits for `demo`, `sandbox`, `paper trading` or `mô phỏng` **[V-neg]**
+`[vn-brokerapi]`. There is no way to point a strategy at a Vietnamese order-entry API
+without risking real money, which is precisely the hole a broker-shaped simulator fills.
+
+DNSE's own backtest explainer lists required data as OHLC + volume and disclaims *"kết quả
+backtest chỉ mang tính tham khảo"* **[V]** `[vn-dnse]`. ALGOTRADE's own Knowledge Hub article frames the
 right problem — a paper-trading broker that *"can receive orders, cancel orders, return
 order matches, and account status via API"* and *"determine whether an order can match, and
 in how much volume based on information obtained from market data"* — but does not mention
@@ -385,15 +593,42 @@ T+2, tick size, lot size or ATO/ATC **[V]** `[vn-algotrade]`.
 pre-empt a self-plagiarism concern: PLUTUS Open Source (arXiv:2505.14050) is a
 reproducibility standard, project template and reference strategies; its execution detail
 is *"A transaction fee of 0.035% is applied on each buy and sell"* and *"Each trade incurs
-a fee of 0.2 points"*, with no price limits, T+2, tick size, lot size, auctions or
-matching mechanics **[V]** `[vn-plutus]`.
+a fee of 0.2 points"*, with **no exchange simulator and no microstructure at all** — no
+price limits, T+2, tick size, lot size, auctions or matching mechanics **[V]**
+`[vn-plutus]`. It is therefore a **clean, non-overlapping self-citation for the
+reproducibility apparatus**, and citing it that way is the cheapest way to close the
+self-plagiarism question before a reviewer opens it.
 
-**One priority risk we could not close. [U]** "Design and Implementation of an AI-Driven
-Algorithmic Trading Simulation Platform for Strategy Backtesting and Forecasting"
-(ResearchGate 399252297, dated March 2026), explicitly HOSE/HNX. **ResearchGate returned
-403; we could not read it.** The reported summary describes data ingestion, backtesting
-and forecasting with no mention of market rules. **This must be obtained and read before
-submission.** `[vn-rg]`
+**The priority risk that was carried as open is now closed, and it was a false alarm.**
+"Design and Implementation of an AI-Driven Algorithmic Trading Simulation Platform for
+Strategy Backtesting and Forecasting" — the item this document previously listed as
+ResearchGate 399252297, "dated March 2026", "explicitly HOSE/HNX" — has been identified and
+read in full **[V]** `[jicce]`. Its real identity:
+
+> Lee, Nguyen V-H, Tran Q-T, Le D-Q-T, Nguyen T-D-N & Le Hoanh-Su (corresponding,
+> UEL/VNU-HCM), *Journal of Information and Communication Convergence Engineering*
+> 23(4):327–335, **31 December 2025**, DOI 10.56977/jicce.2025.23.4.327, funded by VNU-HCM
+> B2023-34-04.
+
+Three corrections to what this document previously said: it is **not** March 2026, it is
+**not** an HOSE/HNX exchange simulator, and the earlier note that it uses EUR/USD data was
+a misreading — **that sentence is in their own literature review, describing someone else's
+work, and repeating it would be an error against a named group.**
+
+What it is: a web dashboard — ReactJS / FastAPI / Firebase / MongoDB / Airflow — with
+ARIMA / RF / LSTM forecasting, where "backtest" means historical replay plus Monte Carlo
+resampling. A grep of the full text returns **no order admission, no order book, no
+matching engine, no settlement, no margin, no auctions, no price bands, no tick sizes, no
+order types, no time-in-force and no transaction costs** **[V-neg]** `[jicce]`. There is no
+code release, no dataset and no results table; it is an architecture paper illustrated with
+UI screenshots, and its authors describe it as an *educational platform*.
+
+**Cite it accurately, respectfully, and for what it genuinely supports:** that
+dashboard-and-backtest-tab tooling is the current state of practice for algorithmic trading
+in Vietnam. **This group published at RIVF 2025 (DOI 10.1109/rivf68649.2025.11365188) and
+we are submitting to RIVF'26; assume they are in the reviewer pool.** No sentence anywhere
+in the paper may characterise their work dismissively — the correct move is to state its
+scope and ours, and let the difference in scope speak.
 
 ### 3.2 China A-shares: the closest analogue
 
@@ -451,11 +686,25 @@ the cautionary counter-example the paper cites for what *not* to do.
   no simulator. **Treat as unexamined.** **[U]**
 - **Agent-based simulators that do implement bands** are studying the rule, not evaluating
   a strategy: Mizuta & Yagi's artificial exchange *changes* out-of-band order prices to the
-  band (with a cancelling variant) and halts on a circuit breaker **[V]** `[abm-mizuta]`;
-  there is an agent-based magnet-effect paper in *EMFT* 61(7) **[R]** `[abm-magnet]`. The
-  distinction between a synthetic-market simulator for studying a rule and a
-  historical-replay simulator for evaluating a strategy must be made explicitly, or a
-  reviewer will say "ABMs already do this."
+  band (with a cancelling variant) and halts on a circuit breaker **[V]** `[abm-mizuta]` —
+  but it is an **abstract ABM calibrated to no real bourse**, so it demonstrates a
+  mechanism rather than reproducing a jurisdiction; there is an agent-based magnet-effect
+  paper in *EMFT* 61(7) **[R]** `[abm-magnet]`. The distinction between a synthetic-market
+  simulator for studying a rule and a historical-replay simulator for evaluating a strategy
+  must be made explicitly, or a reviewer will say "ABMs already do this."
+- **No ABM anywhere has been localised to any emerging market's real rulebook.** Searches
+  across India/NSE, Brazil/B3, Indonesia, Thailand, Korea and Taiwan return nothing
+  **[V-neg]** `[abm-em]`. EvoMarket (§2.3 item 9) is the one exception in spirit — it *is*
+  localised, to China A-shares — which is exactly why it is the nearest neighbour and why
+  the differentiator has to be the shape of Vietnam's rulebook rather than the fact of
+  localisation.
+- **The reference points for positioning against LOB simulators** are Jain et al., *"Limit
+  Order Book Simulations: A Review"* (arXiv:2402.17359) as the survey **[R]** `[jain]`, and
+  Microsoft's **MarS** (ICLR 2025, arXiv:2409.07486, MIT-licensed) as the strongest
+  open matching engine that **deliberately** omits price limits, auctions, settlement, the
+  tick grid and margin **[V]** / **[V-neg]** `[mars]`. Both should be cited in the first
+  paragraph of the related-work section; a reviewer who finds neither will assume we did
+  not survey the LOB-simulation literature at all.
 
 ### 3.4 What the emerging-market literature does not do
 
@@ -470,24 +719,88 @@ hard order-rejection constraint** — genuinely open ground **[R]** `[vn-fol]`.
 
 ## 4. The gap, at exactly the width the attacks leave standing
 
-Each claim below is the **narrowed** form produced by an adversarial refutation pass on
+Each claim below is the **narrowed** form produced by adversarial refutation passes on
 2026-08-26. The wording is verbatim. No broader form may appear anywhere.
 
-### 4.1 Fidelity — narrowed
+**§4.1 was re-narrowed by the prior-art pass** after EvoMarket, Lê Đức Hùng (2013) and the
+Vietnamese product survey landed. The superseded form is kept below the current one so that
+nobody re-derives it.
 
-> Plutus is, to our knowledge, the first open, historically-replayable exchange simulator
-> to represent a national **order-admission** rulebook — price-dependent tick grid, daily
-> price-limit band, board lot, ATO/ATC auction eligibility, per-order-type time-in-force,
-> and the pre-funding regime — as **effective-dated rule editions resolved per simulated
-> date**, and the first to implement Vietnam's at all. Effective-dated rule editions
-> already exist in open source for *calendars and parameters* — QuantLib's year-conditional
-> national holiday rules and its per-market `Settlement` vs `Exchange` calendars,
-> `exchange_calendars`' dated session-time editions (XKRX 1978–2016), LEAN's dated CME
+### 4.0 The lead claim, in one sentence
+
+**Everything in §4.1–§4.3 is subordinate to this. It is what the paper leads with, what the
+title leads with, and what the abstract's gap sentence says:**
+
+> Plutus represents a national exchange rulebook as **effective-dated rule editions
+> resolved per simulated instant**, so that a 2024 backtest and a 2026 backtest execute
+> under the rules that actually applied to each — across a real regime change, the KRX
+> cutover of **2025-05-05** — and we find no simulator, open-source or commercial, in which
+> any *admission* rule is keyed to an effective date.
+
+Three things make this the strongest claim we hold, and each is checkable:
+
+1. **Zero hits in the literature and in code.** Dated editions exist in open source for
+   *calendars* (QuantLib's year-conditional national holiday rules, `exchange_calendars`'
+   XKRX session-time editions) and for *parameters* (LEAN's dated CME
+   `date,initial,maintenance` tables, RQAlpha's `get_long_margin_ratio(date)`) — but in no
+   engine do they govern **whether an order is admitted** **[V]** / **[V-neg]** `[QL-us]`
+   `[XC-xkrx]` `[L-cme]` `[RQ-pos]`. EvoMarket, the nearest neighbour on rule surface, uses
+   **fixed constants with no versioning** **[V-neg]** `[E-paper]`.
+2. **The KRX cutover of 2025-05-05 appears in no simulator and no repository we could find**
+   **[V-neg]** `[vn-gh-oss]` — and it is a genuine regime change inside a window a
+   Vietnamese strategy would want to backtest across.
+3. **The empirical warrant is published, Vietnamese and peer-reviewed.** Vo & Doan (2023)
+   is a difference-in-differences study of HOSE's real tick-size change of 12 Sep 2016 that
+   finds trading costs moved, and moved **non-uniformly across price bands** **[V]**
+   `[vn-tick]`. A dated tick-grid edition demonstrably changes measured outcomes on this
+   market; a simulator that carries one edition of the grid gets the other period wrong.
+
+**What this claim deliberately does not say.** It does not say we are first to a matching
+engine (Lê Đức Hùng, 2013, hedges that — §2.3 item 11); it does not say we are first to
+combine auctions, bands and settlement (EvoMarket, April 2026, refutes that outright —
+§2.3 item 9); and it does not say Vietnamese products do not enforce rules (Vietstock
+publishes a tick grid, bands and a participation cap — §2.5).
+
+### 4.1 Fidelity — narrowed, then re-narrowed
+
+**Current form (use this one):**
+
+> Plutus represents a national **order-admission** rulebook — price-dependent tick grid,
+> daily price-limit band, board lot, ATO/ATC auction eligibility, per-order-type
+> time-in-force, and the pre-funding regime — as **effective-dated rule editions resolved
+> per simulated date**, and is to our knowledge the first simulator of any market to key an
+> *admission* rule to an effective date. Effective-dated rule editions already exist in
+> open source for *calendars and parameters* — QuantLib's year-conditional national holiday
+> rules and its per-market `Settlement` vs `Exchange` calendars, `exchange_calendars`'
+> dated session-time editions (XKRX 1978–2016), LEAN's dated CME
 > `date,initial,maintenance` margin tables, RQAlpha's `get_long_margin_ratio(date)` — but
-> in no engine do they govern whether an order is admitted. Separately, Vietnamese brokers
-> ship proprietary live-forward paper-trading simulators (SSI iWin, VPS SmartEasy,
-> vnstockgame) that enforce the *current* edition of these rules; none replays a historical
-> date under the edition then in force, and none publishes its rule set.
+> in no engine do they govern whether an order is admitted. The institutional rule surface
+> itself is **not** novel: EvoMarket (arXiv:2604.18046, April 2026) implements market
+> calendars, opening call auctions, price limits and T+1 settlement for China A-shares, and
+> RQAlpha enforces China's bands, call auction and T+1 with segregated accounts. What
+> differs is the shape of the rulebook and its versioning — China A-shares is a one-band,
+> uniform-¥0.01-tick, T+1 regime expressible as constants, whereas Vietnam has three equity
+> venues with different bands, a price-dependent tick grid, first-day and post-suspension
+> band exceptions, a separate derivatives venue with IM + VM margin, and a rule change
+> inside the window (2025-05-05) that only a dated edition can represent. Vietnamese prior
+> art exists and is named rather than ignored: a 2013 VNU-UET HNX matching-engine test
+> double predating derivatives, T+2, bands and auctions; a 2021 daily-bar
+> fee/tax/settlement wrapper; and broker games (Vietstock Đấu trường, vnstockgame, the
+> defunct SSI iWin, VPS SmartEasy) that shadow-fill off the real tape and enforce exactly
+> one edition — the current one — of a rule set they do not fully publish.
+
+**Superseded form, recorded so it is not re-derived. Do not use.**
+
+> ~~Plutus is, to our knowledge, the first open, historically-replayable exchange simulator
+> to represent a national order-admission rulebook … and the first to implement Vietnam's
+> at all. … Separately, Vietnamese brokers ship proprietary live-forward paper-trading
+> simulators (SSI iWin, VPS SmartEasy, vnstockgame) that enforce the current edition…~~
+
+Three defects, all fatal: "first … historically-replayable exchange simulator" invites the
+EvoMarket comparison on ground where we lose; "the first to implement Vietnam's at all" is
+refuted by Lê Đức Hùng (2013) for the matching engine and by Vietstock Đấu trường for the
+published rule model; and **SSI iWin is written in the present tense although it has been
+dead since 2022-03-12**.
 
 Three supporting sentences, also verbatim, that pre-empt the specific refutations:
 
@@ -527,8 +840,9 @@ confidence `high`, with the note that one older MBS PDF misprints level 3 as 90%
 
 The first pass narrowed this to the sentence below. **Its final clause has been struck**,
 because a later pass refuted it (§2.4): Forex Strategy Builder reported an ambiguity count
-in 2011, and Claeys (2026) reportedly reports an ambiguity rate. The surviving text is
-quoted verbatim with the struck clause shown as struck.
+in 2011, and Claeys (2026) reports an ambiguity rate of **18.47%** on 2,064,460 E-mini
+bars — verified from the Crossref abstract deposit, not from a search summary. The
+surviving text is quoted verbatim with the struck clause shown as struck.
 
 > Publishing a data contract in which the source declares its capability, and tying
 > execution fidelity to that declaration, is established practice: LEAN's `BaseData`
@@ -579,8 +893,11 @@ Different sense of "backtesting" (VaR model validation), but a risk reviewer may
 > and running one strategy under a pessimistic/optimistic/random family and displaying the
 > divergence has prior art in retail tooling since 2011 (Forex Strategy Builder's
 > `InterpolationMethod` enum, `BacktestEval.Ambiguous`, reported `AmbiguousBars` statistic
-> and Method Comparator) and, for intrabar stop/target ordering, in a 2026 working paper
-> that reports the best-case/worst-case gap as its headline result. **Plutus's contribution
+> and Method Comparator) and, for intrabar stop/target ordering, in Claeys (2026), who
+> reports 18.47% of 2,064,460 E-mini NASDAQ-100 bars ambiguous for a 10-point stop /
+> 10-point target and a best-case/worst-case spread of 3,695 NQ points ($73,900) per 1,000
+> trades as his headline result, concluding that none of five compared platforms is
+> provably correct without tick data. **Plutus's contribution
 > is narrower: prior work treats ambiguity as a path-ordering question between two of the
 > trader's own already-triggered orders within a bar and resolves it as an aggregate
 > bar-level diagnostic, whereas we return INDETERMINATE as a per-order status through a
@@ -590,14 +907,31 @@ Different sense of "backtesting" (VaR model validation), but a risk reviewer may
 > exchange rule, rather than collapsing them to the conservative or averaged point estimate
 > that every prior tool recommends.**
 
+**The Claeys concession, to be made explicitly and early — verbatim.** Our bar-vs-tick
+divergence measurement (97.56% agreement on 173,168 ticker-days) sits on ground Claeys got
+to first, and the paper concedes the framing rather than distinguishing it away:
+
+> Claeys (2026) establishes that a bar-resolution backtest cannot in general decide what
+> happened inside the bar, and reports the best-case/worst-case spread as the result. We
+> adopt that framing rather than restating it. Our contribution is not that we report a
+> spread across fill assumptions, but that **we enforce the exchange's rules first, so the
+> spread is bounded by admissibility rather than only by OHLC geometry**: an order that the
+> tick grid, the board lot, the band or the session would have refused contributes no
+> spread at all, because it never rested. Claeys's scope is one instrument and one
+> ambiguity; ours is order admission, settlement, margin, auctions, bands and a tick grid,
+> of which bar-vs-tick divergence is one measurement among ten.
+
 **Guardrails, verbatim from the refutation.** Do not write "pluggable," "swappable,"
 "hard/soft/probabilistic family," "the spread is the reported result," or "no prior art for
 an indeterminate outcome" — all four are refuted. Do write: per-order INDETERMINATE status
 across a broker API; ambiguity of fill *existence* rather than fill *ordering*; ambiguity
 generated by *exchange rules* (ATO/ATC, band lock, tick/lot grid) rather than by OHLC path
-alone; and refusal to collapse the spread. Cite FSB, Claeys 2026 and arXiv:2603.20319
-explicitly and early — a reviewer who finds any of them un-cited will assume we did not
-look.
+alone; and refusal to collapse the spread. Cite FSB, **Claeys 2026**, arXiv:2603.20319,
+**EvoMarket**, **MarS** and the **Jain et al. LOB-simulation survey** explicitly and early
+— a reviewer who finds any of them un-cited will assume we did not look. Two additional
+prohibitions from the prior-art pass: **never write any form of "first to combine call
+auctions, price limits and a settlement cycle"** (EvoMarket, April 2026), and **never write
+"first matching-engine simulation of a Vietnamese exchange" unhedged** (Lê Đức Hùng, 2013).
 
 **Note on internal consistency.** Our own design document (`spec §8`) still contains the
 sentence *"Run one strategy against all three policies and report the spread… This is the
@@ -608,8 +942,12 @@ must not be carried into the paper in that form; §4.3 above is the publishable 
 
 | Component | Status after attacks |
 |---|---|
-| National **order-admission** rulebook as effective-dated rule editions resolved per simulated date | **Survives.** Dated editions exist for calendars and parameters, never for admission. |
-| Vietnam's rulebook at all, in an open historically-replayable simulator | **Survives**, subject to naming the three broker paper-trading products and the unread ResearchGate 2026 paper. |
+| National **order-admission** rulebook as effective-dated rule editions resolved per simulated date | **Survives, and is now the lead claim (§4.0).** Dated editions exist for calendars and parameters, never for admission; EvoMarket's rules are fixed constants with no versioning. |
+| Backtesting across the **KRX cutover of 2025-05-05** under the edition in force on each side | **Survives.** No simulator and no repository we could find references the cutover. |
+| Vietnam's rulebook as a *dated, published* rule model | **Survives in that form only.** Vietstock Đấu trường publishes a tick grid, bands and a participation cap; a 2013 VNU-UET thesis simulated HNX matching. Both must be cited. |
+| "First historically-replayable simulator of a Vietnamese exchange" / "first Vietnamese matching engine" | **Dropped.** Lê Đức Hùng (2013) refutes the second; the first invites an EvoMarket comparison on ground where we do not win. |
+| "First to combine call auctions, price limits and a settlement cycle" | **Dropped entirely and prohibited.** EvoMarket (April 2026) does exactly this for China A-shares. |
+| Reporting the spread across fill assumptions as such | **Dropped as novelty.** Claeys (2026) reports the best/worst spread as his headline on 2.06 M bars. What survives is that our spread is bounded by **admissibility**, not only OHLC geometry. |
 | Settlement-business-day calendar wired to unsettled cash **and** unsettled shares in an order-driven engine | **Survives.** T+N and settlement-vs-trading calendars are both precedented; the wiring is not. |
 | MR = IM + VM, VM loss-only, segregated derivatives account, published utilisation tiers | **Survives as a composition only.** Utilisation tests, warning tiers and no-published-maintenance-ratio regimes are all precedented. |
 | Per-order INDETERMINATE for ambiguity of fill **existence**, through a broker-facing API, attributed to a named exchange rule | **Survives.** Bar-level path-ordering ambiguity with an aggregate count is prior art from 2011. |
@@ -626,12 +964,20 @@ Plutus is a simulated Vietnamese exchange a strategy connects to the way it conn
 broker: submit an order, receive accepted / rejected / partially filled / cancelled /
 expired / indeterminate, and read holdings, cash and margin — with the exchange, not the
 strategy author, remembering the settlement cycle, the margin regime and the rulebook. Its
-contribution is threefold and narrow. First, it represents a **national order-admission
-rulebook as effective-dated rule editions resolved per simulated date** — the price-dependent
-tick grid, the daily band, the board lot, ATO/ATC auction eligibility, per-order-type
-time-in-force and the pre-funding regime — where prior engines carry dated *calendars* and
-dated *parameters* but never dated *admission* rules, and it is the first to implement
-Vietnam's at all. Second, it wires a **VSDC settlement-business-day calendar** (which
+contribution is threefold and narrow, **and the first of the three leads**. First, it
+represents a **national order-admission rulebook as effective-dated rule editions resolved
+per simulated date** — the price-dependent tick grid, the daily band, the board lot,
+ATO/ATC auction eligibility, per-order-type time-in-force and the pre-funding regime — so
+that a 2024 run and a 2026 run execute under the rules that actually applied to each,
+across the KRX cutover of 2025-05-05, where prior engines carry dated *calendars* and dated
+*parameters* but never dated *admission* rules, and where the nearest neighbour on rule
+surface, EvoMarket (arXiv:2604.18046, April 2026, China A-shares), carries its rules as
+fixed constants with no versioning. **The warrant that this matters is empirical and
+Vietnamese**: Vo & Doan's difference-in-differences study of HOSE's 12 Sep 2016 tick-size
+change (*PLOS ONE* 18(5):e0285821) finds trading costs moved, and moved non-uniformly
+across price bands, so a simulator carrying one edition of the grid gets the other period
+wrong by a margin someone published. Second, it wires a **VSDC settlement-business-day
+calendar** (which
 diverges from the exchange trading calendar around Tết) to both an unsettled-cash pool and
 an unsettled-share pool, and runs Vietnamese derivatives margin as MR = IM + VM with VM
 accruing only on losing positions in a segregated deposit account tested at published
@@ -653,6 +999,32 @@ high-confidence by row, with every tick, lot and band value after 2022-03-31 cor
 rather than gazetted-verified because Phụ lục III of the VNX Quy chế has never been
 obtained; and landing the session does not retro-validate our published measurements, three
 of which still come from SQL that parallels the rules rather than calling them.
+
+**What the positioning concedes, up front and by name.** Four concessions belong in the
+paper's own words, before any claim is made, because each is one search away for a
+reviewer:
+
+1. **EvoMarket (April 2026) built the institutional rule surface for China A-shares four
+   months before us** — market calendars, opening call auctions, price limits and T+1
+   settlement, validated on A-share order-flow and LOB data. We claim no priority on that
+   combination. The differences are that its rules are fixed constants rather than dated
+   editions, that China A-shares is a one-band, uniform-¥0.01-tick, T+1, equities-only
+   regime whereas Vietnam is three equity venues plus a derivatives venue with a
+   price-dependent grid and band exceptions, that no code is released, and that EvoMarket
+   is an experiment harness for mechanism studies rather than a broker-API endpoint.
+2. **Claeys (2026) established the intrabar-ambiguity framing** on 2,064,460 E-mini bars
+   with an 18.47% ambiguity rate. We adopt it. Our addition is that the spread is bounded
+   by **admissibility** — rules that refuse the order before it can rest — not only by OHLC
+   geometry.
+3. **Vietnamese products already enforce real rules.** Vietstock Đấu trường publishes a
+   HOSE tick grid (100/500/1,000đ), bands (±7%/±10%, first-day ±20%) and a ≤5%
+   participation cap; vnstockgame enforces T+2, bands, lots and ATO/ATC. Neither matches:
+   both shadow-fill off the real tape, and both carry exactly one edition of the rules.
+   SSI iWin, the product earlier drafts cited in the present tense, **has been dead since
+   2022-03-12**.
+4. **A Vietnamese exchange matching engine was simulated in 2013** (Lê Đức Hùng, VNU-UET),
+   before derivatives, T+2, bands and auctions existed in the form we model. Our claims are
+   about dated editions, not about being first to a matching engine.
 
 ---
 
@@ -707,7 +1079,10 @@ Format: `key` — what it is · read as · locator.
 | `A-ex` | ABIDES `abides-markets/abides_markets/agents/exchange_agent.py` (incl. L219 comment) | [V] @ `f9cbe51342b7dedd9587e4e069040d68a5c6477f`, 2023-12-13 |
 | `A-ord` | ABIDES `abides_markets/orders.py`; package grep for `price_limit\|limit_up\|limit_down\|circuit\|settlement\|T+2\|margin\|lot_size\|board_lot` | [V-neg] |
 | `A-ob` | ABIDES `abides-markets/abides_markets/order_book.py`, `price_level.py` | [V] |
-| `E-paper` | Zhong, Yang, Liu, Tang & Yang, "EvoMarket: A High-Fidelity and Scalable Financial Market Simulator," arXiv:2604.18046 (20 Apr 2026) | **[R]** — HTML fetch-summarised twice, consistently; source not inspected; **obtain PDF** |
+| `E-paper` | Zhong, Yang, Liu, Tang & Yang (Harbin Institute of Technology / SUSTech / Zhongguancun Academy), "EvoMarket: A High-Fidelity and Scalable Financial Market Simulator," arXiv:2604.18046, submitted 20 Apr 2026, cs.CE + cs.MA, preprint, no venue | **[V]** paper — abstract, full HTML, footnotes, appendix and acknowledgments all read. **No code released [V-neg]**, so all capability claims are from the paper, never from source |
+| `mars` | Microsoft **MarS**, ICLR 2025, arXiv:2409.07486, MIT-licensed; matching engine inside a generative order-flow world model | **[V]** matching engine and licence; **[V-neg]** price limits, auctions, settlement, tick grid, margin — omitted by design |
+| `jain` | Jain et al., "Limit Order Book Simulations: A Review," arXiv:2402.17359 | [R] — cited for positioning |
+| `abm-em` | Searches for an ABM localised to a real emerging-market rulebook: India/NSE, Brazil/B3, Indonesia, Thailand, Korea, Taiwan | **[V-neg]** — all empty |
 | `VN-alpha` | vnpy `vnpy/alpha/strategy/backtesting.py` L619+ (`cross_order`) | [V] / [V-neg] `master` |
 | `VN-cta` | vnpy_ctastrategy `backtesting.py` (1,269 lines) grep for `limit_up\|limit_down\|涨跌停\|t+1\|tplus\|settle\|price_limit` | [V-neg] |
 | `HB-rule` | Hummingbot `hummingbot/connector/trading_rule.pyx`, `exchange_py_base.py` | [V] `master` |
@@ -750,24 +1125,28 @@ Format: `key` — what it is · read as · locator.
 | `lit-jkp` | Jensen, Kelly & Pedersen, "Is There a Replication Crisis in Finance?", *JF* 78(5), 2023 | [R] |
 | `lit-du` | Du, "Machine Learning Enhanced Multi-Factor Quantitative Trading," arXiv:2507.07107 | [V] — **single-author preprint, self-reported, not peer-reviewed** |
 | `lit-ir` | Yin, Miki, Lesnichenko & Gural, "Implementation Risk in Portfolio Backtesting," arXiv:2603.20319, 19 Mar 2026 | [V] full HTML extracted and grepped |
-| `claeys` | Claeys, "When Backtests Guess: How Trading Platforms Silently Fabricate Results," SSRN 6240638, 14 Feb 2026 | **[U]** — SSRN ECONNRESET ×2; **obtain and verify the 18.47% and $73,900 figures** |
+| `claeys` | Michael Claeys (single author, **no institutional affiliation**), "When Backtests Guess: How Trading Platforms Silently Fabricate Results," SSRN 6240638, DOI 10.2139/ssrn.6240638, Crossref-deposited **3 Apr 2026**, 0 citations, non-peer-reviewed preprint | **[V]** abstract — 2,064,460 bars, 18.47%, 3,695 NQ points / $73,900 per 1,000 trades and *"none provably correct without tick data"* read **verbatim from the Crossref abstract deposit**. **[U]** full text (Cloudflare-blocked) and the **five platform names**, which we therefore never state |
 | `basel` | Basel Committee 1996 traffic-light backtesting framework (VaR model validation) | [R] |
 | `vn-hls` | Huang, Liu & Shu, "Factors and anomalies in the Vietnamese stock market," *PBFJ* 82:102176, 2023 | [V] full text extracted and word-counted |
 | `vn-nsvm` | Nguyen, Sensoy, Vo & von Mettenheim, "Does short-term technical trading exist in the Vietnamese stock market?", *Borsa Istanbul Review*, 2020 | [V] full text extracted |
-| `vn-pham` | Pham, Luu & Tran, "Multi-agent reinforcement learning approach for hedging portfolio problem," *Soft Computing* 25(12), 2021, DOI 10.1007/s00500-021-05801-6 | [V] |
+| `vn-pham` | Pham, Luu & Tran, "Multi-agent reinforcement learning approach for hedging portfolio problem," *Soft Computing* 25(12):7877–7885, 2021, DOI 10.1007/s00500-021-05801-6 | [V] — **the only indexed paper using "Vietnamese stock market simulator"**; the disposal is their own sentence *"We use daily return as input data for training process."* |
+| `vn-lehung` | Lê Đức Hùng, master's thesis, VNU-UET, 2013 — C#/QuickFIX **HNX matching-engine test double** for conformance-testing broker software; `repository.vnu.edu.vn/handle/VNU_123/5950` | [V] existence, venue, scope and date; **[U]** internals — only a 4-page abstract is public |
 | `vn-doluong` | Do & Luong, "Bias-free Trading Algorithms with Momentum Scores for the Vietnamese Stock Market," SoICT '23, DOI 10.1145/3628797.3628993 | [V] abstract only — ACM full text 403 |
-| `vn-tick` | Vo & Doan, "Minimum tick size, market quality and costs of trade execution in Vietnam," *PLOS ONE* 18(5):e0285821, 2023 | [R] |
+| `vn-tick` | Vo & Doan, "Minimum tick size, market quality and costs of trade execution in Vietnam," *PLOS ONE* 18(5):e0285821, 2023, DOI 10.1371/journal.pone.0285821 — **difference-in-differences on HOSE's real tick-size change of 12 Sep 2016** | [V] identifiers, design and event date — **the empirical warrant for dated rule editions**; [R] the non-uniformity-across-price-bands result |
 | `vn-band` | GARCH study of the 2007–2009 HOSE/HNX fluctuation-limit reductions | [R] |
 | `vn-fol` | VinaCapital FOL primer; ASEAN Briefing on the 2025 decree | [R] |
 | `vn-awesome` | `DataCore-VietNam/awesome-vietnam-finance-data`; `thinh-vu/vnstock` README | [V] / [V-neg] |
 | `vn-github` | GitHub repo search across five phrasings; `frydaiii/trading-research` | [V] |
+| `vn-gh-oss` | GitHub repository-search API: `vietnam stock exchange simulator` → **0 results**; `vietnam stock matching engine` → **0 results**; closest artefact `toreleon/Azoth` (T+2 only) | **[V-neg]** — repository-level search, not code-level; see §0 limit 1 |
+| `vn-brokerapi` | DNSE **LightSpeed** and SSI **FastConnect** API documentation; 512-line doc index grepped for `demo`, `sandbox`, `paper trading`, `mô phỏng` → **zero hits** | [V] docs; **[V-neg]** on any sandbox/paper-trading mode — **live money only** |
 | `vn-dnse` | dnse.com.vn/hoc/backtest-la-gi | [V-neg] |
 | `vn-algotrade` | hub.algotrade.vn "Specialized backtesting module: benefits and development" | [V-neg] |
 | `vn-plutus` | Nguyen, Ta & Vo, "PLUTUS Open Source," arXiv:2505.14050 | [V] |
-| `vn-rg` | "Design and Implementation of an AI-Driven Algorithmic Trading Simulation Platform…", ResearchGate 399252297, March 2026 | **[U]** — 403; **must be read before submission** |
-| `vsg` | vnstockgame.com/luat-choi.html | [V] |
-| `iwin` | SSI iWin product description | [V] — rule completeness beyond the marketing text is **[U]** |
-| `smarteasy` | VPS SmartEasy derivatives simulation | [R] |
+| `jicce` | Lee, Nguyen V-H, Tran Q-T, Le D-Q-T, Nguyen T-D-N & Le Hoanh-Su (corresponding, UEL/VNU-HCM), "Design and Implementation of an AI-Driven Algorithmic Trading Simulation Platform for Strategy Backtesting and Forecasting," *J. Inf. Commun. Converg. Eng.* 23(4):327–335, **31 Dec 2025**, DOI 10.56977/jicce.2025.23.4.327, funded by VNU-HCM B2023-34-04. Previously mislisted here as "ResearchGate 399252297, March 2026" | **[V]** full text grepped — **no** order admission, order book, matching engine, settlement, margin, auctions, price bands, tick sizes, order types, time-in-force or transaction costs; no code, dataset or results table. **Same group published at RIVF 2025 (DOI 10.1109/rivf68649.2025.11365188) — assume reviewer pool; cite respectfully.** Do **not** repeat the earlier claim that it uses EUR/USD: that sentence is in *their* literature review, about someone else's work |
+| `vsg` | vnstockgame.com/luat-choi.html — **unrelated PHP site; no connection to the `vnstock` Python ecosystem** | [V] — enforces T+2, bands (percentages never stated), lots, ATO/ATC/LO/MP, session tables. **[V-neg]** tick grid, derivatives, margin, MTL/MOK/MAK/PLO, API, source. **Not a matching engine** — shadow-fills the real tape. Fee self-contradictory (0.2% §6 vs 0.3% §9); session tables pre-KRX |
+| `vietstock` | Vietstock **Đấu trường** contest rules, 2022 Wayback capture (last public rule model; relaunched Dec 2025 with derivatives, rules now login-walled) | [V] — the **only** VN product publishing a tick grid (HOSE 100/500/1,000đ) **and** bands (±7%/±10%, first-day ±20%) **and** a participation cap (≤5% of real daily volume). No API. Post-relaunch rules **[U]** |
+| `iwin` | SSI iWin — `iwin.ssi.com.vn` **NXDOMAIN**, store listings 404, last Wayback capture **2022-03-12** | [V] that it is **dead**; historical marketing text [V]; rule completeness **[U]**. **Never cite in the present tense** |
+| `smarteasy` | VPS SmartEasy, derivatives-only game; FAQ states orders *"không được đẩy vào hệ thống giao dịch của Sở giao dịch, không khớp theo nguyên tắc đối ứng khớp lệnh"* | [V] the FAQ admission; everything else **[U]** |
 | `cn-chen` | Chen, Gao, He, Jiang & Xiong, "Daily Price Limits and Destructive Market Behavior," *Journal of Econometrics* | [V] |
 | `cn-du2` | Du, arXiv:2506.06356 | [V-neg] |
 | `cn-chinext` | "Effectiveness of price limits: Evidence from China's ChiNext market," *PLOS ONE* 2023, DOI 10.1371/journal.pone.0287548 | [R] |
@@ -789,9 +1168,12 @@ Format: `key` — what it is · read as · locator.
 
 | # | Item | Why it is load-bearing |
 |---|---|---|
-| 1 | **Obtain and read ResearchGate 399252297** (HOSE/HNX AI trading simulation platform, March 2026) `[vn-rg]` | The only priority risk found on "Vietnamese trading simulation platform". |
-| 2 | **Obtain the Claeys SSRN PDF** and verify 18.47% and $73,900 verbatim `[claeys]` | It is cited as refuting our own earlier indeterminacy claim; citing an unread abstract for that is worse than not citing it. |
-| 3 | **Obtain the EvoMarket PDF** `[E-paper]` | It is the nearest neighbour on Claim 1 and is currently [R] from fetch-summarised HTML. |
+| 1 | ~~Obtain and read ResearchGate 399252297~~ — **CLOSED 2026-08-26.** Identified as JICCE 23(4):327–335, 31 Dec 2025, read in full, zero microstructure `[jicce]` | Was the top-listed priority risk; it was a false alarm. What replaces it is a **social** obligation: the same group publishes at RIVF, so the citation must be accurate and respectful, and the EUR/USD misreading must not resurface. |
+| 2 | **Obtain the Claeys SSRN PDF** through institutional access `[claeys]` | The abstract is verified from the Crossref deposit and is safe to cite. What remains unread is the full text, and in particular **which five platforms he compares** — currently `[U]` and never named by us. |
+| 3 | ~~Obtain the EvoMarket PDF~~ — **CLOSED 2026-08-26**, paper read in full including appendix and acknowledgments `[E-paper]` | **There is no source to obtain: no code is released.** What remains is discipline, not retrieval — every EvoMarket capability statement must be attributed to the paper, and the prohibition on "first to combine auctions, bands and settlement" is permanent. |
+| 3b | **Re-check EvoMarket for a venue and a code release before submission** `[E-paper]` | It was a 4-month-old preprint when read. If it lands at a venue, or releases code, the related-work framing needs a sentence, not a rewrite. |
+| 3c | **Capture Vietstock Đấu trường's post-relaunch rules if they ever leave the login wall** `[vietstock]` | Ours is the 2022 Wayback rule model; the Dec 2025 relaunch added derivatives and we cannot see the rules. Any statement about its *current* rule set is `[U]`. |
+| 3d | **Obtain the full Lê Đức Hùng (2013) thesis, not the 4-page abstract** `[vn-lehung]` | It is the reason the matching-engine claim is hedged. If its scope is narrower than the abstract implies, the hedge can be tightened — but never removed. |
 | 4 | **Re-open zipline `ledger.py` and backtrader `bbroker.py`** `[Z-ledger]` `[B-sub]` | Both carry load-bearing weight and were read via a fetch summariser rather than byte-for-byte. |
 | 5 | **Verify the SET band level from an official source** `[th-band]` | The ±15% figure is COVID-era news. |
 | 6 | **Verify the KRX ATO/ATC priority change against the HOSE/BVSC handbook**, not news | Rulebook §10 row 2 states the narrow form (priority abolished only against earlier ceiling-buy / floor-sell LOs); news coverage states a broader one. |
