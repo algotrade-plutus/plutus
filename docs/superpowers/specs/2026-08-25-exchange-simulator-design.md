@@ -748,7 +748,7 @@ design.
 | # | The simplification | What it buys | Fidelity given up | Revisit trigger |
 |---|---|---|---|---|
 | T1 | Domestic investor only; foreign-ownership room is never enforced (§15.3) | Removes an entire date-switched control flow — pre-KRX *fill-to-room-then-cancel* vs post-KRX *reject-at-entry* — plus the room time series from the hot path | A foreign account's orders would, in reality, be partially filled or rejected on room. We admit them in full. Verified as a real constraint, not a vacuous one: **34,653 room observations sit below a single 100-share lot**; FPT on 2022-12-30 runs down to 11 shares | Any strategy or paper result that claims to represent a foreign account; or the post-KRX rulebook landing, which is when the two branches must both exist anyway |
-| T2 | Final settlement price = the data source's `close` on expiry day (§15.4) | Collapses the index-referenced averaging computation to a single data read | The published final settlement is an **average over a 30-minute window**, not the contract's close. On VN30F2206's 2022-06-16 expiry the window mean was **1281.36** against a close of **1286.00** — the close overstates by **0.36%**. One expiry, and the settlement *basis* itself changed mid-corpus (see §15.2) | Any result whose P&L is materially sensitive to expiry-day pricing; or the systematic measurement described in §15.2 |
+| T2 | Final settlement price = the data source's `close` on expiry day (§15.4) | Collapses the index-referenced averaging computation to a single data read | The published settlement is an average over the last 30 minutes, not the close. **Measured across all 46 expiries from 2022-08-18 to 2026-08-20**: mean signed error **+0.024%**, mean absolute error **0.042%**, σ **0.071%**, worst case **0.333%** (VN30F2603). 37/46 land within 0.05%, 45/46 within 0.20% | Any result whose P&L is materially sensitive to expiry-day pricing. Otherwise **largely retired** — see §15.2, the simulator now prefers a real settlement price where the data source carries one |
 
 **How these are reported.** Each is stated in the paper as a scoped simplification with
 its measured cost attached — T2 with the 0.4% figure and the sample size (n=1, a stated
@@ -758,53 +758,70 @@ described as a modelling result. Reporting them this way is worth more than hidi
 them: it is direct evidence that the fidelity claim elsewhere is audited rather than
 asserted.
 
-### 15.2 What `quote.settlementprice` actually is, and the dated basis change
+### 15.2 The settlement series, and how T2 was retired
 
-**It is not a settlement-price series.** It is the **sample series that feeds the
-settlement average** — the observations taken across the averaging window, one row
-every few seconds, captured **only on expiry days** (55 days across four years). Read
-correctly, it does not give us a settlement price to read off; it gives us the inputs
-and expects us to do the arithmetic.
+**`quote.settlementprice` carries the already-computed settlement value at each
+timestamp, not the raw observations feeding it.** The series tracks the running
+calculated figure as the averaging window accumulates, so the **last entry on an expiry
+day (~14:45) is the final settlement price** — read it, do not average it. Confirmed by
+the pipeline owner and corroborated in the data: the mean absolute step between
+consecutive values collapses from 0.035 early in the window to 0.005 in the middle, the
+signature of a running mean becoming progressively less sensitive to each new
+observation. Raw samples would not converge like that.
 
-A prior revision of this document reported 1283.21 as "the official final settlement"
-for VN30F2206. That was the **last sample** in the window, not the settlement. The
-window mean is **1281.36**. The corrected close-vs-settlement gap is **0.36%**, not the
-0.217% previously stated.
+*This document twice got that wrong before getting it right.* It first read the last
+entry as the settlement (correct), then "corrected" itself to the window mean
+(**wrong** — that averages an already-averaged series), and is now back to the last
+entry, this time verified rather than assumed. The intermediate figures 1281.36 and
+0.36% should be struck wherever they appear.
 
-Measured shape of the window, consistent across 2022, 2024, 2025 and 2026:
+**Window shape**, consistent across 2022, 2024, 2025 and 2026: **14:15 → 14:45**, the
+last 30 minutes including the ATC. Thirty minutes, not fifteen. ~180–260 rows per
+expiry day, and expiry days only — 55 days across four years.
 
-| Property | Value |
+**The averaged subject changed mid-corpus, and the boundary is exact.** The last
+futures-tracked row is dated **2022-08-16**; the first `VN30INDEX` row is **2022-08-17**.
+Before the cutover the series tracked the expiring contract's own price; after, it
+tracks the VN30 index. So the settlement basis is **dated**, like the round lot and the
+margin ratio, and `SettlementResolver` must resolve it at the expiry date rather than
+applying one formula to all history. Which quantity the exchange published *pre*-cutover
+is still unresolved and needs the HNX/VSD decision behind the change — a rulebook
+question, not a data question.
+
+#### The measurement, across every post-cutover expiry
+
+Reading the last entry per expiry day and joining to the expiring contract's close
+(`quote.ticker.expdate` is populated for all 73 futures, so the join is exact):
+
+| | |
 |---|---|
-| Window | **14:15 → 14:45**, i.e. the last 30 minutes including the ATC |
-| Duration | **30 minutes** (not 15) |
-| Sampling | ~180–260 observations per expiry day |
+| Expiries measured | **46**, 2022-08-18 → 2026-08-20 |
+| Mean signed error | **+0.024%** — the close sits marginally above settlement, effectively unbiased |
+| Mean absolute error | **0.042%** |
+| Standard deviation | **0.071%** |
+| Worst case | **0.333%** (VN30F2603, 2026-03-19) |
+| Within 0.05% | 37 / 46 |
+| Within 0.10% | 42 / 46 |
+| Within 0.20% | 45 / 46 |
 
-**The subject being averaged changed mid-corpus, and the boundary is visible to the
-day.** The last futures-tracked row is dated **2022-08-16**; the first `VN30INDEX` row
-is **2022-08-17**. They are adjacent, which is what a methodology cutover looks like in
-a capture pipeline:
+Two things follow. First, the substitution is **about four basis points** in the typical
+case — an order of magnitude better than the single-contract figures previously quoted.
+Second, VN30F2206, the one contract this document leaned on for weeks, sits near the
+**worst** of the distribution rather than the middle. That is the argument against
+citing an n=1 measurement in general form, made against our own claim.
 
-- **Up to 2022-08-16** the pipeline sampled the **expiring contract's own price** over
-  the window.
-- **From 2022-08-17** it samples the **VN30 index**.
+#### The design consequence
 
-This matters more than the gap figure does, because it means the settlement rule is
-**dated**, exactly like the round lot and the margin ratio. `SettlementResolver` must
-resolve the basis at the expiry date rather than applying one formula to all history —
-the same per-instant discipline §11 item 1 imposes on venue resolution.
+T2 is retired as a *design* limitation and demoted to a *data-availability* one. The
+data source contract (§9) carries an **optional settlement price**:
 
-**Open, and load-bearing.** Which quantity the exchange actually *published* as the
-final settlement for a pre-cutover contract is not settled by this data. The pipeline
-sampling the contract does not prove the exchange averaged the contract; the older rule
-may have been the VN30 closing index value, with the contract capture serving some
-other purpose. Resolving it needs the HNX/VSD decision that made the change, which is
-a rulebook question, not a data question. Until it is resolved, **do not report a
-pre-2022-08-17 settlement figure as authoritative.**
+- **Where the source supplies one, the simulator uses it.** Exact, no approximation,
+  no tradeoff to declare.
+- **Where it does not, the simulator falls back to the close** and records that
+  substitution on the result, with the error distribution above as its declared cost.
 
-**How to widen the sample.** `quote.vn30` carries the index level; recomputing the
-14:15–14:45 mean on each expiry day yields a distribution across every expiry rather
-than the single point we have. That is a measurement, not a rebuild, and it should be
-done before the paper cites T2.
+The fallback is never silent: a result computed on the close-proxy says so, so a reader
+can see which of the two paths produced the number.
 
 ## 16. Stated assumptions
 
