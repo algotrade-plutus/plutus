@@ -599,24 +599,54 @@ class DataAudit:
         return result
 
 
+    #: The flat tick every non-HSX Vietnamese venue quotes on, in thousand dong.
+    FLAT_TICK = '0.1'
+
     def check_tick_grid_conformity(self) -> CheckResult:
-        """Observed prices must lie on the exchange's legal tick grid.
+        """Observed prices must lie on their venue's legal tick grid.
 
         A price off the grid could not have traded: the matching engine would
-        never have accepted the order that produced it. This is a third defect
-        class independent of the ceiling/floor swap and the OHLC invariants,
-        and it was found by wiring the exchange model to the corpus.
+        never have accepted the order that produced it.
 
-        Scoped to HSX, whose grid is price-dependent
-        (:func:`plutus.core.constant.get_hsx_tick_size`, including its
-        8-character C/E/F warrant/ETF exception). The other exchanges use a
-        flat 0.1 tick on which essentially every observed price lies, so the
-        check would be vacuous there.
+        **This check runs on every Vietnamese venue, and the reason it does is
+        the interesting part.** It was previously scoped to HSX alone, on the
+        argument that the other venues use a flat 0.1 tick "on which
+        essentially every observed price lies, so the check would be vacuous
+        there". That argument was half right and half wrong, and both halves
+        are worth keeping:
+
+        * **HNX is genuinely clean** -- 0 off-grid closes in 904,819 rows.
+          Vacuous, exactly as claimed.
+        * **UPCoM is not** -- 15,504 off-grid closes across 30 tickers.
+
+        But those 15,504 rows are **not tick violations**. Every single one of
+        them -- 15,504 of 15,504, no counterexample -- lies exactly on *HOSE's*
+        price-banded grid. They are HOSE prices wearing a UPCoM label, because
+        ``quote_ticker.exchangeid`` records the venue a ticker sits on *now*
+        rather than the venue it traded on then, and these are HOSE-delisted
+        names (LCM, PXI, ATG, PXS, CLG, PXT, TS4, RIC, FTM ...) that later
+        moved to UPCoM.
+
+        So the check is reported in two buckets, because they are two different
+        defects and conflating them would overstate one and hide the other:
+
+        ``violations``
+            Prices that fit **no** Vietnamese venue's grid. Genuine data
+            defects; there are 13, all on HSX and all predating 2016.
+        ``venue_misattribution``
+            Prices that fail their labelled venue's grid but fit another
+            venue's exactly. A defect in the *label*, not the price.
+
+        The second bucket independently corroborates a conclusion the rulebook
+        research reached by a completely different route -- fitting price bands
+        rather than tick grids -- and it names the same tickers. Two unrelated
+        methods converging on one defect is stronger evidence than either alone.
         """
         result = CheckResult(
             name='tick_grid_conformity',
-            description='HSX closes lie on the exchange tick grid',
-            invariant='close % get_hsx_tick_size(ticker, close) == 0',
+            description='Closes lie on their venue tick grid; '
+                        'off-grid rows are split from mislabelled ones',
+            invariant='close % tick_size(venue, ticker, close) == 0',
         )
         missing = self._missing('quote_close', 'quote_ticker')
         if missing:
@@ -628,18 +658,43 @@ class DataAudit:
 
         from plutus.core.constant import get_hsx_tick_size
 
+        flat = Decimal(self.FLAT_TICK)
+        venues = "', '".join(v for v in self.VIETNAM_EXCHANGES)
         rows = self._query(
-            f"SELECT c.tickersymbol, c.datetime, c.price "
+            f"SELECT tk.exchangeid, c.tickersymbol, c.datetime, c.price "
             f"FROM {self._reader('quote_close')} c "
             f"JOIN {self._reader('quote_ticker')} tk USING (tickersymbol) "
-            f"WHERE tk.exchangeid = 'HSX'"
+            f"WHERE tk.exchangeid IN ('{venues}')"
         )
 
-        offenders = {}
-        for ticker, day, price in rows:
+        def fits(venue: str, ticker: str, value: Decimal) -> bool:
+            """True when ``value`` lies on ``venue``'s grid for this ticker."""
+            if venue == 'HSX':
+                tick = get_hsx_tick_size(ticker, value)
+                return tick is not None and value % tick == 0
+            return value % flat == 0
+
+        per_venue: Dict[str, Dict[str, int]] = {}
+        offenders: Dict[str, list] = {}
+        mislabelled: Dict[str, int] = {}
+        misattributed = 0
+
+        for venue, ticker, day, price in rows:
+            stats = per_venue.setdefault(
+                venue, {'rows': 0, 'off_grid': 0, 'misattributed': 0})
+            stats['rows'] += 1
             value = Decimal(str(price))
-            tick = get_hsx_tick_size(ticker, value)
-            if tick is None or value % tick != 0:
+            if fits(venue, ticker, value):
+                continue
+            stats['off_grid'] += 1
+            # Does some OTHER Vietnamese venue's grid explain it exactly?
+            elsewhere = [v for v in self.VIETNAM_EXCHANGES
+                         if v != venue and fits(v, ticker, value)]
+            if elsewhere:
+                stats['misattributed'] += 1
+                misattributed += 1
+                mislabelled[ticker] = mislabelled.get(ticker, 0) + 1
+            else:
                 offenders.setdefault(ticker, []).append(str(day)[:10])
 
         result.total = len(rows)
@@ -648,6 +703,10 @@ class DataAudit:
         # generic renderer and would print twice.
         result.detail['offenders'] = {k: len(v) for k, v in offenders.items()}
         result.detail['dates'] = {k: sorted(v) for k, v in offenders.items()}
+        result.detail['venue_misattribution'] = misattributed
+        result.detail['mislabelled_symbols'] = dict(
+            sorted(mislabelled.items(), key=lambda kv: -kv[1]))
+        result.detail['by_venue'] = per_venue
         return result
 
     # -- reusable exclusions ----------------------------------------------
@@ -772,9 +831,26 @@ def _render(report: AuditReport) -> str:
             if detail.get('zero_valued'):
                 z = ', '.join(f"{k} ({v:,} rows)" for k, v in detail['zero_valued'].items())
                 lines.append(f"  zero adj  : {z}  <- invalid, not merely coarse")
-        if check.name == 'tick_grid_conformity' and detail.get('offenders'):
-            syms = ', '.join(f"{k} ({v})" for k, v in detail['offenders'].items())
-            lines.append(f"  symbols   : {syms}")
+        if check.name == 'tick_grid_conformity':
+            if detail.get('offenders'):
+                syms = ', '.join(
+                    f"{k} ({v})" for k, v in detail['offenders'].items())
+                lines.append(f"  symbols   : {syms}")
+            for venue, s in sorted(detail.get('by_venue', {}).items()):
+                note = (f"  <- all explained by another venue's grid"
+                        if s['off_grid'] and
+                        s['off_grid'] == s['misattributed'] else '')
+                lines.append(
+                    f"  {venue:<10}: {s['rows']:>9,} rows, "
+                    f"{s['off_grid']:>6,} off own grid, "
+                    f"{s['misattributed']:>6,} mislabelled{note}"
+                )
+            if detail.get('venue_misattribution'):
+                lines.append(
+                    f"  mislabel  : {detail['venue_misattribution']:,} rows "
+                    f"across {len(detail['mislabelled_symbols'])} symbols -- "
+                    f"a defect in the venue LABEL, not the price"
+                )
         if check.name == 'vn30_survivorship':
             lines.append(
                 f"  detail    : {detail['snapshots']} snapshots x "

@@ -326,10 +326,60 @@ def test_tick_grid_conformity_finds_thirteen_off_grid_closes(report):
     """
     check = _check(report, 'tick_grid_conformity')
 
+    # The check now covers every Vietnamese venue, not HSX alone.
+    assert check.total == 3_709_950
     assert check.violations == 13
-    assert check.total == 1_101_201
     assert set(check.detail['offenders']) == {
         'DAG', 'C47', 'SVI', 'NLG', 'CCI', 'MCP'}
+
+
+@requires_corpus
+def test_hnx_is_genuinely_vacuous_but_upcom_is_not(report):
+    """The old HSX-only scope was argued from "the flat-tick venues would be
+    vacuous". Half right: HNX is spotless, UPCoM is not.
+    """
+    by_venue = _check(report, 'tick_grid_conformity').detail['by_venue']
+
+    assert by_venue['HNX']['rows'] == 904_819
+    assert by_venue['HNX']['off_grid'] == 0
+    assert by_venue['UPCOM']['off_grid'] == 15_504
+
+
+@requires_corpus
+def test_every_off_grid_upcom_close_is_a_mislabelled_hose_price(report):
+    """The load-bearing result: those 15,504 rows are not bad prices.
+
+    All 15,504 lie exactly on HOSE's price-banded grid -- no counterexample --
+    so they are HOSE prices carrying a UPCoM label. `quote_ticker.exchangeid`
+    is a CURRENT attribute, and these are HOSE-delisted names that later moved
+    to UPCoM.
+
+    This corroborates, by tick grids, what the rulebook research concluded by
+    fitting price bands. Two unrelated methods, the same tickers.
+    """
+    check = _check(report, 'tick_grid_conformity')
+    by_venue = check.detail['by_venue']
+
+    assert by_venue['UPCOM']['misattributed'] == 15_504
+    assert by_venue['UPCOM']['off_grid'] == by_venue['UPCOM']['misattributed']
+    assert check.detail['venue_misattribution'] == 15_504
+
+    # The band-fitting research named these; the tick grid finds them again.
+    assert {'LCM', 'PXI', 'ATG', 'PXS', 'CLG', 'PXT', 'TS4', 'RIC'} <= set(
+        check.detail['mislabelled_symbols'])
+
+
+@requires_corpus
+def test_the_thirteen_real_violations_fit_no_venue_grid(report):
+    """A genuine defect is one no Vietnamese venue's grid explains.
+
+    If any of the 13 fitted another venue exactly it would be a mislabel, not
+    a bad price, and would have been counted in the other bucket.
+    """
+    check = _check(report, 'tick_grid_conformity')
+
+    assert check.detail['by_venue']['HSX']['misattributed'] == 0
+    assert sum(check.detail['offenders'].values()) == check.violations == 13
 
 
 @requires_corpus
