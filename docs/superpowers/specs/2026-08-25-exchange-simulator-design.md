@@ -684,6 +684,12 @@ pipeline we maintain.
 Omissions listed here are deliberate. An omission that is *declared* is not a defect;
 a silent one is.
 
+Two of them — items 3 and 4 — are a distinct category. They are not gaps waiting to be
+filled but **fidelity traded for scope in this iteration**, chosen with the cost known.
+They carry their own register in §15.1, which is the text the paper draws on. Anything
+future work adds to that register must state what it buys, what it gives up, and what
+would trigger revisiting it.
+
 1. **Production parity awaits the post-KRX rulebook.** §1's claim that the same strategy
    code runs against history and production does not hold today: KRX went live on HOSE
    on 2025-05-05 and changed several modelled rules. §13 defers that rulebook, so §1 is
@@ -701,7 +707,7 @@ a silent one is.
    the order, defaults false, and the rule short-circuits. Enforcement is future work.
    *(For that future work: `quote_foreignroom` is the REMAINING room, not the cap —
    verified, HPG on 2022-11-15 decrements tick-by-tick within the session. Our
-   `README.md` calls it the cap and is wrong.)*
+   `README.md` calls it the cap and is wrong.)* **Tradeoff T1 in §15.1.**
 4. **Final settlement uses the data source's close price, by design.** Rather than
    compute the index-referenced trimmed mean, the simulator reads the expiring
    contract's `close` on its expiry day as the settlement price (author's decision — the
@@ -709,7 +715,8 @@ a silent one is.
    expiry day (VN30F2206, 2022-06-16 = 1286.0). It approximates the true index-based
    final settlement to ~0.4% (that day's index-window mean was 1281.4). This collapses
    the settlement-price computation to a data read; `expiry.py`'s `TWAP_30M` tier is
-   retained only as the batch research path.
+   retained only as the batch research path. **Tradeoff T2 in §15.1** — the 0.4% figure
+   rests on one contract and must be widened before the paper cites it.
 5. **No corporate-action engine in Tier 1.** Dividends, splits, bonus and rights issues
    change both the reference price and the holdings quantity. Until §6's rulebook
    carries the adjustment formulas, a run spanning an ex-date is wrong for that
@@ -723,6 +730,31 @@ a silent one is.
    diverge from trading days around Tết.
 7. **Continuous-session fills are not empirically validated.** Report the
    `INDETERMINATE` rate as a bound on ignorance rather than a fill rate (§13).
+
+### 15.1 Tradeoff register — fidelity deliberately traded for scope
+
+A high-fidelity claim survives contact with reviewers only if the places where fidelity
+was *bought down on purpose* are named, priced and dated. This register is that record.
+Both entries are scoped to **this iteration** and are scheduled work, not permanent
+design.
+
+| # | The simplification | What it buys | Fidelity given up | Revisit trigger |
+|---|---|---|---|---|
+| T1 | Domestic investor only; foreign-ownership room is never enforced (§15.3) | Removes an entire date-switched control flow — pre-KRX *fill-to-room-then-cancel* vs post-KRX *reject-at-entry* — plus the room time series from the hot path | A foreign account's orders would, in reality, be partially filled or rejected on room. We admit them in full. Verified as a real constraint, not a vacuous one: **34,653 room observations sit below a single 100-share lot**; FPT on 2022-12-30 runs down to 11 shares | Any strategy or paper result that claims to represent a foreign account; or the post-KRX rulebook landing, which is when the two branches must both exist anyway |
+| T2 | Final settlement price = the data source's `close` on expiry day (§15.4) | Collapses the index-referenced trimmed-mean computation to a single data read, and removes the VN30 dissemination-frequency dependency entirely | The published final settlement is computed from the index over a defined window, not from the contract's own close. Measured gap: **~0.4%** on the one contract checked (VN30F2206, 2022-06-16 — close 1286.0 vs index-window mean 1281.4). One sample; the tail is unmeasured | Any result whose P&L is materially sensitive to expiry-day pricing; or a systematic measurement of the gap across all contracts, which is cheap and should be done before the paper leans on it |
+
+**How these are reported.** Each is stated in the paper as a scoped simplification with
+its measured cost attached — T2 with the 0.4% figure and the sample size (n=1, a stated
+weakness), T1 with the 34,653-observation count that shows the constraint is real and
+that ignoring it is a choice rather than a discovery that it never binds. Neither is
+described as a modelling result. Reporting them this way is worth more than hiding
+them: it is direct evidence that the fidelity claim elsewhere is audited rather than
+asserted.
+
+**Before the paper cites T2, widen the sample.** Running the close-vs-index-window
+comparison across every expiry in the corpus turns "~0.4% on one contract" into a
+distribution. That is a few hours of work and it converts the register's weakest row
+into a defensible number.
 
 ## 16. Stated assumptions
 
