@@ -757,7 +757,13 @@ class CashLedger:
 
     def credit(self, amount: Decimal, ts: datetime, reason: str) -> None:
         """Put settled cash in: a deposit, a transfer back from the deposit
-        account, or the cash leg of a corporate action."""
+        account, or the cash leg of a corporate action.
+
+        ``ts`` and ``reason`` are the interface contract's signature and are
+        carried for the caller's own journal; this ledger itemises charges
+        (:meth:`charges`) and nothing else, because design section 3 puts all
+        reporting on the caller's side.
+        """
         if amount < 0:
             raise ValueError(f'a credit must be non-negative, got {amount}')
         self._settled += amount

@@ -1078,8 +1078,19 @@ class OrderBookOfRecord:
         exists precisely so section 12 invariant 4 can be summed over live
         orders -- would overstate. A record that lies is worse than a record
         that is absent.
+
+        Raises:
+            ValueError: on a terminal order. :meth:`_terminate` has already
+                stamped its reservations released, and letting a later write
+                put one back would let a terminal order claim resources it no
+                longer holds -- the same leak from the other direction.
         """
         record = self._require(order_id)
+        if record.is_terminal:
+            raise ValueError(
+                f'order {order_id} is {record.state.value} and reserves '
+                f'nothing; its encumbrance was released on the terminal edge'
+            )
         return self._store(record.with_encumbrances(encumbrances))
 
     # -- refusals -------------------------------------------------------

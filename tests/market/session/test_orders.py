@@ -1033,3 +1033,18 @@ def test_set_encumbrances_lets_the_ledger_correct_a_stale_reservation(book):
         T0, amount=Decimal('38200'))
     updated = book.set_encumbrances(order_id, [reduced])
     assert updated.encumbered_cash == Decimal('57300')
+
+
+def test_a_terminal_order_cannot_be_re_encumbered(book):
+    """Section 12 invariant 4 from the other side: committed returns to zero
+    when no order is live, and stays there.
+
+    The terminal edge stamps the reservations released; a later write putting
+    one back would let a cancelled order claim resources it no longer holds.
+    """
+    order_id = OrderId('PLU-ENC-2')
+    book.accept(an_order(), Venue.HSX, T0, order_id=order_id,
+                encumbrances=[a_cash_encumbrance(order_id)])
+    book.cancel(order_id, T0)
+    with pytest.raises(ValueError, match='reserves nothing'):
+        book.set_encumbrances(order_id, [a_cash_encumbrance(order_id)])

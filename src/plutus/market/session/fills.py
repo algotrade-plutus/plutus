@@ -94,6 +94,7 @@ fact about the data, countable after the fact.
 """
 
 from abc import ABC, abstractmethod
+from dataclasses import replace
 from decimal import ROUND_FLOOR, Decimal
 from typing import ClassVar, FrozenSet, Optional, Protocol, Tuple, runtime_checkable
 
@@ -552,15 +553,10 @@ def stamp_policy(decision: FillDecision, signature: str) -> FillDecision:
     prefix = signature + POLICY_SEPARATOR
     if body.startswith(prefix):
         body = body[len(prefix):]
-    return FillDecision(
-        outcome=decision.outcome,
-        quantity=decision.quantity,
-        price=decision.price,
-        confidence=decision.confidence,
-        evidence=decision.evidence,
-        reason=prefix + body,
-        missing=decision.missing,
-    )
+    # ``replace`` rather than a direct construction: ``FillDecision``'s own
+    # docstring reserves positional construction for its three case
+    # constructors, and stamping is a copy, not a fourth case.
+    return replace(decision, reason=prefix + body)
 
 
 def policy_of(decision: FillDecision) -> Optional[str]:

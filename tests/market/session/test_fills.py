@@ -38,7 +38,6 @@ from plutus.market.session.types import (DataField, Fill, FillDecision,
                                          Venue)
 
 DAY = datetime(2022, 3, 29)
-OPEN_TS = datetime(2022, 3, 29, 9, 15)
 LIMIT = Decimal('95.5')
 
 #: HOSE's round lot on this date. Passed explicitly wherever a test cares,
@@ -621,8 +620,14 @@ def test_soft_and_hard_diverge_exactly_at_the_touch():
                                      instrument=HSX_LOT)
 
     assert soft.outcome is FillOutcome.FILL and soft.quantity == 1000
+    assert soft.evidence is FillEvidence.TOUCHED_AT_LIMIT
     assert hard.outcome is FillOutcome.INDETERMINATE
-    assert soft.price == hard.price or hard.price is None
+    # Not a data gap: the interval is complete. The gap is queue position.
+    assert hard.missing == frozenset()
+    assert 'time-priority' in hard.reason
+    # And each carries the assumption that produced it, so the two runs cannot
+    # be compared without knowing which is which.
+    assert policy_of(soft) != policy_of(hard)
 
 
 def test_soft_needs_no_volume_and_no_cap():

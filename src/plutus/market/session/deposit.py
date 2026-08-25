@@ -956,11 +956,18 @@ class DerivativesAccount:
                         'contract_code': code},
             )
 
-        view = self.margin({code: price}, rules, self.terms, ts)
+        # Marked on the account's own latest marks, deliberately not on this
+        # order's price: an existing position is margined at the market, and
+        # letting a new limit order re-price the portfolio it is joining would
+        # let a caller manufacture free deposit with an absurd limit. The
+        # caller is expected to have called observe_marks() for the interval.
+        view = self.margin({}, rules, self.terms, ts)
         if increment > 0 and view.status is MarginStatus.FORCED:
             # Level 3 suspends the account from OPENING new positions. An
             # offsetting order -- increment == 0 -- is explicitly excepted, and
-            # is in fact the action VSDC requires the member to take.
+            # is in fact the action VSDC requires the member to take. The
+            # threshold used is the *broker's* forced-close level, which is at
+            # or tighter than VSDC's 100%: clearing members must be no looser.
             return Rejected(
                 rule=StatefulRule.INSUFFICIENT_DEPOSIT,
                 binding_constraint=view.free_deposit,
