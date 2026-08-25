@@ -27,6 +27,18 @@ forbidden build of locked shape 2, and inverting steps 4 and 5 changes the
 per-rule composition of the rejection log (an order that breaches the tick
 grid is a tick-grid rejection whether or not the caller could afford it).
 
+**The dated rules the venue objects cannot see are resolved here.** The four
+``exchanges/`` objects are stateless evaluators built on a module-level
+``ExchangeSpec`` -- undated by construction -- and they are shared with the
+batch research path, so this module closes the gap on its own side rather than
+by editing them. Order-type legality and the per-order size cap are refused
+before ``admits()`` runs; the tick grid is *installed on the venue object for
+one call* (:meth:`ExchangeSession._venue_at`), so ``admits()`` still owns the
+``TICK_GRID`` rule and still runs it first, against a number the rulebook
+resolved at the instant for that instrument. A pre-check would have caught only
+half of that defect: it would refuse the illegal price and still let the
+singleton refuse a legal one.
+
 **Expiry runs before fills** inside :meth:`ExchangeSession.advance_to`, or an
 order that died at the cross could still fill in the phase that killed it.
 
@@ -59,6 +71,7 @@ things the contract could not see until the modules were written:
   bar later than a real exchange decides them and is declared as such.
 """
 
+import copy
 import importlib
 import json
 from dataclasses import replace
@@ -72,6 +85,7 @@ from typing import (
 
 from plutus.core.order import OrderType, Side
 from plutus.market.adapters.base import MarketDataSource
+from plutus.market.expiry import expiry_date
 from plutus.market.exchanges import (
     Exchange, HNXDS_EXCHANGE, HNX_EXCHANGE, HSX_EXCHANGE, UPCOM_EXCHANGE,
 )
@@ -92,7 +106,9 @@ from plutus.market.session.ledgers import (
     CashLedger, EncumbranceLedger, HoldingsLedger, SecuritiesAccount,
     assess_charges,
 )
-from plutus.market.session.orders import OrderBookOfRecord, OrderIdFactory
+from plutus.market.session.orders import (
+    OrderBookOfRecord, OrderIdFactory, is_legal_transition,
+)
 from plutus.market.session.rulebook import (
     Rulebook, RuleName, RuleSet, SymbolRouter, UnresolvedRule, VenueListing,
 )
@@ -101,13 +117,13 @@ from plutus.market.session.types import (
     Cash, Charge, ChargeBase, ChargeClass, ChargeRule, ContractPosition,
     DataConfig, DataField, DebitedAt, Encumbrance, Event, EventKind,
     ExchangeRulesConfig, ExpiryTrigger, Fill, FillDecision, FillEvidence,
-    FillOutcome, FillPolicyConfig, Holding, IndeterminateReport,
+    FillId, FillOutcome, FillPolicyConfig, Holding, IndeterminateReport,
     LiquidationRule, MarginStatus, MarginView, MarketInterval, OrderId,
     OrderRecord, OrderState, OrderTransition, Pin, Pool, Rejected,
     SessionConfig, SessionProvenance, StatefulRule, TimeInForce, Transferred,
     Venue, pool_for_venue,
 )
-from plutus.market.verdicts import AdmissionRule, Verdict
+from plutus.market.verdicts import AdmissionRule, SettlementSource, Verdict
 
 __all__ = [
     'CHARGE_CLASS_BY_KIND', 'EXCHANGE_BY_VENUE', 'ExchangeSession',
@@ -168,12 +184,28 @@ def charge_class_for(kind: InstrumentKind) -> ChargeClass:
 #: with no derivable band is a ``BAND_LIMIT`` indeterminate, not an
 #: undifferentiated one.
 #:
+#: **Every entry here is reachable from ``submit()``, and that is a
+#: requirement.** ``TICK_SIZE`` was not: the grid was judged against
+#: ``ExchangeSpec``'s undated tick function, which answers every question, so
+#: no session path could raise ``UnresolvedRule(TICK_SIZE)`` and the row was a
+#: plan rather than a wiring. :meth:`ExchangeSession._dated_tick` resolves the
+#: grid through ``rulebook.at(ts)`` and an unresolved one lands here; HNX's ETF
+#: tick before 2022-03-31 is the live example. A row that no path can produce
+#: is worse than a missing row, because ``by_rule`` then reads as a rule with
+#: no gaps rather than as a rule nobody asked.
+#:
 #: **Orchestrator action.** There is no ``AdmissionRule`` member for "the
 #: instrument could not be routed to a venue". Routing failures fall to
 #: ``SESSION_SEMANTICS`` with an explicit ``detail['reason']``, which is the
 #: precedent ``equity.py`` already sets for "the session could not be
 #: established" -- but a ``ROUTING`` member would keep the two apart in a log
 #: whose whole job is to be countable by rule.
+#:
+#: ``SESSION_SCHEDULE`` has no entry on purpose. ``RuleSet.phase`` takes the
+#: total ``resolve`` path and answers ``SessionPhase.UNKNOWN``, which reaches
+#: the log through ``LEGAL_ORDER_TYPES`` -- the ``(None, UNKNOWN)`` row -- so
+#: an unresolved clock is already countable and a second mapping for it would
+#: be the very thing the paragraph above objects to.
 _RULE_FOR_RULENAME: Mapping[RuleName, AdmissionRule] = {
     RuleName.DAILY_TRADING_LIMIT: AdmissionRule.BAND_LIMIT,
     RuleName.WIDENED_TRADING_LIMIT: AdmissionRule.BAND_LIMIT,
@@ -396,6 +428,13 @@ class ExchangeSession:
         must do it too -- an order reaching a terminal state without releasing
         its reservation is the leak class section 12 invariant 4 exists to
         catch.
+
+        ``monitor`` is authoritative for two things this session then reports
+        rather than decides: the cure window it measures, and the liquidation
+        selection rule that :meth:`provenance` and every
+        ``FORCED_LIQUIDATION`` event state. Passing one and having the session
+        report a different rule is the failure
+        :meth:`_liquidation_rule` exists to make impossible.
         """
         self._config = config
         self._source = source
@@ -489,6 +528,7 @@ class ExchangeSession:
               rulebook: Optional[Rulebook] = None,
               fill_policy: Optional[FillPolicy] = None,
               initial_holdings: Optional[Mapping[str, int]] = None,
+              monitor: Optional[MarginMonitor] = None,
               ) -> 'ExchangeSession':
         """Assemble a session from a parsed config, wiring the shared hooks.
 
@@ -508,11 +548,21 @@ class ExchangeSession:
         ids contain ``UNSOURCED`` and whose settlement dates are wrong around
         every Tet in the period. The default exists so a smoke run works, and
         :meth:`provenance` reports the id so a published result cannot hide
-        it. A run that means to be right passes a sourced calendar.
+        it. A run that means to be right passes a sourced calendar -- as the
+        ``settlement`` argument, or by naming the VSDC notice under
+        ``data.settlement_calendar`` in the config, which
+        :meth:`_settlement_calendar` loads.
+
+        ``monitor`` is here for the same reason ``rulebook`` and
+        ``fill_policy`` are: it carries a choice the config file cannot
+        express, in this case the liquidation selection rule that every
+        ``FORCED_LIQUIDATION`` event and the provenance record must state.
+        The constructor has always taken one; ``build`` dropping it on the
+        floor meant there was no supported way to configure it.
         """
         profile = config.broker_profile
-        settlement = settlement or weekday_settlement_calendar()
         trading = trading or weekday_trading_calendar()
+        settlement = cls._settlement_calendar(config.data, settlement)
         if isinstance(settlement, VsdcSettlementCalendar):
             # The pre-2022-08-29 regime delivers at the *next session open*,
             # which is a trading-day question a settlement calendar cannot
@@ -556,9 +606,46 @@ class ExchangeSession:
             next_seq=lambda: cell['session']._next_seq(),
         )
         session = cls(config, source, rulebook, router, settlement, trading,
-                      policy, securities, deposit, book)
+                      policy, securities, deposit, book, monitor)
         cell['session'] = session
         return session
+
+    @staticmethod
+    def _settlement_calendar(data: DataConfig,
+                             supplied: Optional[SettlementCalendar],
+                             ) -> SettlementCalendar:
+        """Resolve the settlement calendar: the config's file, or the default.
+
+        ``data.settlement_calendar`` is the one remedy ``calendar.py`` asks
+        for and it was parsed and then never read, so a caller who supplied
+        the real VSDC notice still ran on the weekday-only calendar and still
+        got ``settlement_calendar_id == 'weekday-only-UNSOURCED'`` in its
+        provenance. For a 2026-02-12 trade that answers T+2 = 2026-02-16 where
+        VSDC settled 2026-02-23 -- five counted days the depository was shut.
+
+        Two refusals, both matching :func:`parse_config`'s treatment of a
+        missing ``period``:
+
+        * a **named calendar that will not load** raises out of
+          :meth:`VsdcSettlementCalendar.from_file` rather than falling back,
+          because a run that silently substituted the unsourced calendar for
+          the one its config named is unreproducible from its own config;
+        * **naming one twice** -- a file in the config *and* an injected
+          object -- is two answers to one question, which is the same shape
+          ``from_file`` already refuses for ``holidays`` alongside
+          ``settlement_days``. Neither is preferred; the caller is told.
+        """
+        configured = data.settlement_calendar if data is not None else None
+        if configured and supplied is not None:
+            raise ValueError(
+                f'the settlement calendar is named twice: '
+                f'data.settlement_calendar={configured!r} in the config and a '
+                f'settlement= object passed to build(). They are two answers '
+                f'to one question and the provenance record can carry only '
+                f'one id, so neither is preferred -- pass one.')
+        if configured:
+            return VsdcSettlementCalendar.from_file(configured)
+        return supplied if supplied is not None else weekday_settlement_calendar()
 
     # -- clock ----------------------------------------------------------
 
@@ -653,12 +740,23 @@ class ExchangeSession:
     def submit(self, order: Order) -> Union[Accepted, Rejected]:
         """Submit for admission and funding. The section 1 sequence, in order.
 
-        ``route -> rulebook.at(ts) -> phase -> dated legality -> admits() ->
-        reserve -> accept``. The reservation runs **around**
-        ``Exchange.admits()`` and never inside it: a stateless affordability
-        check inside ``admits()`` is locked shape 2's forbidden build, and it
-        would break the existing tests that call ``admits()`` with no account
-        at all.
+        ``route -> rulebook.at(ts) -> phase -> dated legality -> dated size cap
+        -> dated tick -> admits() -> reserve -> accept``. The reservation runs
+        **around** ``Exchange.admits()`` and never inside it: a stateless
+        affordability check inside ``admits()`` is locked shape 2's forbidden
+        build, and it would break the existing tests that call ``admits()``
+        with no account at all.
+
+        **Three rules are resolved here and not inside ``admits()``**, and
+        they are the three the venue objects in ``exchanges/`` cannot date:
+        which order types this venue accepts in this phase
+        (:meth:`_legal_here`), the per-order quantity cap
+        (:meth:`_size_here`), and the tick grid (:meth:`_dated_tick`). The
+        first two refuse here. The third does not: it is *installed* on the
+        venue object for this one call, so ``admits()`` still runs the grid
+        rule, still reports it as ``TICK_GRID``, and still runs it first --
+        the per-rule composition of the rejection log is unchanged, only the
+        number it compares against is now dated. See :meth:`_venue_at`.
 
         Every refusal is a :class:`Rejected` carrying the **rule** that bound,
         never a string, and a ``verdict`` separating "a rule said no" from
@@ -697,7 +795,15 @@ class ExchangeSession:
         if refusal is not None:
             return self._reject(order, venue, order_id, refusal)
 
-        adm = self._exchanges[venue].admits(
+        refusal = self._size_here(order, venue, rules, order_id, ts)
+        if refusal is not None:
+            return self._reject(order, venue, order_id, refusal)
+
+        tick = self._dated_tick(order, venue, instrument, rules, order_id, ts)
+        if isinstance(tick, Rejected):
+            return self._reject(order, venue, order_id, tick)
+
+        adm = self._venue_at(venue, tick).admits(
             order, state, instrument=instrument, regime_tag=regime_tag)
         if adm.verdict is not Verdict.ADMITTED:
             return self._reject(order, venue, order_id,
@@ -948,6 +1054,13 @@ class ExchangeSession:
         its kind: ``hard`` at a 10% participation cap and ``hard`` at 100% are
         different assumptions and produce different fills, so the kind alone
         cannot reproduce a result.
+
+        ``liquidation_rule`` is read off the **monitor this session is
+        running**, never off the enum's default. A constant here reported
+        ``largest_loss_first`` for a session configured pro rata, which is the
+        one failure a provenance record cannot have: an unrecorded assumption
+        is a gap, but a recorded wrong one is a false claim that reads as
+        evidence.
         """
         return SessionProvenance(
             rulebook_id=self._config.exchange_rules.rulebook,
@@ -961,8 +1074,22 @@ class ExchangeSession:
             pins=self._rulebook.pins,
             settlement_calendar_id=getattr(self._settlement, 'calendar_id',
                                            None),
-            liquidation_rule=LiquidationRule.LARGEST_LOSS_FIRST,
+            liquidation_rule=self._liquidation_rule(),
         )
+
+    def _liquidation_rule(self) -> LiquidationRule:
+        """The selection rule this session's forced closes are reported under.
+
+        One reader for the monitor's ``liquidation``, used by
+        :meth:`provenance` and by :meth:`_mark_derivatives`, so the record and
+        the event cannot disagree. ``getattr`` with a default because
+        ``monitor`` is an injection point and a caller's own monitor need only
+        satisfy ``on_mark``; a monitor that states no rule falls to the
+        contract's declared default rather than to nothing, since a forced
+        close must state *some* rule.
+        """
+        return getattr(self._monitor, 'liquidation',
+                       LiquidationRule.LARGEST_LOSS_FIRST)
 
     def indeterminate_report(self) -> IndeterminateReport:
         """How much of the run the data could not decide.
@@ -1146,6 +1273,151 @@ class ExchangeSession:
                     'reason': f'{venue.value} does not accept '
                               f'{order.order_type.value} in {phase.value} at '
                               f'this date'})
+
+    def _size_here(self, order: Order, venue: Venue, rules: RuleSet,
+                   order_id: OrderId, ts: datetime) -> Optional[Rejected]:
+        """The dated per-order quantity cap. HOSE 500,000; HNXDS 500.
+
+        ``RuleSet.max_order_size`` carried these numbers from the first
+        commit and had exactly one caller in the repository -- its own test --
+        so a 1,000,000-share FPT order reached the reservation and was judged
+        on funding alone. The rulebook's own summary of what this package
+        fixes lists it in those terms: "Maximum order size: does not exist. A
+        10,000,000-share HOSE order would be admitted."
+
+        Dated, because HOSE's cap is dated: 500,000 units per round-lot
+        matching order **from 2021-01-04**, alongside the round lot that moved
+        the same day. It binds before the reservation, because a size the
+        exchange will not take is not a question about the account.
+
+        **An UNKNOWN cap refuses nothing, and that is an ASSUMPTION.** HNX and
+        UPCoM publish no cap in any rulebook read, and the rulebook records the
+        absence rather than a number because "no cap" is an inference from
+        HOSE's clause being HOSE-specific. Turning that absence into an
+        ``INDETERMINATE`` would refuse *every* HNX and UPCoM order in a run --
+        reporting a research gap as a market rule, which is the inversion this
+        package exists to prevent -- so the total ``resolve`` path is taken and
+        an unresolved cap is passed over. This is a genuine scope cut in one
+        direction and it is not free: HOSE's own 2020 row is UNKNOWN too (the
+        cap for the 10-lot regime was never sourced), so a 600,000-share HOSE
+        order in 2020 is admitted here and may well have been refused by HOSE.
+        The declared alternative -- refusing on an unsourced ceiling -- is
+        worse, and the gap is visible in the rulebook rather than hidden here.
+
+        Odd lots do not reach this rule: their 99-unit cap is the odd-lot
+        definition itself, and ``admits()``'s ``ROUND_LOT`` rule refuses a
+        non-multiple of the trading unit before any of it applies.
+        """
+        resolution = rules.resolve(RuleName.MAX_ORDER_SIZE, venue)
+        if not resolution.is_known:
+            return None
+        cap = resolution.value
+        if order.quantity <= cap:
+            return None
+        return Rejected(
+            rule=AdmissionRule.SESSION_SEMANTICS, binding_constraint=cap,
+            ts=ts, order_id=order_id,
+            detail={'quantity': order.quantity,
+                    'max_order_size': cap,
+                    'reason': f'{venue.value} caps one matching order at '
+                              f'{cap} at this date, and this order carries '
+                              f'{order.quantity}'})
+
+    def _dated_tick(self, order: Order, venue: Venue,
+                    instrument: Optional[InstrumentSpec], rules: RuleSet,
+                    order_id: OrderId, ts: datetime
+                    ) -> Union[Optional[Decimal], Rejected]:
+        """The tick grid AT THIS INSTANT, for this instrument, or why not.
+
+        The seam locked shape 1 leaves open at the **first** admission rule
+        ``submit()`` runs. ``equity.py`` and ``derivatives.py`` both ask
+        ``self.spec.get_tick_size(...)``, and ``self.spec`` is a module-level
+        ``ExchangeSpec`` bound at import: one flat ``Decimal('0.1')`` per
+        venue, with no date, no instrument kind and no contract family. The
+        two neighbouring rules had their seams closed and this one did not --
+        ``ROUND_LOT`` is date-correct because ``SymbolRouter.instrument``
+        overwrites ``InstrumentSpec.trading_unit`` from the ``RuleSet``, and
+        ``LEGAL_ORDER_TYPES`` is date-correct through :meth:`_legal_here` --
+        so one file priced an MTL residue on the dated grid
+        (:meth:`_residual_price`) and judged every submission on the undated
+        one.
+
+        Two failures, both verified, and they run in opposite directions:
+
+        * **An illegal price admitted.** GB05F2306 routes to HNXDS, where the
+          tick is 1 VND on a 100,000d face (HIGH confidence, from the contract
+          template). The singleton returns 0.1, so a limit of 100,523.5 -- off
+          the real grid -- is admitted, and the run reports a fill at a price
+          HNX would never have matched.
+        * **A legal order refused.** HNX's ETF tick is 0.001 from 2022-03-31
+          (VNX QD 17 Phu luc III S2.2), a hundredth of the singleton's 0.1, so
+          99 of every 100 legal FUEHNX01 prices come back
+          ``Rejected(TICK_GRID, binding_constraint=0.1)``.
+
+        Returns the resolved tick, ``None`` where the grid does not apply or
+        no band of the price table matches, or a ``Rejected`` when the
+        rulebook cannot answer. That last case is what makes
+        ``_RULE_FOR_RULENAME[TICK_SIZE] -> TICK_GRID`` reachable: before this,
+        no session path could raise ``UnresolvedRule(TICK_SIZE)`` at all, so a
+        tick data gap was a mapping nobody could exercise rather than a
+        countable line in ``indeterminate_report().by_rule``. HNX's ETF tick
+        before 2022-03-31 is the live example.
+
+        ``method`` is left at its ``ORDER_MATCHING`` default deliberately: a
+        put-through is negotiated at a hundredfold finer grid, and this session
+        refuses a negotiated side outright (see :meth:`_reserve`).
+        """
+        price = order.limit_price
+        if price is None:
+            # No price, no grid. `admits()` skips the rule for the market
+            # family too, so resolving here would raise on HOSE's banded grid
+            # for an order the rule never touches.
+            return None
+        kind = (instrument.kind if instrument is not None
+                else InstrumentKind.STOCK)
+        try:
+            return rules.tick_size(venue, kind, price, ticker=order.ticker)
+        except UnresolvedRule as exc:
+            return self._unresolved(exc, order_id, ts)
+
+    def _venue_at(self, venue: Venue, tick: Optional[Decimal]) -> Exchange:
+        """The venue object for ONE submission, holding the dated tick.
+
+        The exchange objects in ``exchanges/`` are stateless rule evaluators
+        shared with the batch research path, which 997 tests cover and which
+        must keep judging on ``ExchangeSpec`` exactly as it does today. So the
+        seam is closed on the session side: a shallow copy of the venue object
+        carries an ``ExchangeSpec`` whose ``tick_size_function`` returns the
+        tick :meth:`_dated_tick` already resolved at this instant, for this
+        instrument, from the rulebook.
+
+        **Installed rather than pre-checked**, and the difference matters. A
+        dated pre-check before ``admits()`` would fix the illegal-price half
+        of the defect and leave the refused-legal-order half untouched, since
+        ``admits()`` would still re-judge the same price against the
+        singleton. Installing means the grid is resolved once and judged once,
+        by the rule that already owns it: ``TICK_GRID`` stays first in the
+        admission sequence, ``binding_constraint`` is still the tick that
+        bound, and the per-rule composition of the rejection log is unchanged.
+
+        ``copy.copy`` rather than ``type(base)(spec)`` because the derivatives
+        exchange also carries a margin config and a position limit, and
+        reconstructing it from its spec alone would silently reset both to
+        their defaults. Nothing is cached: this is a fresh object per
+        submission, because a venue-keyed cache of tick-bearing exchanges is
+        exactly the forbidden build one level up.
+
+        ``tick`` is ``None`` for an order with no limit price -- where the
+        installed function is never called -- and for a price that matches no
+        band of HOSE's table, where ``admits()`` reads the ``None`` and
+        answers ``INDETERMINATE`` on ``TICK_GRID``, which is the behaviour
+        ``get_hsx_tick_size`` has always had and which this preserves.
+        """
+        base = self._exchanges[venue]
+        judge = copy.copy(base)
+        judge.spec = replace(base.spec,
+                             tick_size_function=lambda _ticker, _price: tick)
+        return judge
 
     # -- market data ----------------------------------------------------
 
@@ -1431,8 +1703,51 @@ class ExchangeSession:
     def _apply_fill(self, record: OrderRecord, decision: FillDecision,
                     ts: datetime,
                     instrument: Optional[InstrumentSpec]) -> None:
-        """Move both ledgers and the state machine, account first.
+        """Move both ledgers and the state machine, account first -- **or
+        neither**.
 
+        Atomicity, and the mechanism chosen for it
+        ------------------------------------------
+        A fill touches five mutable things: the encumbrance ledger, the
+        holdings ledger, the cash ledger, the contract ledger and the deposit
+        balance -- and then the order book, which can *refuse*
+        (``OrderBookOfRecord.apply_fill`` raises on a terminal order, on a
+        partial fill of an MOK, and on a fill that would take filled past
+        original). A refusal after the ledgers had moved was a reproduced
+        defect: 98m dong spent, 1,000 shares credited, a 10-contract futures
+        long opened, and the order still ``ACCEPTED`` with zero filled -- and
+        it repeated on every subsequent ``advance_to``.
+
+        The mechanism is **validate-then-commit**, not rollback, and the
+        choice is forced rather than stylistic:
+
+        * The ledgers are not journalled. ``DerivativesAccount._move`` appends
+          an immutable ``DepositEntry`` to an audit trail, and the audit trail
+          is the product -- a rollback would have to *un-write history*, which
+          is a worse thing to own than a pre-check.
+        * A rollback spanning ``deposit.py``'s contract ledger, its deposit
+          balance and ``ledgers.py``'s three ledgers would need a
+          transaction manager over two modules that share only an encumbrance
+          ledger. Every one of those objects would have to grow a snapshot
+          method that is right for every future field.
+        * Nothing here needs to be *tried* to be known. Every refusal on the
+          path is a pure function of state the session already holds, so the
+          question can simply be asked first. :meth:`_fill_refusal` asks it.
+
+        The two lower layers are held to the same rule from the inside:
+        ``SecuritiesAccount.apply_fill`` validates the whole fill before
+        moving any of its three ledgers, so the guard here is about the
+        *book*, not about the account.
+
+        A refusal raises rather than silently skipping the fill. An illegal
+        decision is a bug in the fill policy -- ``FillPolicy`` is a structural
+        protocol and a caller may ship their own -- not a market event, and
+        the house idiom for "the path that should have made this unreachable
+        did not" is a loud ``ValueError`` (compare ``CashLedger.debit``).
+        Swallowing it would turn a broken policy into silently missing fills.
+
+        Ordering, once the fill is known to be legal
+        -------------------------------------------
         The account moves **first** and the book second, so that the
         reservation is still live when the ledger consumes it. The book's
         terminal hook releases the whole reservation, and a fill applied to
@@ -1450,7 +1765,16 @@ class ExchangeSession:
         actually levied, neither of which the state machine sees. A record
         still reporting its accept-time reservation would make section 12
         invariant 4 sum over a lie for the rest of the order's life.
+
+        Raises:
+            ValueError: if the book would refuse this fill. Raised **before**
+                any ledger has moved, so the session is left exactly as it
+                was and a caller that catches it holds consistent books.
         """
+        refusal = self._fill_refusal(record, decision, ts)
+        if refusal is not None:
+            raise ValueError(refusal)
+
         fill = Fill(
             fill_id=self._next_fill_id(), order_id=record.order_id,
             ticker=record.order.ticker, venue=record.venue,
@@ -1468,7 +1792,9 @@ class ExchangeSession:
         if pool_for_venue(record.venue) is Pool.DERIVATIVES:
             charges = self._derivative_charges(fill, rules)
             fill = replace(fill, charges=charges)
-            self._derivatives.apply_fill(fill, rules, ts)
+            self._derivatives.apply_fill(
+                fill, rules, ts, expiry=self._expiry_for(fill.ticker,
+                                                         instrument))
             total = sum((c.total for c in charges), Decimal('0'))
             if total:
                 self._derivatives.debit(
@@ -1486,6 +1812,98 @@ class ExchangeSession:
             self._book.set_encumbrances(
                 record.order_id,
                 self._securities.encumbrances.of(record.order_id))
+
+    def _fill_refusal(self, record: OrderRecord, decision: FillDecision,
+                      ts: datetime) -> Optional[str]:
+        """Would ``OrderBookOfRecord.apply_fill`` refuse this decision?
+
+        The pre-check that makes :meth:`_apply_fill` atomic. It asks the same
+        three questions the book asks, from the same record, before anything
+        irreversible happens.
+
+        The last question is asked by **running the book's own arithmetic**:
+        ``OrderRecord.with_fill`` is pure -- it returns a copy and stores
+        nothing -- so a dry run costs a tuple and cannot drift from the real
+        one. Only the two guard clauses the book states separately are
+        restated here, and they are restated rather than shared because
+        ``orders.py`` exposes them as raises and not as predicates.
+
+        **Orchestrator action:** ``OrderBookOfRecord`` should offer a
+        ``would_refuse(order_id, fill)`` predicate, so that the state
+        machine's refusal conditions live in exactly one place. Until it
+        does, this duplication is deliberate and its cost is one test --
+        ``test_a_fill_the_book_refuses_moves_no_ledger_at_all`` fails loudly
+        if the two ever answer differently, because the guard's message and
+        the book's must both match ``fill-or-kill``.
+
+        Returns:
+            The reason the fill is impossible, or ``None`` if it is legal.
+            A reason is never a market outcome -- an MOK that cannot be
+            filled in full is decided by ``fills.py`` returning ``NO_FILL``
+            and killed by :meth:`_decide_immediates`, and never reaches here.
+        """
+        quantity = decision.quantity
+        if record.is_terminal:
+            return (f'order {record.order_id} is {record.state.value}: a '
+                    f'terminal order state is never left, so it cannot take '
+                    f'a fill')
+        if (record.time_in_force is TimeInForce.FILL_OR_KILL
+                and quantity != record.remaining_quantity):
+            return (f'order {record.order_id} is fill-or-kill (MOK): it '
+                    f'fills in full at entry or is cancelled entirely, so a '
+                    f'fill of {quantity} against '
+                    f'{record.remaining_quantity} remaining is not a state '
+                    f'this order can occupy. The fill policy proposed it; '
+                    f'no ledger has moved')
+        probe = Fill(
+            fill_id=FillId('PROBE'), order_id=record.order_id,
+            ticker=record.order.ticker, venue=record.venue,
+            side=record.order.side, quantity=quantity, price=decision.price,
+            ts=ts, evidence=decision.evidence or FillEvidence.MODELLED,
+        )
+        try:
+            after = record.with_fill(probe, ts)
+        except ValueError as exc:
+            return str(exc)
+        if not is_legal_transition(record.state, after.state):
+            return (f'illegal transition {record.state.value} -> '
+                    f'{after.state.value} for order {record.order_id}: '
+                    f'LEGAL_TRANSITIONS does not carry that edge')
+        return None
+
+    def _expiry_for(self, ticker: str,
+                    instrument: Optional[InstrumentSpec]) -> Optional[date]:
+        """The contract's last trading day, resolved at the fill.
+
+        Two sources, and the order matters. The **instrument spec** wins: it
+        is what the ticker master says, and a listed contract's last trading
+        day is a published fact, not a computation. Where the spec carries
+        none -- ``SymbolRouter`` passes the adapter's ``expiry`` straight
+        through, and it is ``None`` for every source that does not populate it
+        -- :func:`plutus.market.expiry.expiry_date` computes the third
+        Thursday of the contract month, which that module records as verified
+        24/24 in-window. Design section 10 lists ``expiry.py`` among the
+        primitives this build reuses; recomputing the rule here instead would
+        be a second copy of it.
+
+        **A position with no expiry never expires**, so ``None`` is not a
+        neutral answer: the contract is margined for the rest of the run,
+        ``ExpirySettled`` can never fire for it, and the position survives its
+        own last trading day. It is still the honest answer for the families
+        ``expiry_date`` does not parse -- it matches ``VN30F`` only, so the
+        government-bond and VN100F codes fall through here and need an
+        explicit ``expiries`` map on the account. That gap is stated rather
+        than papered over with a guessed third Thursday for a contract whose
+        calendar has never been read.
+
+        Resolved per fill and not once at build time. A build-time table would
+        have to be filled in before the session knows which contracts it will
+        trade, and a ticker-keyed table of instrument facts is locked shape 1's
+        forbidden build.
+        """
+        if instrument is not None and instrument.expiry is not None:
+            return instrument.expiry
+        return expiry_date(ticker)
 
     def _derivative_charges(self, fill: Fill,
                             rules: RuleSet) -> Tuple[Charge, ...]:
@@ -1700,7 +2118,21 @@ class ExchangeSession:
         contracts it would close and the price basis -- which is why
         ``liquidation_sequence`` is called and its answer carried in
         ``detail`` even though nothing is closed. ``detail['executed']`` is
-        ``False`` so no reader can mistake the report for the act.
+        ``False`` so no reader can mistake the report for the act. The rule
+        stated is :meth:`_liquidation_rule`, the one this session is actually
+        running, and it decides the shape of the answer: ``LARGEST_LOSS_FIRST``
+        is an *ordering* and reports a ``sequence``; ``PRO_RATA`` is a
+        proportional reduction across every leg and is not an ordering at all,
+        so it reports ``sequence=None`` and names the ``legs`` instead.
+        ``liquidation_sequence`` refuses ``PRO_RATA`` by design and is not
+        asked for one.
+
+        **A stale mark is counted, not smoothed over.** A held contract with no
+        price this session makes the view ``INDETERMINATE``; the monitor does
+        not advance on one, and each such contract is counted under
+        :attr:`DataField.SETTLEMENT_PRICE` so
+        :meth:`indeterminate_report` publishes the blind sessions rather than
+        letting them read as quiet ones.
         """
         positions = self._derivatives.positions()
         resting = self._live_derivative_orders()
@@ -1714,38 +2146,122 @@ class ExchangeSession:
         terms = self._config.broker_profile.terms
         view = self._derivatives.margin(marks, rules, terms, ts,
                                         resting=resting)
+        self._evaluations += 1
+        if view.stale_marks:
+            self._indeterminate += 1
+            for _ in view.stale_marks:
+                self._by_field[DataField.SETTLEMENT_PRICE] = (
+                    self._by_field.get(DataField.SETTLEMENT_PRICE, 0) + 1)
+
         for news in self._monitor.on_mark(self._derivatives, view, rules, ts):
             kind = _EVENT_FOR_MARGIN_STATUS.get(news.status)
             if kind is None:
                 continue
             detail: Dict[str, Any] = {}
             if kind is EventKind.FORCED_LIQUIDATION:
+                rule = self._liquidation_rule()
+                pro_rata = rule is LiquidationRule.PRO_RATA
                 detail = {
-                    'selection_rule': LiquidationRule.LARGEST_LOSS_FIRST,
-                    'sequence': liquidation_sequence(self._derivatives, marks),
+                    'selection_rule': rule,
+                    'sequence': (None if pro_rata else
+                                 liquidation_sequence(self._derivatives,
+                                                      marks, rule)),
+                    'legs': tuple(sorted(self._derivatives.positions())),
                     'price_basis': 'the contract mark at this instant',
                     'deposit_balance': self._derivatives.deposit_balance,
                     'executed': False,
                     'reason': 'Tier 1 reports a forced close and does not '
                               'execute one; the loop is Tier 2',
                 }
+                if pro_rata:
+                    detail['allocation'] = (
+                        'pro rata across every leg. Tier 1 names the legs and '
+                        'does not compute the per-leg quantity: that is an '
+                        'allocation, not an ordering, and there is no '
+                        'sequence to report')
             self._emit(Event.margin(kind, news, self._next_seq(), **detail))
 
         for code, position in list(positions.items()):
             if position.expiry is None or ts.date() < position.expiry:
                 continue
-            settlement = marks.get(code)
+            settlement, source, basis = self._final_settlement(code, ts)
             if settlement is None:
+                self._evaluations += 1
+                self._indeterminate += 1
+                self._by_field[DataField.SETTLEMENT_PRICE] = (
+                    self._by_field.get(DataField.SETTLEMENT_PRICE, 0) + 1)
                 continue
             quantity = position.net_quantity
             cash_flow = self._derivatives.settle_expiry(code, settlement, ts)
             self._emit(Event.expiry_settled(
                 code, ts, self._next_seq(), settlement=settlement,
                 cash_flow=cash_flow, quantity=quantity,
-                price_basis='the data source close on the expiry day, a '
-                            'declared simplification: the exchange publishes '
-                            'a trimmed 14:15-14:45 average, and the '
-                            'settlement basis itself changed on 2022-08-17'))
+                settlement_source=source.value,
+                substituted=source is SettlementSource.CLOSE_PROXY,
+                price_basis=basis))
+
+    def _final_settlement(self, code: str, ts: datetime
+                          ) -> Tuple[Optional[Decimal],
+                                     Optional[SettlementSource], str]:
+        """The price an expiring contract settles at, and which tier gave it.
+
+        The data source's own ``MarketInterval.settlement_price`` first: it is
+        a field of the design section 9 contract and a source that fills it is
+        answering the question that was asked. Only when it is absent does the
+        close stand in, and then the **substitution is recorded on the event**
+        rather than absorbed.
+
+        Recording it is not ceremony. Measured across all 46 post-cutover
+        expiries the close-proxy error against the published settlement is
+        +0.024% mean signed, 0.042% mean absolute and 0.333% at worst: small,
+        one-sided and systematic, which is precisely the profile that
+        disappears into an aggregate unless every substituted row can be
+        excluded. ``expiry.py`` names the same three tiers
+        (:class:`~plutus.market.verdicts.SettlementSource`) and this reuses
+        them so one vocabulary covers the batch path and the session.
+
+        ``PUBLISHED`` here means *the source published one*. This module
+        cannot tell a ``quote_settlementprice`` row from a 14:15-14:45 TWAP
+        the adapter computed; an adapter doing the second should say so on the
+        interval it serves, and ``expiry.SettlementResolver`` is the component
+        that distinguishes them.
+
+        **The expiry day is read, and only the expiry day.** Unlike a mark,
+        which may honestly stand at the last price seen, a final settlement is
+        a price *on a named date* -- it is what the contract is extinguished
+        at. So there is no ``_last_state`` fall-back here: a close carried
+        over from an earlier session is not a worse settlement price, it is a
+        different contract-day's price, and paying it into the deposit would
+        be a fabricated cash flow rather than an approximate one.
+
+        Returns:
+            ``(price, tier, price_basis)``, with ``price`` ``None`` when the
+            source has neither a settlement price nor a close on the expiry
+            day -- in which case nothing is settled, the position stays on the
+            ledger and the caller counts the gap.
+        """
+        state = self._observe(code, ts)
+        interval = (self._interval_for(code, ts, state)
+                    if state is not None else None)
+        if interval is not None and interval.settlement_price is not None:
+            return (interval.settlement_price, SettlementSource.PUBLISHED,
+                    'the final settlement price the data source published for '
+                    'the expiry day')
+        close = None
+        if interval is not None:
+            close = interval.close
+        if close is None and state is not None:
+            close = state.last
+        if close is None:
+            return None, None, ''
+        return (close, SettlementSource.CLOSE_PROXY,
+                'the data source close on the expiry day, standing in for a '
+                'final settlement price the source did not supply. Across the '
+                '46 post-cutover expiries the close proxy runs +0.024% mean '
+                'signed and 0.042% mean absolute against the published '
+                'settlement, 0.333% at worst; the exchange publishes a '
+                'trimmed 14:15-14:45 average and the settlement basis itself '
+                'changed on 2022-08-17')
 
     def _marks(self) -> Dict[str, Decimal]:
         """Current price per held or ordered contract, re-read at :meth:`now`.
@@ -1759,15 +2275,22 @@ class ExchangeSession:
         thing a segregated deposit exists to demonstrate would be silently
         unreachable.
 
-        Where the source has nothing at this instant, the last observed state
-        stands. That is a stale mark, not an invented one, and it is the same
-        fallback ``DerivativesAccount.mark_for`` documents.
+        **Only prices observed at this instant.** Where the source has nothing,
+        the contract is simply absent from the result and
+        ``DerivativesAccount.mark_for`` falls back to its own cache -- which
+        holds the same price, and, unlike ``_last_state``, holds it with the
+        instant it was observed at. That is the whole difference: passing the
+        stale price back in as this session's mark makes
+        ``observe_marks`` re-stamp it current, and an account can then be
+        margined against its entry price for the rest of a run with the view
+        reporting a definite ``OK``. Dropping it here is what lets
+        ``MarginView.stale_marks`` be true.
         """
         codes = set(self._derivatives.positions())
         codes.update(r.order.ticker for r in self._live_derivative_orders())
         marks: Dict[str, Decimal] = {}
         for code in codes:
-            state = self._observe(code, self._now) or self._last_state.get(code)
+            state = self._observe(code, self._now)
             if state is not None and state.last is not None:
                 marks[code] = state.last
         return marks

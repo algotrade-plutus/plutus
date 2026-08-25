@@ -933,6 +933,25 @@ class HardFillPolicy(BaseFillPolicy):
         Reached only once the price test has already said yes, so a missing
         volume is reported as ignorance about *this* order rather than about
         every order in the book.
+
+        **A fill-or-kill order is sized all-or-nothing.** The participation
+        cap is a statement about liquidity, and for an MOK "1,000 of your
+        5,000 would have traded" is not a partial fill -- it is the finding
+        that the order *could not be filled in full*, which rulebook 2.3
+        (ASEANSC HNX 2.3, high) answers with a kill, not with a fill. So the
+        cap binding below the remainder returns ``NO_FILL``, and
+        ``exchange.py``'s ``_decide_immediates`` then expires the order with
+        ``NOT_FILLABLE_IN_FULL``, which is the only terminal edge locked
+        shape 4 gives this time-in-force.
+
+        Returning the partial instead was a reproduced defect: the state
+        machine refuses a partially filled MOK outright, so the proposal was
+        unsatisfiable, and the ledgers had already paid for it by the time
+        the refusal arrived.
+
+        ``NO_FILL`` rather than ``INDETERMINATE`` because the cap *is* the
+        answer: the policy has established how much would have traded, and
+        that quantity is short. Nothing is unknown here.
         """
         if (evidence is FillEvidence.AUCTION_PRICE
                 and interval.resolution is Resolution.DAILY):
@@ -968,6 +987,14 @@ class HardFillPolicy(BaseFillPolicy):
             return FillDecision.no_fill(
                 f'the remaining participation allowance of {cap} is below one '
                 f'round lot of {lot}'
+            )
+        if (order.time_in_force is TimeInForce.FILL_OR_KILL
+                and quantity < order.remaining_quantity):
+            return FillDecision.no_fill(
+                f'a participation cap of {cap} sizes {quantity} of this '
+                f'order\'s {order.remaining_quantity}, and a fill-or-kill '
+                f'order fills in full at entry or is cancelled entirely '
+                f'(rulebook 2.3); it has no partial'
             )
         return FillDecision.fill(quantity, price, evidence)
 

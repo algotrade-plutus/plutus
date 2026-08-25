@@ -762,3 +762,116 @@ def test_a_cash_dividend_pays_on_unsettled_parcels_too():
 
     assert cash_leg == Decimal('3000000')      # 1,500 shares x 2,000 dong
     assert holdings.holding('FPT').total == 1500
+
+
+# --------------------------------------------------------------------------
+# Atomicity -- apply_fill moves all three ledgers or none of them
+# --------------------------------------------------------------------------
+#
+# The defect these pin: ``apply_fill`` mutated the encumbrance ledger and the
+# holdings ledger, and *then* asked the cash ledger for a movement it could
+# refuse. The refusal arrived after the shares were already gone.
+
+#: A broker commission carrying a per-order minimum. Rulebook 8.3 records
+#: that "some firms impose a minimum charge per order" and 12.7 repeats it in
+#: the config schema; both mark it a **broker term**, not an exchange rule.
+#: 200,000 VND is a plausible retail figure and is a fixture value, not a
+#: sourced one.
+MIN_COMMISSION = ChargeRule(
+    charge_id='broker_commission',
+    base=ChargeBase.TRADE_VALUE,
+    side=ChargeSide.BOTH,
+    levied_by=LeviedBy.BROKER,
+    debited_at=DebitedAt.FILL,
+    pool=Pool.SECURITIES,
+    applies_to=frozenset({ChargeClass.EQUITY}),
+    rate=Decimal('0.0015'),
+    minimum=Decimal('200000'),
+)
+MIN_BROKER = BrokerProfile(name='min-commission',
+                           commission=(MIN_COMMISSION,))
+
+
+def test_a_sale_whose_charges_exceed_its_proceeds_still_delivers_the_shares():
+    """A minimum commission on a penny-stock sale nets below zero, and the
+    sale still happens.
+
+    Vietnamese penny stocks quote at 1.0-3.0 thousand dong, so 100 shares at
+    1.0 gross 100,000d against a 200,000d commission minimum. That is an
+    ordinary retail case, not a corner -- and the ledger used to refuse the
+    credit *after* consuming the reservation and debiting the shares, which
+    destroyed 100 shares and recorded neither proceeds nor charges.
+
+    The trade matched at the exchange; a broker's fee schedule cannot
+    un-match it. So the shares leave, every charge is itemised, and the net
+    is a negative tranche that settles against the balance at T+2.
+    """
+    acct = account(holdings={'PENNY': 1000}, profile=MIN_BROKER)
+    acct.reserve_for_sell(OrderId('S'), sell(ticker='PENNY', quantity=100,
+                                             price='1.0'),
+                          Venue.HSX, T0)
+    executed = fill('S', side=Side.SELL, quantity=100, price='1.0',
+                    ticker='PENNY')
+    charges = assess_charges(RULES, MIN_BROKER, executed, ChargeClass.EQUITY)
+    acct.apply_fill(executed, T2_1300, charges)
+    acct.release(OrderId('S'), T0)
+
+    gross = Decimal('100000')                     # 100 x 1.0 thousand dong
+    levied = sum(c.total for c in charges)
+    assert levied == Decimal('200000') + Decimal('100')   # min + 0.1% PIT
+    assert acct.holding('PENNY').settled == 900
+    assert acct.holding('PENNY').committed == 0
+    assert acct.cash().pending_total == gross - levied
+    assert acct.cash().pending_total == Decimal('-100100')
+    # Withheld at source, so recorded and not debited a second time.
+    assert len(acct.cash_ledger.charges()) == 2
+    assert acct.cash().settled_balance == Decimal('150000000')
+
+
+def test_a_negative_net_is_never_advanced_and_accrues_no_interest():
+    """*Ung truoc tien ban* is a loan against money coming in. When the net is
+    negative there is none coming in, so there is nothing to advance and
+    nothing to charge interest on.
+
+    Without this, a broker term switched on for the account would report
+    negative ``advanced``, which would *raise* ``available`` on a sale that
+    lost money, and negative interest, which would pay the investor for
+    owing the broker.
+    """
+    terms = BrokerTerms(advance_on_sale_enabled=True,
+                        advance_on_sale_daily_rate=Decimal('0.0005'))
+    ledger = CashLedger(Decimal('1000000'), terms, EncumbranceLedger())
+    tranche = ledger.credit_pending(Decimal('-100100'), T2_1300, T0)
+
+    assert tranche.advanced is False
+    assert ledger.advanced() == Decimal('0')
+    assert ledger.accrue_interest(T2_1300) == Decimal('0')
+    assert ledger.cash().available == Decimal('1000000')
+
+    ledger.settle_due(T2_1300)
+    assert ledger.cash().settled_balance == Decimal('899900')
+
+
+def test_a_fill_that_cannot_be_paid_for_moves_no_ledger_at_all():
+    """The buy branch's version of the same disease, and its regression test.
+
+    ``apply_fill`` consumed the reservation and credited the unsettled
+    tranche before asking ``CashLedger.debit`` for money the account did not
+    have. The debit's overdraw guard then raised -- after the shares were
+    already on the books.
+
+    A genuine overdraw here is still a bug in the reservation path and still
+    raises. What must not survive is the half-applied fill it used to leave
+    behind.
+    """
+    acct = account(cash=Decimal('1000000'), profile=BROKER)
+    executed = fill('A', quantity=1000, price='95.0')
+    charges = assess_charges(RULES, BROKER, executed, ChargeClass.EQUITY)
+
+    with pytest.raises(ValueError, match='exceeds'):
+        acct.apply_fill(executed, T2_1300, charges)
+
+    assert acct.holding('FPT').total == 0
+    assert acct.holding('FPT').unsettled == ()
+    assert acct.cash().settled_balance == Decimal('1000000')
+    assert acct.cash_ledger.charges() == ()

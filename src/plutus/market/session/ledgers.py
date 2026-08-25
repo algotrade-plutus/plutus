@@ -637,7 +637,7 @@ class CashLedger:
         ts: datetime,
         order_id: Optional[OrderId] = None,
     ) -> ProceedsTranche:
-        """A sell filled: proceeds pend until ``settles_at``.
+        """A sell filled: the net pends until ``settles_at``.
 
         ``amount`` must **already be net of the sell-side charges withheld at
         source**. The 0.1% personal income tax on a securities transfer is
@@ -645,18 +645,34 @@ class CashLedger:
         credits net; carrying gross here and netting later is how a sale ends
         up wrong by more than most commissions.
 
+        **The net may be negative, and that is an ordinary case rather than a
+        contradiction.** A broker per-order minimum (rulebook 8.3 and 12.7,
+        both broker terms) exceeds the gross whenever the sale is small
+        enough, and Vietnamese penny stocks quote at 1.0-3.0 thousand dong.
+        This method used to refuse a negative amount, and the refusal landed
+        *after* ``SecuritiesAccount.apply_fill`` had already removed the
+        shares -- destroying them. The trade matched at the exchange, so it
+        stands: the tranche carries the net with its sign and settles against
+        the balance at T+2 like any other. See
+        :meth:`SecuritiesAccount.apply_fill` for why the fill is not refused
+        instead, and for the declared assumption about *when* the shortfall
+        is collected, which no source states.
+
         When ``terms.advance_on_sale_enabled`` the tranche is marked advanced
         and its amount is spendable immediately, accruing interest at the
-        broker's daily rate until it settles.
+        broker's daily rate until it settles. **A negative net is never
+        advanced**, whatever the terms say. Rulebook 8.3 describes the
+        product as advancing "up to 100% of net proceeds after fees and PIT"
+        -- itself flagged there as an unsourced common description rather
+        than a cap anyone published -- and 100% of a negative net is nothing
+        to lend. Marking one advanced would raise ``available`` on a sale
+        that lost money and accrue negative interest, paying the investor for
+        owing the broker.
         """
-        if amount < 0:
-            raise ValueError(
-                f'sale proceeds must not be negative, got {amount}; charges '
-                f'are netted out of a sale, they do not invert it')
         tranche = ProceedsTranche(
             amount=amount, settles_at=settles_at, accrued_at=ts,
             source_order_id=order_id,
-            advanced=self._terms.advance_on_sale_enabled,
+            advanced=self._terms.advance_on_sale_enabled and amount > 0,
         )
         self._pending.append(tranche)
         return tranche
@@ -1199,7 +1215,63 @@ class SecuritiesAccount:
         sale is treated as withheld, which is how a Vietnamese contract note
         reads -- the 0.1% personal income tax is deducted at source by law and
         commission is settled out of the same proceeds.
+
+        Validate first, then commit
+        ---------------------------
+        The method is in two halves, and the comment marking the boundary is
+        load-bearing: **no statement below it may refuse**. Three ledgers move
+        here and none of them can be un-moved, so every refusal is hoisted
+        above the boundary and evaluated while the account is still untouched.
+
+        This is not hypothetical tidiness. It was a reproduced defect twice
+        over: a sell whose charges exceeded its proceeds zeroed the
+        reservation and removed the shares before ``credit_pending`` refused
+        the negative amount (100 shares destroyed, no proceeds, no charges),
+        and a buy the account could not fund credited its holdings tranche
+        before ``debit`` found the overdraw. The refusals are still refusals
+        -- an overdraw here is a bug in the reservation path, exactly as
+        :meth:`CashLedger.debit` says -- but they now arrive before the
+        account has changed.
+
+        The buy-side guard tests the **whole outlay**, ``value +
+        charge_total``, not the trade value alone: the charges are debited
+        separately below, and a check that ignored them would pass and then
+        fail half-way through the charge loop.
+
+        When the charges exceed the proceeds
+        ------------------------------------
+        A minimum commission on a small sale nets below zero: 100 shares of a
+        1.0-thousand-dong penny stock gross 100,000d against a broker's
+        200,000d per-order minimum. **The fill stands and the net is
+        negative**, debiting the account at settlement.
+
+        The alternative -- refusing the fill -- was rejected because it
+        models a broker's price list as an exchange rule. The trade matched
+        at HSX; the exchange knows nothing of the member's commission
+        schedule, and no member could un-match a trade because its own
+        minimum fee bit. Refusing here would also make ``broker_profile``
+        able to reject orders that ``exchange_rules`` admitted, which is
+        precisely the confusion the two config objects exist to prevent.
+
+        **The rulebook does not settle this.** Section 8.3 records only that
+        "some firms impose a minimum charge per order" and 12.7 repeats it as
+        a broker term (both *medium* confidence, broker-sourced); neither
+        states how the shortfall is collected, or when. That it is collected
+        out of the T+2 settlement rather than debited at the fill is an
+        **assumption**, adopted because it is what the module's "withheld at
+        source" model already says about every other sale -- one tranche, one
+        DVP instant (rulebook 5.1) -- and because inventing a second cash
+        movement would be inventing a mechanism no source describes.
+
+        Raises:
+            ValueError: on a fill this account cannot honour -- a
+                non-positive quantity, a foreign venue, a side with no sign,
+                a charge belonging to the other pool, a buy exceeding
+                spendable cash, or a sell exceeding settled holdings. All are
+                bug detectors for the reservation path, and all fire before
+                any ledger has moved.
         """
+        # -- validate: everything that can refuse, before anything moves --
         if fill.quantity <= 0:
             raise ValueError(f'a fill must move positive quantity, got '
                              f'{fill.quantity}')
@@ -1207,11 +1279,43 @@ class SecuritiesAccount:
             raise ValueError(
                 f'fill on {fill.venue.value} does not belong to the '
                 f'{self.ref.pool.value} pool')
+        if fill.side not in (Side.BUY, Side.SELL):
+            raise ValueError(
+                f'{fill.side} cannot move a securities ledger; Side.CROSS is '
+                f'an exchange-internal marker with no sign')
 
         value = trade_value(fill.venue, fill.quantity, fill.price)
         levied = tuple(charges)
         charge_total = sum((c.total for c in levied), Decimal('0'))
 
+        for charge in levied:
+            if charge.pool is not Pool.SECURITIES:
+                raise ValueError(
+                    f'charge {charge.kind!r} is levied on the '
+                    f'{charge.pool.value} pool and cannot be settled against '
+                    f'securities cash: the pools are segregated and no '
+                    f'auto-transfer exists')
+
+        if fill.side is Side.BUY:
+            outlay = value + charge_total
+            spendable = (self.cash_ledger.cash().settled_balance
+                         + self.cash_ledger.advanced())
+            if outlay > spendable:
+                raise ValueError(
+                    f'buying {fill.quantity} {fill.ticker} costs {outlay} '
+                    f'including {charge_total} of charges, which exceeds '
+                    f'settled plus advanced cash of {spendable}; the '
+                    f'encumbrance taken at accept should have made this '
+                    f'unreachable')
+        else:
+            held = self.holdings_ledger.holding(fill.ticker).settled
+            if fill.quantity > held:
+                raise ValueError(
+                    f'cannot debit {fill.quantity} of {fill.ticker} against '
+                    f'{held} settled: unsettled quantity is never '
+                    f'deliverable, and an overdraw is a short equity position')
+
+        # -- commit: nothing below this line may refuse -------------------
         if fill.side is Side.BUY:
             self.encumbrances.consume(
                 fill.order_id, fill.ts, resource=ResourceKind.CASH,
@@ -1223,7 +1327,7 @@ class SecuritiesAccount:
                                    reason=f'buy {fill.ticker}')
             for charge in levied:
                 self.cash_ledger.levy(charge)
-        elif fill.side is Side.SELL:
+        else:
             self.encumbrances.consume(
                 fill.order_id, fill.ts, resource=ResourceKind.SHARES,
                 quantity=fill.quantity)
@@ -1233,10 +1337,6 @@ class SecuritiesAccount:
                 value - charge_total, settles_at, fill.ts, fill.order_id)
             for charge in levied:
                 self.cash_ledger.levy(charge, debit=False)
-        else:
-            raise ValueError(
-                f'{fill.side} cannot move a securities ledger; Side.CROSS is '
-                f'an exchange-internal marker with no sign')
 
     def release(self, order_id: OrderId, ts: datetime) -> None:
         """The terminal hook, wired to ``OrderBookOfRecord.on_terminal``.

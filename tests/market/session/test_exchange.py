@@ -11,19 +11,25 @@ buy today, try to sell today, and be told exactly why and exactly when the
 shares become sellable.
 """
 
+import json
 from datetime import date, datetime
 from decimal import Decimal
 
 import pytest
 
 from plutus.core.order import OrderType, Side
+from plutus.market.broker import BrokerTerms
 from plutus.market.protocol import (
     BandSource, InstrumentKind, InstrumentSpec, MarketState, Order, Resolution,
     SessionPhase,
 )
 from plutus.market.session import (
-    Accepted, DataField, EventKind, ExchangeSession, MarginStatus,
-    MarketInterval, OrderState, Pool, Rejected, Session, StatefulRule, Venue,
+    Accepted, DataField, EventKind, ExchangeSession, FillDecision,
+    FillEvidence, LiquidationRule, MarginStatus, MarginMonitor, MarketInterval,
+    OrderState, Pool, Rejected, Session, StatefulRule, Venue, parse_config,
+)
+from plutus.market.session.calendar import (
+    CalendarError, weekday_settlement_calendar, weekday_trading_calendar,
 )
 from plutus.market.verdicts import AdmissionRule, Verdict
 
@@ -961,3 +967,858 @@ def test_an_unknown_order_id_raises_rather_than_rejecting():
     session = build()
     with pytest.raises(KeyError):
         session.cancel('PLU-99999999')
+
+
+# --------------------------------------------------------------------------
+# Atomicity -- a fill that cannot be recorded must never have been paid for
+# --------------------------------------------------------------------------
+#
+# Every test below reproduces a defect an independent reviewer found against a
+# live session: the ledgers moved, the state machine then refused, and nothing
+# rolled back. They are grouped because they are one disease -- irreversible
+# ledger mutation performed before the operation is known to be legal -- and
+# they must keep failing if that ordering is ever restored.
+
+PENNY_ROWS = {
+    ('PENNY', D1): market('PENNY', D1, Decimal('1.0')),
+    ('PENNY', D2): market('PENNY', D2, Decimal('1.0')),
+}
+HNX_ROWS = {
+    ('SHS', D1): market('SHS', D1, Decimal('98.0')),
+    ('SHS', D2): market('SHS', D2, Decimal('98.0')),
+}
+ATOMIC_KINDS = {**KINDS,
+                'SHS': ('HNX', InstrumentKind.STOCK),
+                'PENNY': ('HSX', InstrumentKind.STOCK)}
+
+
+class UndersizingPolicy:
+    """A caller-supplied policy that proposes a fill the book must refuse.
+
+    ``FillPolicy`` is a **structural** protocol, deliberately: design section
+    8 promises a caller may ship a fill model of their own without inheriting
+    anything of ours. That promise is exactly why the session cannot assume
+    the decision it is handed is legal -- a third-party policy that under-sizes
+    a fill-or-kill order is reachable by construction, not by our own bug.
+
+    Sizing to ``quantity`` regardless of the order is the whole trick; it
+    stands in for any policy that hands back a partial fill of an order whose
+    time-in-force forbids one.
+    """
+
+    kind = 'undersizing'
+    signature = 'undersizing'
+
+    def __init__(self, quantity):
+        self.quantity = quantity
+        self.calls = 0
+
+    def evaluate(self, order, interval, rules, *, already_filled=0,
+                 instrument=None):
+        self.calls += 1
+        return FillDecision.fill(self.quantity, interval.close,
+                                 FillEvidence.MODELLED)
+
+
+def atomic_session(rows, bars, policy=None, cash=1_000_000_000,
+                   deposit=30_000_000, holdings=None, broker=None,
+                   kind='hard'):
+    """A session over HSX + HNX + HNXDS with bars rich enough to size a fill.
+
+    Built through :meth:`ExchangeSession.build` rather than
+    ``from_mapping`` because two of these tests need what a config file
+    cannot express: an injected fill policy, and opening settled holdings.
+
+    ``kind='soft'`` is for the tests that are about the *charge* arithmetic
+    rather than about sizing: Soft fills the whole remainder off a bare
+    ``MarketState``, so those tests need no volume and say nothing about a
+    participation cap they do not care about.
+    """
+    source = BarSource({**EQUITY_ROWS, **rows}, bars, ATOMIC_KINDS)
+    overrides = {
+        'exchange_rules': {'venues': ['HSX', 'HNX', 'HNXDS'],
+                           'rulebook': 'vn-2020-2026'},
+        'fill_policy': ({'kind': 'hard', 'max_participation': 0.10}
+                        if kind == 'hard' else {'kind': kind}),
+        'accounts': {'securities': {'initial_cash': cash},
+                     'derivatives': {'initial_deposit': deposit}},
+    }
+    if broker is not None:
+        overrides['broker_profile'] = broker
+    return ExchangeSession.build(
+        parse_config(config(**overrides)), source=source,
+        fill_policy=policy, initial_holdings=holdings)
+
+
+def ledger_state(session, tickers=()):
+    """Every number a fill moves, as one comparable tuple.
+
+    Asserting on this rather than on one balance is the point: the defect was
+    that *some* of these moved and the rest did not, so a test that watched
+    only the cash balance would have passed while shares appeared out of
+    nowhere.
+    """
+    cash = session.cash()
+    return (cash.settled_balance, cash.committed, cash.pending_total,
+            session.margin().deposit_balance,
+            tuple(sorted((c, p.net_quantity)
+                         for c, p in session.positions().items())),
+            tuple((t, session.holdings(t).settled,
+                   session.holdings(t).unsettled_quantity) for t in tickers))
+
+
+def assert_invariant_4(session, tickers=()):
+    """Section 12 invariant 4, read from the caller-facing API only.
+
+    The sum of encumbrance carried on the **records** equals the **ledgers'**
+    committed totals. The two are stored in different objects and updated by
+    different code paths, which is precisely why they can disagree: the
+    defect this file pins left a record claiming 524,441,561d of reserved
+    cash while the ledger had consumed it down to 419,553,248.80d.
+    """
+    live = [r for r in session.orders() if not r.is_terminal]
+    assert (sum((r.encumbered_cash for r in live), Decimal('0'))
+            == session.cash().committed)
+    assert (sum((r.encumbered_deposit for r in live), Decimal('0'))
+            == session.margin().resting_order_margin)
+    for ticker in tickers:
+        committed = sum(r.encumbered_quantity for r in live
+                        if r.order.ticker == ticker)
+        assert committed == session.holdings(ticker).committed
+
+
+def test_an_undersized_mok_is_killed_rather_than_partly_filled():
+    """Fill-or-kill means fillable in full or cancelled entirely (rulebook 2.3).
+
+    ``HardFillPolicy`` sizes a fill at ``floor_to_lot(min(remaining, cap))``.
+    On a 10,000-share bar at a 10% participation cap that is 1,000 shares of
+    a 5,000-share order -- and for an MOK "1,000 of your 5,000" is not a
+    partial fill, it is the statement that the order **could not be filled in
+    full**. The only outcome that rule permits is a kill.
+
+    Before this was fixed the policy proposed the partial anyway, the
+    securities ledger paid for 1,000 shares, and the state machine then
+    refused the fill with the order still ``ACCEPTED`` at zero filled.
+    """
+    bars = {('SHS', D1): (Decimal('97.0'), Decimal('99.0'), Decimal('98.0'),
+                          10000)}
+    session = atomic_session(HNX_ROWS, bars)
+    session.advance_to(datetime(2024, 6, 3, 9, 30))
+    ack = session.submit(Order(ticker='SHS', side=Side.BUY, quantity=5000,
+                               order_type=OrderType.MARKET_FILL_OR_KILL,
+                               limit_price=Decimal('98')))
+    assert isinstance(ack, Accepted)
+
+    events = session.advance_to(datetime(2024, 6, 3, 14, 0))
+
+    assert [e.detail['trigger'] for e in events
+            if e.kind is EventKind.EXPIRED] == ['not_fillable_in_full']
+    assert not [e for e in events if e.kind is EventKind.FILLED]
+    record = session.orders()[0]
+    assert record.state is OrderState.EXPIRED
+    assert record.filled_quantity == 0
+    # Nothing was bought, so nothing was paid for and nothing stays reserved.
+    assert session.holdings('SHS').total == 0
+    assert session.cash().settled_balance == Decimal('1000000000')
+    assert session.cash().committed == Decimal('0')
+    assert_invariant_4(session, tickers=('SHS',))
+
+
+def test_a_fill_the_book_refuses_moves_no_ledger_at_all():
+    """The atomicity guarantee, stated as a test: all of it, or none of it.
+
+    A policy that under-sizes an MOK is refused by ``OrderBookOfRecord``, and
+    the refusal must arrive **before** any ledger has moved. Before the fix
+    the securities account had already consumed the reservation, credited an
+    unsettled tranche and debited 98,173,540d when the book raised, leaving
+    the session holding shares no order had bought.
+
+    The raise itself is kept -- an illegal decision is a bug in the policy,
+    not a market event, and the house idiom for "the reservation path should
+    have made this unreachable" is a ``ValueError``, not a silent skip.
+    """
+    bars = {('SHS', D1): (Decimal('97.0'), Decimal('99.0'), Decimal('98.0'),
+                          10000)}
+    session = atomic_session(HNX_ROWS, bars, policy=UndersizingPolicy(1000))
+    session.advance_to(datetime(2024, 6, 3, 9, 30))
+    ack = session.submit(Order(ticker='SHS', side=Side.BUY, quantity=5000,
+                               order_type=OrderType.MARKET_FILL_OR_KILL,
+                               limit_price=Decimal('98')))
+    assert isinstance(ack, Accepted)
+    before = ledger_state(session, tickers=('SHS',))
+
+    with pytest.raises(ValueError, match='fill-or-kill'):
+        session.advance_to(datetime(2024, 6, 3, 14, 0))
+
+    assert ledger_state(session, tickers=('SHS',)) == before
+    assert session.orders()[0].filled_quantity == 0
+    assert_invariant_4(session, tickers=('SHS',))
+
+
+def test_a_refused_fill_does_not_drain_the_account_on_every_advance():
+    """The leak repeated: each advance spent another 98m and credited 1,000
+    more shares, because nothing about the failure was remembered and nothing
+    was undone.
+
+    Two advances are the minimum that can show it, and the balance after the
+    second must equal the balance after the first -- which, since neither may
+    move at all, is the opening balance.
+    """
+    bars = {('SHS', D1): (Decimal('97.0'), Decimal('99.0'), Decimal('98.0'),
+                          10000)}
+    session = atomic_session(HNX_ROWS, bars, policy=UndersizingPolicy(1000))
+    session.advance_to(datetime(2024, 6, 3, 9, 30))
+    session.submit(Order(ticker='SHS', side=Side.BUY, quantity=5000,
+                         order_type=OrderType.MARKET_FILL_OR_KILL,
+                         limit_price=Decimal('98')))
+    before = ledger_state(session, tickers=('SHS',))
+
+    for hour in (14, 15):
+        with pytest.raises(ValueError, match='fill-or-kill'):
+            session.advance_to(datetime(2024, 6, 3, hour, 0))
+        assert ledger_state(session, tickers=('SHS',)) == before
+        assert session.holdings('SHS').total == 0
+        assert_invariant_4(session, tickers=('SHS',))
+
+
+def test_a_refused_fill_opens_no_futures_position_either():
+    """The derivatives variant, and the worse half of the defect.
+
+    On the deposit side the pre-refusal work is not merely a debit: it nets
+    the ``ContractLedger``, realises the close-out into the deposit balance
+    and consumes the order's margin encumbrance. A refusal after that leaves
+    an **open futures position that no order created** -- a 10-contract long
+    against an order still reporting zero filled.
+
+    Locked shape 5 makes that unusually expensive: margin takes the whole
+    account, so a phantom position mis-states the margin requirement for
+    every other contract too.
+    """
+    bars = {('VN30F2406', D1): (Decimal('1240'), Decimal('1260'),
+                                Decimal('1250'), 100)}
+    session = atomic_session(FUTURES_ROWS, bars, policy=UndersizingPolicy(10),
+                             deposit=2_000_000_000)
+    session.advance_to(datetime(2024, 6, 3, 9, 30))
+    ack = session.submit(Order(ticker='VN30F2406', side=Side.BUY, quantity=20,
+                               order_type=OrderType.MARKET_FILL_OR_KILL,
+                               limit_price=Decimal('1250')))
+    assert isinstance(ack, Accepted)
+    before = ledger_state(session)
+
+    with pytest.raises(ValueError, match='fill-or-kill'):
+        session.advance_to(datetime(2024, 6, 3, 14, 0))
+
+    assert session.positions() == {}
+    assert ledger_state(session) == before
+    assert session.orders()[0].filled_quantity == 0
+    assert_invariant_4(session)
+
+
+def test_a_sale_whose_charges_exceed_its_proceeds_does_not_destroy_shares():
+    """A minimum commission on a tiny sale is an ordinary Vietnamese case.
+
+    Penny stocks quote at 1.0-3.0 thousand dong and some brokers impose a
+    per-order minimum (rulebook 8.3 and 12.7, both **broker terms**). Selling
+    100 shares at 1.0 grosses 100,000d against a 200,000d minimum, so the net
+    is negative -- and the ledger used to refuse the credit *after* it had
+    already zeroed the reservation and removed the shares. 100 shares were
+    destroyed, with no proceeds and no charges recorded.
+
+    The trade matched at HSX, so it stands: the shares leave, the charges are
+    itemised, and the net debits the account.
+    """
+    broker = {'name': 'min-commission',
+              'commission': [{'venue': 'HSX', 'base': 'trade_value',
+                              'rate': 0.0015, 'min': 200000}]}
+    session = atomic_session(PENNY_ROWS, {}, holdings={'PENNY': 1000},
+                             broker=broker, kind='soft')
+    session.advance_to(datetime(2024, 6, 3, 9, 30))
+    ack = session.submit(Order(ticker='PENNY', side=Side.SELL, quantity=100,
+                               order_type=OrderType.LIMIT,
+                               limit_price=Decimal('1.0')))
+    assert isinstance(ack, Accepted)
+
+    events = session.advance_to(datetime(2024, 6, 3, 14, 0))
+    assert [e.kind for e in events if e.kind is EventKind.FILLED]
+
+    holding = session.holdings('PENNY')
+    assert holding.settled == 900          # sold, not destroyed
+    assert holding.committed == 0
+    assert session.orders()[0].state is OrderState.FILLED
+
+    # 100 shares x 1.0 thousand dong = 100,000d gross, less a 200,000d
+    # commission minimum and the 0.1% transfer tax withheld at source.
+    charged = sum(c.total for c in session.charges())
+    assert charged > Decimal('100000')
+    assert session.cash().pending_total == Decimal('100000') - charged
+    assert session.cash().pending_total < Decimal('0')
+    assert_invariant_4(session, tickers=('PENNY',))
+
+
+def test_the_negative_net_settles_against_the_balance_at_t_plus_2():
+    """The shortfall is collected on the settlement leg, like any other net.
+
+    It is not a separate cash movement at the fill: the whole point of the
+    module's "withheld at source" model is that a sale produces exactly one
+    tranche, and DVP moves it at one instant (rulebook 5.1). A negative
+    tranche is that same tranche with a sign.
+    """
+    broker = {'name': 'min-commission',
+              'commission': [{'venue': 'HSX', 'base': 'trade_value',
+                              'rate': 0.0015, 'min': 200000}]}
+    session = atomic_session(PENNY_ROWS, {}, holdings={'PENNY': 1000},
+                             broker=broker, kind='soft')
+    session.advance_to(datetime(2024, 6, 3, 9, 30))
+    session.submit(Order(ticker='PENNY', side=Side.SELL, quantity=100,
+                         order_type=OrderType.LIMIT,
+                         limit_price=Decimal('1.0')))
+    session.advance_to(datetime(2024, 6, 3, 14, 0))
+    shortfall = session.cash().pending_total
+    assert shortfall < Decimal('0')
+    opening = session.cash().settled_balance
+
+    session.advance_to(datetime(2024, 6, 5, 13, 0))
+    assert session.cash().pending_total == Decimal('0')
+    assert session.cash().settled_balance == opening + shortfall
+    # An advance is a loan against money coming in; there is none coming in.
+    assert session.cash().advanced == Decimal('0')
+
+
+def test_the_record_and_the_ledger_agree_on_every_path_including_failed_ones():
+    """Invariant 4 held at every step of one run that walks all of them.
+
+    Accepted, partially filled, cancelled, expired, killed as not fillable in
+    full, and -- the one the defect broke -- an advance that raised part-way
+    through. The record's ``encumbered_cash`` is read from the order book and
+    the committed total from the encumbrance ledger; they are two objects
+    updated by two code paths, and this is the assertion that stops them
+    drifting.
+    """
+    bars = {('FPT', D1): (Decimal('95.0'), Decimal('96.5'), Decimal('95.5'),
+                          5000),
+            ('SHS', D1): (Decimal('97.0'), Decimal('99.0'), Decimal('98.0'),
+                          10000)}
+    session = atomic_session(HNX_ROWS, bars)
+    watched = ('FPT', 'SHS')
+
+    session.advance_to(datetime(2024, 6, 3, 9, 30))
+    assert_invariant_4(session, watched)
+
+    # accepted, then partially filled at the participation cap
+    partial = session.submit(buy(price='96.0'))
+    assert_invariant_4(session, watched)
+    session.advance_to(datetime(2024, 6, 3, 10, 0))
+    assert session.orders(state=OrderState.PARTIALLY_FILLED)
+    assert_invariant_4(session, watched)
+
+    # a live sell, so shares and cash are encumbered at the same instant
+    session.advance_to(datetime(2024, 6, 5, 13, 0))
+    assert_invariant_4(session, watched)
+    sold = session.submit(sell(quantity=100, price='96.5'))
+    assert isinstance(sold, Accepted)
+    assert_invariant_4(session, watched)
+
+    # cancelled
+    session.cancel(sold.order_id)
+    assert_invariant_4(session, watched)
+    session.cancel(partial.order_id)
+    assert_invariant_4(session, watched)
+    assert session.cash().committed == Decimal('0')
+
+    # and a failed path: the book refuses the policy's decision mid-advance
+    broken = atomic_session(HNX_ROWS, bars, policy=UndersizingPolicy(1000))
+    broken.advance_to(datetime(2024, 6, 3, 9, 30))
+    broken.submit(Order(ticker='SHS', side=Side.BUY, quantity=5000,
+                        order_type=OrderType.MARKET_FILL_OR_KILL,
+                        limit_price=Decimal('98')))
+    assert_invariant_4(broken, watched)
+    with pytest.raises(ValueError):
+        broken.advance_to(datetime(2024, 6, 3, 14, 0))
+    assert_invariant_4(broken, watched)
+
+
+# --------------------------------------------------------------------------
+# The dated admission rules the session used to resolve from a singleton
+#
+# TICK_GRID and MAX_ORDER_SIZE both reach `submit()` through the rulebook now.
+# Every test below fails against a session that judges the grid with
+# `ExchangeSpec.tick_size_function` (one flat 0.1 per venue, no date, no
+# instrument kind, no contract family) or that never asks for a size cap.
+# --------------------------------------------------------------------------
+
+#: A 5-year government bond future and an HNX ETF -- the two instruments whose
+#: real tick is nowhere near the singleton's flat 0.1. GB05 quotes VND on a
+#: 100,000d face and steps 1 VND; FUEHNX01 steps 0.001 (1d) from 2022-03-31.
+TICK_ROWS = {
+    ('GB05F2306', D1): market('GB05F2306', D1, Decimal('100523'),
+                              band=Decimal('0.03')),
+    ('FUEHNX01', D1): market('FUEHNX01', D1, Decimal('15.5'),
+                             band=Decimal('0.07')),
+}
+TICK_KINDS = {**KINDS,
+              'GB05F2306': ('HNXDS', InstrumentKind.FUTURE),
+              'FUEHNX01': ('HNX', InstrumentKind.FUND),
+              'SHS': ('HNX', InstrumentKind.STOCK)}
+
+
+def tick_session(rows=None, **overrides):
+    """A session over HSX + HNX + HNXDS holding the tick-grid instruments."""
+    payload = {'exchange_rules': {'venues': ['HSX', 'HNX', 'HNXDS'],
+                                  'rulebook': 'vn-2020-2026'}}
+    payload.update(overrides)
+    source = StubSource({**EQUITY_ROWS, **(rows if rows is not None
+                                           else TICK_ROWS)}, TICK_KINDS)
+    return ExchangeSession.from_mapping(config(**payload), source=source)
+
+
+def test_a_government_bond_future_is_judged_on_its_own_one_vnd_grid():
+    """GB05 steps 1 VND, and 100,523.5 is off that grid.
+
+    The tick of an HNXDS contract is a **contract-template** value, not a
+    venue value: VN30F steps 0.1 INDEX POINT and GB05 steps 1 VND on a
+    100,000d face. The rulebook row for the bond futures says so in terms --
+    "the same numeral as the index tick attached to a different unit, exactly
+    the error a venue-keyed lookup makes" -- and a venue-keyed lookup is what
+    ``ExchangeSpec`` is: one flat ``Decimal('0.1')`` for everything HNXDS
+    lists, at every date.
+
+    Under that singleton 100,523.5 is a legal price (a multiple of 0.1) and
+    the order is ADMITTED with ``rule=None``. It is not a legal price: HNX
+    would refuse it, and a simulator that accepts it reports a fill that
+    could never have happened.
+    """
+    session = tick_session()
+    session.advance_to(datetime(2024, 6, 3, 9, 30))
+    refusal = session.submit(Order(
+        ticker='GB05F2306', side=Side.BUY, quantity=1,
+        order_type=OrderType.LIMIT, limit_price=Decimal('100523.5')))
+
+    assert isinstance(refusal, Rejected)
+    assert refusal.rule is AdmissionRule.TICK_GRID
+    assert refusal.binding_constraint == Decimal('1')
+    assert refusal.verdict is Verdict.REJECTED
+    # A price ON the 1-VND grid gets past the grid rule. It may still be
+    # refused further down the sequence (a bond future is margined at a
+    # 100,000d multiplier and this deposit is small), but not on the tick.
+    on_grid = session.submit(Order(
+        ticker='GB05F2306', side=Side.BUY, quantity=1,
+        order_type=OrderType.LIMIT, limit_price=Decimal('100523')))
+    assert not (isinstance(on_grid, Rejected)
+                and on_grid.rule is AdmissionRule.TICK_GRID)
+
+
+def test_an_hnx_etf_is_not_refused_on_a_grid_a_hundred_times_too_coarse():
+    """HNX's ETF tick is 0.001 from 2022-03-31, so 15.501 is a legal price.
+
+    The mirror image of the government-bond defect, and the one that costs
+    orders rather than admitting impossible ones: VNX QD 17 Phu luc III S2.2
+    makes the HNX ETF tick 1d where the share grid is 100d, and the
+    ``ExchangeSpec`` singleton returns 100d for every HNX instrument. Every
+    legal ETF price that is not also a multiple of 100d -- 99 out of every
+    100 of them -- comes back ``Rejected(TICK_GRID, binding_constraint=0.1)``.
+    """
+    session = tick_session()
+    session.advance_to(datetime(2024, 6, 3, 9, 30))
+    ack = session.submit(Order(
+        ticker='FUEHNX01', side=Side.BUY, quantity=100,
+        order_type=OrderType.LIMIT, limit_price=Decimal('15.501')))
+
+    assert isinstance(ack, Accepted), getattr(ack, 'detail', ack)
+    assert ack.venue is Venue.HNX
+
+
+def test_an_unresolved_tick_is_indeterminate_and_countable_by_rule():
+    """A tick the rulebook cannot supply is a data gap, not a rule saying no.
+
+    HNX's ETF tick is sourced only from 2022-03-31; before that the rulebook
+    carries no row, so ``RuleSet.tick_size`` raises ``UnresolvedRule``. The
+    session must turn that into ``Rejected(verdict=INDETERMINATE)`` filed
+    under ``TICK_GRID`` -- the mapping ``_RULE_FOR_RULENAME`` has always
+    carried and no session path could ever reach, because the grid was judged
+    against a singleton that answers every question.
+    """
+    early = date(2021, 6, 15)          # a Tuesday, before the HNX ETF row
+    rows = {('FUEHNX01', early): market('FUEHNX01', early, Decimal('15.5'))}
+    session = tick_session(rows, period={'start': '2021-06-15',
+                                         'end': '2021-06-30'})
+    session.advance_to(datetime(2021, 6, 15, 9, 30))
+    refusal = session.submit(Order(
+        ticker='FUEHNX01', side=Side.BUY, quantity=100,
+        order_type=OrderType.LIMIT, limit_price=Decimal('15.5')))
+
+    assert isinstance(refusal, Rejected)
+    assert refusal.rule is AdmissionRule.TICK_GRID
+    assert refusal.verdict is Verdict.INDETERMINATE
+    assert refusal.detail['unresolved_rule'] == 'tick_size'
+    assert session.indeterminate_report().by_rule['tick_grid'] == 1
+
+
+def test_a_million_share_hose_order_breaches_the_dated_cap():
+    """HOSE caps one matching order at 500,000 units from 2021-01-04.
+
+    ``RuleSet.max_order_size`` carried the number and had exactly one caller
+    in the repository -- its own test -- so a 1,000,000-share FPT order was
+    admitted on funding alone. The rulebook's own summary names this: "a
+    10,000,000-share HOSE order would be admitted".
+
+    The cap binds **before** the reservation, which is why this session is
+    funded for the order it refuses: a size the exchange will not take is not
+    a question about the account.
+    """
+    session = build()
+    session.advance_to(datetime(2024, 6, 3, 9, 30))
+    refusal = session.submit(buy(quantity=1_000_000, price='95.5'))
+
+    assert isinstance(refusal, Rejected)
+    assert refusal.rule is AdmissionRule.SESSION_SEMANTICS
+    assert refusal.binding_constraint == 500_000
+    assert refusal.verdict is Verdict.REJECTED
+    assert refusal.detail['quantity'] == 1_000_000
+    # It is a cap, not a ban: the largest legal order is not refused on size.
+    at_the_cap = session.submit(buy(quantity=500_000, price='95.5'))
+    assert not (isinstance(at_the_cap, Rejected)
+                and at_the_cap.rule is AdmissionRule.SESSION_SEMANTICS)
+
+
+def test_the_futures_cap_is_five_hundred_contracts_not_five_hundred_thousand():
+    """The cap is per venue and dated, so HNXDS gets its own number.
+
+    500 CONTRACTS per order on every listed futures contract, from the HNX
+    contract templates. Reading HOSE's 500,000 here -- or reading nothing --
+    admits an order three orders of magnitude larger than the exchange takes.
+    """
+    session = build({**EQUITY_ROWS, **FUTURES_ROWS})
+    session.advance_to(datetime(2024, 6, 3, 9, 30))
+    refusal = session.submit(Order(
+        ticker='VN30F2406', side=Side.BUY, quantity=501,
+        order_type=OrderType.LIMIT, limit_price=Decimal('1250')))
+
+    assert isinstance(refusal, Rejected)
+    assert refusal.rule is AdmissionRule.SESSION_SEMANTICS
+    assert refusal.binding_constraint == 500
+
+
+def test_an_unsourced_cap_refuses_nothing_and_says_so():
+    """HNX and UPCoM publish no cap, and UNKNOWN must not become a refusal.
+
+    "No cap" is an inference from HOSE's clause being HOSE-specific, so the
+    rulebook records the absence rather than a number. A session that turned
+    that absence into ``INDETERMINATE`` would refuse **every** HNX and UPCoM
+    order in the run and report a research gap as a market rule -- the exact
+    inversion this package exists to prevent. The gap is declared in
+    ``_size_here``'s docstring instead.
+    """
+    rows = {('SHS', D1): market('SHS', D1, Decimal('98.0'))}
+    session = tick_session(rows, accounts={
+        'securities': {'initial_cash': 100_000_000_000},
+        'derivatives': {'initial_deposit': 30_000_000}})
+    session.advance_to(datetime(2024, 6, 3, 9, 30))
+    ack = session.submit(Order(ticker='SHS', side=Side.BUY, quantity=600_000,
+                               order_type=OrderType.LIMIT,
+                               limit_price=Decimal('98')))
+    assert isinstance(ack, Accepted), getattr(ack, 'detail', ack)
+
+
+# --------------------------------------------------------------------------
+# Expiry -- the contract has a last trading day and the session knows it
+# --------------------------------------------------------------------------
+
+#: VN30F2406's last trading day: the third Thursday of June 2024.
+JUN_EXPIRY = date(2024, 6, 20)
+
+
+class SettlingSource(StubSource):
+    """A source that publishes a final settlement price on the expiry day.
+
+    ``MarketInterval.settlement_price`` is a field of the section 9 data
+    contract that no shipped adapter fills, so this stub is the only thing in
+    the suite that exercises the *supplied* branch. It serves an interval on
+    one named day and ``None`` everywhere else, so every other advance still
+    runs the synthesised-interval path the rest of the file pins.
+    """
+
+    def __init__(self, rows, kinds=None, settlements=None):
+        super().__init__(rows, kinds)
+        self._settlements = dict(settlements or {})
+
+    def interval(self, ticker, start, end, *, resolution):
+        price = self._settlements.get((ticker, start.date()))
+        if price is None:
+            return None
+        state = self.state_at(ticker, start)
+        return MarketInterval(
+            ticker=ticker, start=start, end=end, resolution=resolution,
+            state=state, close=state.last if state else None,
+            settlement_price=price)
+
+
+def expiry_rows(last=Decimal('1300')):
+    return {('VN30F2406', D1): market('VN30F2406', D1, Decimal('1250')),
+            ('VN30F2406', JUN_EXPIRY): market('VN30F2406', JUN_EXPIRY, last)}
+
+
+def opened_future(session):
+    """One long VN30F2406 opened at 1250 on D1, carried to the expiry."""
+    session.advance_to(datetime(2024, 6, 3, 9, 30))
+    assert isinstance(
+        session.submit(buy(ticker='VN30F2406', quantity=1, price='1250')),
+        Accepted)
+    session.advance_to(datetime(2024, 6, 3, 14, 0))
+    assert session.positions()['VN30F2406'].net_quantity == 1
+    return session
+
+
+def test_a_futures_contract_carries_its_last_trading_day():
+    """``expiry.py`` computes it 24/24 in-window; the position must carry it.
+
+    A ``ContractPosition`` whose ``expiry`` is ``None`` can never reach
+    ``ExpirySettled``, so the contract is margined for the rest of the run --
+    past a last trading day the same repository computes exactly. The value is
+    resolved at the fill, not read from a build-time table.
+    """
+    session = opened_future(build(rows=expiry_rows()))
+    assert session.positions()['VN30F2406'].expiry == JUN_EXPIRY
+
+
+def test_the_position_settles_on_its_expiry_day_and_leaves_the_ledger():
+    """Design section 7.4: cash moves, the row goes, ``ExpirySettled`` fires.
+
+    Marked from the variation-margin reference -- 1250, the opening price,
+    since no daily settlement has run -- to the final settlement at 1300, so
+    one contract at 100,000 VND a point pays 5,000,000 into the deposit.
+    """
+    session = opened_future(build(rows=expiry_rows()))
+    deposit_before = session.margin().deposit_balance
+
+    events = session.advance_to(datetime(2024, 6, 20, 14, 45))
+    settled = [e for e in events if e.kind is EventKind.EXPIRY_SETTLED]
+    assert len(settled) == 1
+    assert settled[0].ticker == 'VN30F2406'
+    assert settled[0].price == Decimal('1300')
+    assert settled[0].amount == Decimal('5000000')
+    assert settled[0].pool is Pool.DERIVATIVES
+
+    assert 'VN30F2406' not in session.positions()
+    assert session.margin().deposit_balance == (deposit_before
+                                                + Decimal('5000000'))
+    assert session.margin().required == Decimal('0')
+
+
+def test_the_close_proxy_substitution_is_recorded_and_never_silent():
+    """A close standing in for a settlement price is a *substitution*.
+
+    Measured against every one of the 46 post-cutover expiries the close-proxy
+    error is +0.024% mean signed, 0.042% mean absolute and 0.333% at worst --
+    small, systematic and one-sided, which is exactly the kind of error a
+    reader must be told about rather than one that can be absorbed. So the
+    event says which tier produced its price.
+    """
+    substituted = opened_future(build(rows=expiry_rows()))
+    events = substituted.advance_to(datetime(2024, 6, 20, 14, 45))
+    proxied = [e for e in events if e.kind is EventKind.EXPIRY_SETTLED][0]
+    assert proxied.detail['substituted'] is True
+    assert proxied.detail['settlement_source'] == 'close_proxy'
+    assert proxied.price == Decimal('1300')
+
+    published = ExchangeSession.from_mapping(
+        config(), source=SettlingSource(
+            expiry_rows(), KINDS,
+            {('VN30F2406', JUN_EXPIRY): Decimal('1281.36')}))
+    opened_future(published)
+    events = published.advance_to(datetime(2024, 6, 20, 14, 45))
+    real = [e for e in events if e.kind is EventKind.EXPIRY_SETTLED][0]
+    assert real.detail['substituted'] is False
+    assert real.detail['settlement_source'] == 'published'
+    assert real.price == Decimal('1281.36')
+
+
+def test_an_expiry_with_no_price_at_all_is_indeterminate_not_invented():
+    """No settlement price and no close: the row stays and the gap is counted.
+
+    Settling on a price nobody observed would put a fabricated cash flow in
+    the deposit. ``DataField.SETTLEMENT_PRICE`` is the field that was missing
+    and the report is where it is published.
+    """
+    rows = {('VN30F2406', D1): market('VN30F2406', D1, Decimal('1250'))}
+    session = opened_future(build(rows=rows))
+    events = session.advance_to(datetime(2024, 6, 20, 14, 45))
+
+    assert [e for e in events if e.kind is EventKind.EXPIRY_SETTLED] == []
+    assert 'VN30F2406' in session.positions()
+    report = session.indeterminate_report()
+    assert report.by_field.get(DataField.SETTLEMENT_PRICE, 0) > 0
+
+
+# --------------------------------------------------------------------------
+# The settlement calendar the caller supplied
+# --------------------------------------------------------------------------
+
+#: VSDC Announcement 4228/TB-VSDC: the depository was shut 2026-02-16 through
+#: 2026-02-20, so T+2 of a 2026-02-12 trade settled 2026-02-23 and not the
+#: 2026-02-16 a weekday-only calendar counts to.
+TET_2026 = ['2026-02-16', '2026-02-17', '2026-02-18', '2026-02-19',
+            '2026-02-20']
+
+
+def tet_calendar_file(tmp_path):
+    path = tmp_path / 'vsdc-2026.json'
+    path.write_text(json.dumps({
+        'calendar_id': 'vsdc-2026',
+        'coverage': ['2026-01-01', '2026-12-31'],
+        'holidays': TET_2026,
+        'source': 'VSDC Announcement 4228/TB-VSDC',
+    }), encoding='utf-8')
+    return path
+
+
+def test_a_configured_settlement_calendar_is_loaded_and_not_ignored(tmp_path):
+    """``data.settlement_calendar`` is the remedy; parsing it and dropping it
+    is worse than not offering the field.
+
+    A caller who supplies the real VSDC notice must not silently run on the
+    weekday-only calendar whose id says ``UNSOURCED`` -- and the provenance
+    record is where the substitution would have hidden.
+    """
+    day = date(2026, 2, 12)
+    session = build(period={'start': '2026-02-09', 'end': '2026-02-27'},
+                    rows={('FPT', day): market('FPT', day, Decimal('95.5'))},
+                    data={'settlement_calendar': str(
+                        tet_calendar_file(tmp_path))})
+    assert session.provenance().settlement_calendar_id == 'vsdc-2026'
+
+
+def test_the_tet_closure_moves_the_settlement_the_caller_asked_for(tmp_path):
+    """The whole point of loading it: T+2 of 2026-02-12 is 2026-02-23.
+
+    The weekday-only default counts five days the depository was shut and
+    answers 2026-02-16 -- a week early, and wrong in the direction that lets a
+    backtest sell shares it does not have.
+    """
+    day = date(2026, 2, 12)
+    rows = {('FPT', day): market('FPT', day, Decimal('95.5'))}
+    session = build(period={'start': '2026-02-09', 'end': '2026-02-27'},
+                    rows=rows,
+                    data={'settlement_calendar': str(
+                        tet_calendar_file(tmp_path))})
+    session.advance_to(datetime(2026, 2, 12, 9, 30))
+    assert isinstance(session.submit(buy()), Accepted)
+    session.advance_to(datetime(2026, 2, 12, 14, 0))
+
+    refusal = session.submit(sell(price='95.5'))
+    assert isinstance(refusal, Rejected)
+    assert refusal.rule is StatefulRule.UNSETTLED_HOLDING
+    assert refusal.sellable_from == datetime(2026, 2, 23, 13, 0)
+
+
+def test_a_settlement_calendar_named_twice_is_refused(tmp_path):
+    """Two answers to one question. ``calendar.py`` refuses the same shape.
+
+    A config naming a calendar file *and* an injected calendar object is a run
+    whose provenance record cannot be read off its config, so it is an error
+    rather than a precedence rule.
+    """
+    with pytest.raises(ValueError, match='settlement_calendar'):
+        ExchangeSession.from_mapping(
+            config(data={'settlement_calendar': str(
+                tet_calendar_file(tmp_path))}),
+            source=StubSource(EQUITY_ROWS, KINDS),
+            settlement=weekday_settlement_calendar())
+
+
+def test_a_settlement_calendar_that_will_not_load_raises(tmp_path):
+    """``parse_config`` KeyErrors on a missing ``period`` rather than
+    defaulting; a named calendar that is not there gets the same treatment."""
+    with pytest.raises((CalendarError, OSError)):
+        ExchangeSession.from_mapping(
+            config(data={'settlement_calendar': str(tmp_path / 'absent.json')}),
+            source=StubSource(EQUITY_ROWS, KINDS))
+
+
+# --------------------------------------------------------------------------
+# Stale marks at the session level
+# --------------------------------------------------------------------------
+
+def test_eleven_blind_sessions_do_not_produce_a_definite_margin_status():
+    """Design section 9: ``settlement_price`` absent -> margin marks
+    ``INDETERMINATE``.
+
+    One long opened on 2024-06-03 and then no market data at all. The
+    requirement is still computable -- from the entry price, through the mark
+    cache -- and reporting it as a definite ``OK`` is the lie: nothing has been
+    observed for eleven sessions and the account could be anywhere.
+    """
+    rows = {('VN30F2406', D1): market('VN30F2406', D1, Decimal('1250'))}
+    session = opened_future(build(rows=rows))
+    assert session.margin().status is MarginStatus.OK
+    assert session.margin().stale_marks == ()
+
+    for day in (4, 5, 6, 7, 10, 11, 12, 13, 14, 17, 18):
+        session.advance_to(datetime(2024, 6, day, 14, 45))
+
+    blind = session.margin()
+    assert blind.status is MarginStatus.INDETERMINATE
+    assert blind.stale_marks == ('VN30F2406',)
+    assert blind.as_of == datetime(2024, 6, 18, 14, 45)
+
+    report = session.indeterminate_report()
+    assert report.by_field.get(DataField.SETTLEMENT_PRICE, 0) == 11
+    assert report.indeterminate >= 11
+
+
+# --------------------------------------------------------------------------
+# The injected liquidation rule
+# --------------------------------------------------------------------------
+
+def forced_rows():
+    """A long opened at 1250 that is under water enough to force by D3."""
+    return {('VN30F2406', D1): market('VN30F2406', D1, Decimal('1250')),
+            ('VN30F2406', D2): market('VN30F2406', D2, Decimal('1150')),
+            ('VN30F2406', D3): market('VN30F2406', D3, Decimal('1000'))}
+
+
+def forced_session(monitor=None):
+    parsed = parse_config(config())
+    return ExchangeSession.build(
+        parsed, source=StubSource(forced_rows(), KINDS), monitor=monitor)
+
+
+def test_the_default_liquidation_rule_is_stated_and_orders_the_legs():
+    """Unchanged behaviour, pinned so the injected case cannot be got by
+    breaking the default: largest-loss-first is an ordering and it is named."""
+    session = opened_future(forced_session())
+    session.advance_to(datetime(2024, 6, 4, 14, 45))
+    events = session.advance_to(datetime(2024, 6, 5, 14, 45))
+
+    forced = [e for e in events if e.kind is EventKind.FORCED_LIQUIDATION]
+    assert len(forced) == 1
+    assert forced[0].detail['selection_rule'] is LiquidationRule.LARGEST_LOSS_FIRST
+    assert forced[0].detail['sequence'] == ('VN30F2406',)
+    assert forced[0].detail['executed'] is False
+    assert session.provenance().liquidation_rule is (
+        LiquidationRule.LARGEST_LOSS_FIRST)
+
+
+def test_an_injected_liquidation_rule_is_honoured_and_not_overwritten():
+    """``MarginMonitor(liquidation=...)`` was stored and never read.
+
+    A run configured pro rata reported ``largest_loss_first`` in its
+    provenance *and* on the event, with a sequence computed by the rule the
+    caller did not choose. Design section 7.4 requires the forced-close event
+    to state its selection rule; stating the wrong one is worse than stating
+    none.
+    """
+    monitor = MarginMonitor(BrokerTerms(), weekday_trading_calendar(),
+                            liquidation=LiquidationRule.PRO_RATA)
+    session = opened_future(forced_session(monitor))
+    assert session.provenance().liquidation_rule is LiquidationRule.PRO_RATA
+
+    session.advance_to(datetime(2024, 6, 4, 14, 45))
+    events = session.advance_to(datetime(2024, 6, 5, 14, 45))
+    forced = [e for e in events if e.kind is EventKind.FORCED_LIQUIDATION]
+    assert len(forced) == 1
+    assert forced[0].detail['selection_rule'] is LiquidationRule.PRO_RATA
+    # Pro rata is a proportional reduction across every leg, not an ordering,
+    # so there is no sequence to report -- and reporting one anyway is how the
+    # defect read as plausible.
+    assert forced[0].detail['sequence'] is None
+    assert forced[0].detail['legs'] == ('VN30F2406',)

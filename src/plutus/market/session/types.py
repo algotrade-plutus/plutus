@@ -651,12 +651,24 @@ class MarginStatus(str, Enum):
     The ratio tested is ``utilisation = MR / margin assets``, **not** a
     maintenance-margin fraction of notional: Vietnam publishes no maintenance
     margin ratio at any date in 2020-2026.
+
+    :attr:`INDETERMINATE` is **not** a fifth rung of the ladder; it is the
+    absence of one. Design section 9 puts ``settlement_price`` in the data
+    contract with "absent => margin marks ``INDETERMINATE``", and a rung
+    computed from a mark taken in an earlier session is a claim the data does
+    not support. It is separate from ``OK`` for the same reason
+    :class:`~plutus.market.verdicts.Verdict` separates ``REJECTED`` from
+    ``INDETERMINATE``: a rule saying "fine" and nobody having looked are
+    different facts, and only one of them belongs in a published margin-
+    incidence figure. :class:`MarginView.stale_marks` names the contracts
+    responsible.
     """
 
     OK = 'ok'
     WARNING = 'warning'
     CALL = 'call'
     FORCED = 'forced'
+    INDETERMINATE = 'indeterminate'
 
 
 class LiquidationRule(str, Enum):
@@ -1578,6 +1590,13 @@ class MarginView:
     ``utilisation`` is ``None``, never ``NaN``, when assets are zero.
     ``json_safe`` raises ``ValueError`` on a non-finite Decimal, so a NaN here
     would blow up at ``to_dict()`` time rather than at construction.
+
+    ``as_of`` is the instant the view was *taken*, and on its own it asserts a
+    currency the numbers may not have: every figure here is computed from a
+    price, and a price can be older than ``as_of`` by any number of sessions.
+    ``stale_marks`` is what closes that gap -- it names every held contract
+    whose mark predates this session, and when it is non-empty ``status`` is
+    :attr:`MarginStatus.INDETERMINATE` rather than a rung nobody measured.
     """
 
     initial_margin: Decimal
@@ -1588,6 +1607,20 @@ class MarginView:
     status: MarginStatus
     as_of: datetime
     cure_by: Optional[datetime] = None
+    stale_marks: Tuple[str, ...] = ()
+    """Held contracts whose price is older than ``as_of``'s session, sorted.
+
+    Empty is the ordinary case and means every figure on this view rests on a
+    price observed in the session it claims. Non-empty is design section 9's
+    "``settlement_price`` absent" and forces ``status`` to
+    ``INDETERMINATE``: the requirement is still arithmetic, but it is
+    arithmetic on a price from another day.
+    """
+
+    @property
+    def is_indeterminate(self) -> bool:
+        """Whether the data could not decide this account's ladder position."""
+        return self.status is MarginStatus.INDETERMINATE
 
     @property
     def required(self) -> Decimal:
@@ -1598,9 +1631,13 @@ class MarginView:
     def free_deposit(self) -> Decimal:
         """``balance - posted - resting-order margin``. Section 7.0.
 
-        This is the figure a transfer out of the deposit is bounded by, and it
-        is what stops a caller withdrawing the margin backing an open
-        position.
+        **Not the withdrawable amount**, and the difference is exactly ``VM``.
+        This is the pre-funding figure a *new order* is tested against -- the
+        deposit not already backing a position or a resting order. Rulebook
+        6.3 puts the withdrawal test at assets minus ``MR`` at the broker's
+        threshold, which is :attr:`equity` when that threshold is 1.00; see
+        :meth:`~plutus.market.session.deposit.DerivativesAccount.transfer_out`,
+        which is bounded by that and not by this.
         """
         return (self.deposit_balance - self.posted_margin
                 - self.resting_order_margin)
@@ -2227,6 +2264,15 @@ class IndeterminateReport:
 
     ``by_field`` counts against :class:`DataField`, which is why that enum
     exists rather than free-form reason strings.
+
+    An *evaluation* is any question the session put to the data and had to get
+    an answer to before it could act. That is fill evaluations, and it is also
+    the derivatives mark: design section 9 lists ``settlement_price`` in the
+    same table as ``volume`` and ``foreign_room``, with "absent => margin marks
+    ``INDETERMINATE``", so a mark the data could not supply is the same kind of
+    ignorance and is counted the same way -- under
+    :attr:`DataField.SETTLEMENT_PRICE`. Leaving it out was how eleven
+    unmarked sessions could report ``indeterminate=0``.
     """
 
     evaluations: int
@@ -2512,7 +2558,17 @@ class FillPolicyConfig:
 
 @dataclass(frozen=True)
 class DataConfig:
-    """Which adapter serves market data, and from where."""
+    """Which adapter serves market data, and from where.
+
+    ``settlement_calendar`` is a path to a VSDC notice in
+    :meth:`~plutus.market.session.calendar.VsdcSettlementCalendar.from_file`'s
+    schema, and it is the **only** way a config file can stop a run using the
+    weekday-only default -- which is wrong around every Tet in the period and
+    settles T+2 of a 2026-02-12 trade on 2026-02-16 where VSDC settled
+    2026-02-23. ``ExchangeSession.build`` loads it; a named calendar that
+    cannot be loaded is an error, not a fall-back, on the same reasoning that
+    makes a missing ``period`` a ``KeyError``.
+    """
 
     adapter: str
     root: str

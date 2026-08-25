@@ -39,6 +39,7 @@ from plutus.market.session.types import (AccountRef, BrokerProfile, Encumbrance,
                                          OrderRecord, OrderState, Pool,
                                          Rejected, ResourceKind, StatefulRule,
                                          TimeInForce, Transferred, Venue)
+from plutus.market.verdicts import Verdict
 
 VN30F = 'VN30F2212'
 OTHER = 'VN30F2303'
@@ -425,14 +426,23 @@ def test_securities_cash_does_not_answer_a_derivatives_margin_call():
     assert cured.status is MarginStatus.OK
 
 
-def test_transfer_out_is_refused_when_it_would_drive_free_deposit_negative():
-    """`free_deposit = balance - posted - resting-order margin`.
+def test_transfer_out_cannot_withdraw_the_margin_backing_a_position():
+    """The bound is rulebook 6.3's, and the rejection names the rule.
 
-    This is what stops a caller withdrawing the margin backing an open
-    position. The rejection names ``INSUFFICIENT_DEPOSIT`` and carries
-    ``free_deposit`` as the binding constraint, per the interface contract's
-    per-rule table -- never a prose reason, because the rule enum *is* the
-    rejection log.
+    A flat-marked position: the mark equals the entry, so ``VM`` is zero and
+    ``assets - MR`` and ``assets - IM`` coincide at 33,000,000. What this
+    fixes in place is the *shape* -- ``INSUFFICIENT_DEPOSIT``, with the
+    withdrawable amount as ``binding_constraint`` and never a prose reason,
+    because the rule enum *is* the rejection log.
+    ``test_withdrawal_is_bounded_by_assets_minus_mr_not_assets_minus_im``
+    separates the two figures.
+
+    33,000,000 itself is refused, and that is condition (1) read exactly:
+    utilisation *after* the withdrawal must be **below** the level-3
+    threshold, and paying out the whole 33m leaves 17,000,000 of assets
+    against a 17,000,000 requirement -- a ratio of 1.00, which
+    :func:`margin_status` calls ``FORCED``. A withdrawal that suspends the
+    account the instant it lands is not a permitted withdrawal.
     """
     account, _ = build_account(deposit=Decimal('50000000'))
     account.apply_fill(fill(quantity=1, price=Decimal('1000')), None)
@@ -440,6 +450,7 @@ def test_transfer_out_is_refused_when_it_would_drive_free_deposit_negative():
     view = account.margin({VN30F: Decimal('1000')}, None, BrokerTerms(), TS)
     assert view.posted_margin == Decimal('17000000')
     assert view.free_deposit == Decimal('33000000')
+    assert view.equity == Decimal('33000000')          # VM is zero here
 
     refused = account.transfer_out(Decimal('33000001'),
                                    {VN30F: Decimal('1000')}, None, TS)
@@ -448,10 +459,16 @@ def test_transfer_out_is_refused_when_it_would_drive_free_deposit_negative():
     assert refused.binding_constraint == Decimal('33000000')
     assert account.deposit_balance == Decimal('50000000')
 
-    allowed = account.transfer_out(Decimal('33000000'),
+    on_the_threshold = account.transfer_out(Decimal('33000000'),
+                                            {VN30F: Decimal('1000')}, None, TS)
+    assert isinstance(on_the_threshold, Rejected)
+    assert on_the_threshold.detail['status_after'] is MarginStatus.FORCED
+    assert account.deposit_balance == Decimal('50000000')
+
+    allowed = account.transfer_out(Decimal('32999999'),
                                    {VN30F: Decimal('1000')}, None, TS)
     assert isinstance(allowed, Transferred)
-    assert account.deposit_balance == Decimal('17000000')
+    assert account.deposit_balance == Decimal('17000001')
 
 
 # --------------------------------------------------------------------------
@@ -1064,3 +1081,170 @@ def test_the_view_identities_hold():
     assert view.equity == view.deposit_balance - view.required
     assert view.utilisation == view.required / view.deposit_balance
     assert view.cure_by is None       # a deadline is the monitor's state
+
+
+# --------------------------------------------------------------------------
+# Margin withdrawal -- rulebook 6.3, VSDC SVI and SIV.3
+# --------------------------------------------------------------------------
+
+def test_a_suspended_account_cannot_withdraw_the_margin_it_is_short_of():
+    """Rulebook 6.3 condition (3): not while suspended for a utilisation breach.
+
+    The account is 110m against a 117m requirement -- utilisation 1.0636,
+    status ``FORCED``, equity **negative** 7m. ``free_deposit`` still reads
+    93m, because it subtracts only IM and this account's whole problem is VM.
+    Paying out that 93m is the failure this test exists to stop: the money
+    leaves the segregated pool at the exact instant VSDC has the account
+    suspended, and utilisation goes to 6.88.
+    """
+    account, _ = build_account(deposit=Decimal('110000000'))
+    account.apply_fill(fill(quantity=1, price=Decimal('2000')), None)
+    marks = {VN30F: Decimal('1000')}
+
+    view = account.margin(marks, None, BrokerTerms(), TS)
+    assert view.status is MarginStatus.FORCED
+    assert view.required == Decimal('117000000')     # IM 17m + VM 100m
+    assert view.free_deposit == Decimal('93000000')  # the loose figure
+    assert view.equity == Decimal('-7000000')        # the true one
+
+    refused = account.transfer_out(Decimal('93000000'), marks, None, TS,
+                                   terms=BrokerTerms())
+    assert isinstance(refused, Rejected)
+    assert refused.rule is StatefulRule.INSUFFICIENT_DEPOSIT
+    assert refused.binding_constraint == Decimal('0')
+    assert refused.detail['status'] is MarginStatus.FORCED
+    assert account.deposit_balance == Decimal('110000000')
+
+
+def test_withdrawal_is_bounded_by_assets_minus_mr_not_assets_minus_im():
+    """"The withdrawable amount is assets minus MR at the broker's threshold".
+
+    A losing but un-called account: 110m of assets, IM 17m, VM 20m, MR 37m.
+    ``free_deposit`` says 93m is withdrawable and it is wrong by exactly the
+    unrealised loss. The bound is condition (1) -- utilisation *after* the
+    withdrawal below the level-3 threshold -- so the supremum is
+    ``110m - 37m/1.00 = 73m`` and 73m itself is refused, because landing on
+    the threshold is landing in breach.
+    """
+    account, _ = build_account(deposit=Decimal('110000000'))
+    account.apply_fill(fill(quantity=1, price=Decimal('1200')), None)
+    marks = {VN30F: Decimal('1000')}
+
+    view = account.margin(marks, None, BrokerTerms(), TS)
+    assert view.status is MarginStatus.OK
+    assert view.free_deposit == Decimal('93000000')
+    assert view.required == Decimal('37000000')
+
+    too_much = account.transfer_out(Decimal('93000000'), marks, None, TS,
+                                    terms=BrokerTerms())
+    assert isinstance(too_much, Rejected)
+    assert too_much.binding_constraint == Decimal('73000000')
+
+    on_the_line = account.transfer_out(Decimal('73000000'), marks, None, TS,
+                                       terms=BrokerTerms())
+    assert isinstance(on_the_line, Rejected)
+    assert on_the_line.detail['status_after'] is MarginStatus.FORCED
+
+    allowed = account.transfer_out(Decimal('72999999'), marks, None, TS,
+                                   terms=BrokerTerms())
+    assert isinstance(allowed, Transferred)
+    assert account.deposit_balance == Decimal('37000001')
+
+
+def test_a_flat_account_may_still_be_emptied():
+    """No requirement, no bound. The withdrawal test is a utilisation test.
+
+    Guards the fix against over-tightening: with ``MR == 0`` the post-
+    withdrawal ratio is not 1.0 but undefined-and-fine, and
+    :func:`margin_status` already says a requirement of zero is ``OK`` at any
+    assets. An account holding nothing must be able to take everything back.
+    """
+    account, _ = build_account(deposit=Decimal('50000000'))
+    emptied = account.transfer_out(Decimal('50000000'), {}, None, TS,
+                                   terms=BrokerTerms())
+    assert isinstance(emptied, Transferred)
+    assert account.deposit_balance == Decimal('0')
+
+
+# --------------------------------------------------------------------------
+# Stale marks -- design section 9, "settlement_price absent => INDETERMINATE"
+# --------------------------------------------------------------------------
+
+def test_a_mark_from_a_previous_session_makes_the_status_indeterminate():
+    """A held contract with no price this session is not an ``OK`` account.
+
+    ``average_entry`` is the latest matched price for an account that has
+    traded and *not yet been marked*; a session later it is a stale price and
+    a definite ladder status computed from it is a claim the data does not
+    support. Design section 9: ``settlement_price`` absent -> margin marks
+    ``INDETERMINATE``.
+    """
+    account, _ = build_account(deposit=Decimal('100000000'))
+    account.apply_fill(fill(quantity=1, price=Decimal('1000')), None)
+
+    same_session = account.margin({}, None, BrokerTerms(), TS)
+    assert same_session.status is MarginStatus.OK
+    assert same_session.stale_marks == ()
+
+    next_session = account.margin({}, None, BrokerTerms(), NEXT)
+    assert next_session.status is MarginStatus.INDETERMINATE
+    assert next_session.stale_marks == (VN30F,)
+    assert next_session.is_indeterminate
+
+    # A price for the session cures it without any other change.
+    marked = account.margin({VN30F: Decimal('1000')}, None, BrokerTerms(),
+                            NEXT)
+    assert marked.status is MarginStatus.OK
+    assert marked.stale_marks == ()
+
+
+def test_an_indeterminate_mark_does_not_advance_the_call_machine():
+    """Ignorance is not news, and it is not a cure either.
+
+    An outstanding call must survive a blind session: clearing it would report
+    a cure that never happened, and forcing on it would liquidate on a price
+    nobody observed.
+    """
+    terms = BrokerTerms()
+    monitor = MarginMonitor(terms, FakeTradingCalendar())
+    account, _ = build_account(deposit=Decimal('19000000'))
+    account.apply_fill(fill(quantity=1, price=Decimal('1000')), None)
+
+    # MR = IM 16,830,000 + VM 1,000,000 on 19,000,000 of assets: 0.938.
+    call_ts = datetime(2023, 1, 4, 14, 0)
+    called = account.margin({VN30F: Decimal('990')}, None, terms, call_ts)
+    assert called.status is MarginStatus.CALL
+    assert len(monitor.on_mark(account, called, None, call_ts)) == 1
+    assert monitor.outstanding_call is not None
+
+    blind = account.margin({}, None, terms, datetime(2023, 1, 6, 14, 0))
+    assert blind.status is MarginStatus.INDETERMINATE
+    assert monitor.on_mark(account, blind, None,
+                           datetime(2023, 1, 6, 14, 0)) == ()
+    assert monitor.outstanding_call is not None
+    assert monitor.last_status is MarginStatus.CALL
+
+
+def test_a_stale_account_may_not_open_a_new_position():
+    """Level 3 cannot be certified away by a mark nobody took.
+
+    ``reserve_for_order`` gates opening on ``status is FORCED``. Once a stale
+    mark can make the status neither FORCED nor definite, an account actually
+    in breach would be admitted on a blind session -- so the gate refuses on
+    ignorance too, and says so with an ``INDETERMINATE`` verdict rather than
+    reporting a market rule.
+    """
+    account, _ = build_account(deposit=Decimal('100000000'))
+    account.apply_fill(fill(quantity=1, price=Decimal('1000')), None)
+
+    refused = account.reserve_for_order(OrderId('O-2'), order(quantity=1),
+                                        Decimal('1000'), None, None, NEXT)
+    assert isinstance(refused, Rejected)
+    assert refused.rule is StatefulRule.INSUFFICIENT_DEPOSIT
+    assert refused.verdict is Verdict.INDETERMINATE
+    assert refused.detail['stale_marks'] == (VN30F,)
+
+    account.observe_marks({VN30F: Decimal('1000')}, NEXT)
+    allowed = account.reserve_for_order(OrderId('O-3'), order(quantity=1),
+                                        Decimal('1000'), None, None, NEXT)
+    assert isinstance(allowed, Encumbrance)

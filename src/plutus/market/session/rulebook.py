@@ -97,8 +97,7 @@ from itertools import product
 from typing import (Any, Dict, FrozenSet, Iterable, Mapping, Optional, Sequence,
                     Tuple)
 
-from plutus.core.constant import (DS, HNX, HSX, UPCOM, ExchangeSpec,
-                                  get_hsx_tick_size, get_trading_unit,
+from plutus.core.constant import (get_hsx_tick_size, get_trading_unit,
                                   is_covered_warrant, is_etf)
 from plutus.market.adapters.base import MarketDataSource
 from plutus.market.exchanges import (HNX_EXCHANGE, HNXDS_EXCHANGE,
@@ -115,8 +114,8 @@ from plutus.market.session.types import (ChargeBase, ChargeClass, ChargeRule,
 __all__ = [
     'KRX_CUTOVER', 'COVERAGE_START', 'COVERAGE_END',
     'RuleName', 'RuleStatus', 'RuleResolution', 'RuleInterval',
-    'UnresolvedRule', 'RuleSet', 'Rulebook', 'SymbolRouter', 'VenueListing',
-    'RULEBOOK_IDS',
+    'SessionSchedule', 'UnresolvedRule', 'RuleSet', 'Rulebook', 'SymbolRouter',
+    'VenueListing', 'RULEBOOK_IDS',
 ]
 
 
@@ -163,6 +162,7 @@ class RuleName(str, Enum):
     DAILY_TRADING_LIMIT = 'daily_trading_limit'
     WIDENED_TRADING_LIMIT = 'widened_trading_limit'
     TICK_SIZE = 'tick_size'
+    SESSION_SCHEDULE = 'session_schedule'
     LEGAL_ORDER_TYPES = 'legal_order_types'
     SETTLEMENT = 'settlement'
     INITIAL_MARGIN_RATE = 'initial_margin_rate'
@@ -360,24 +360,21 @@ def _pick(series: Sequence[RuleInterval], on: date) -> Optional[RuleInterval]:
 # Venue plumbing
 # --------------------------------------------------------------------------
 
-#: The four ``ExchangeSpec`` singletons, read for SESSION BOUNDARIES and the
-#: tick FUNCTION only.
+#: **No ``ExchangeSpec`` singleton is read here, at any date, for any rule.**
 #:
-#: Reading them for anything dated is forbidden and is why this mapping is
-#: private: ``ExchangeSpec.trading_unit`` is 100 for HSX at every date (wrong
-#: before 2021-01-04), ``daily_trading_limit`` is one scalar per exchange for
-#: all history and all instrument classes (wrong for warrants, bonds and
-#: government-bond futures), and neither carries a citation. Session clock
-#: times, by contrast, are unchanged across the whole window on every venue --
-#: the KRX delta table lists session times as explicitly NOT a delta -- so
-#: reading them here duplicates nothing and drifts from nothing.
-_SPEC_BY_VENUE: Mapping[Venue, ExchangeSpec] = {
-    Venue.HSX: HSX,
-    Venue.HNX: HNX,
-    Venue.UPCOM: UPCOM,
-    Venue.HNXDS: DS,
-}
-
+#: There used to be a ``_SPEC_BY_VENUE`` mapping of the four
+#: ``core.constant`` specs, read by :meth:`RuleSet.phase` for its session
+#: boundaries. It was the last config-at-load singleton inside the resolver,
+#: and it was defended on the grounds that "session clock times are unchanged
+#: across the whole window on every venue". That defence is not checkable from
+#: the object: an ``ExchangeSpec`` window carries no date, no document and no
+#: confidence grade, so a resolver reading one cannot tell a regulation that
+#: was read verbatim (HOSE from 2021-07-05, ``high``) from a window inferred
+#: by continuity because the governing articles were never obtained (HOSE
+#: before 2021-07-05, ``low``) -- and it cannot say "unknown" outside the
+#: rulebook's coverage, which is what it must say. The clock is now
+#: :data:`RuleName.SESSION_SCHEDULE`, a dated table like every other rule.
+#:
 #: The ``exchanges/`` object that judges each venue's orders.
 _EXCHANGE_BY_VENUE: Mapping[Venue, Exchange] = {
     Venue.HSX: HSX_EXCHANGE,
@@ -391,6 +388,139 @@ _EXCHANGE_BY_VENUE: Mapping[Venue, Exchange] = {
 #: timestamp in any other zone would silently resolve to the wrong phase.
 #: :meth:`RuleSet.phase` converts first.
 _ICT = timezone(timedelta(hours=7))
+
+#: The days a Vietnamese exchange matches at all.
+#:
+#: Sourced, not adopted: QD 352/QD-SGDHCM Dieu 4.1 is "Mon-Fri, minus Labour
+#: Code holidays" and cites the Labour Code clause and nothing more. The
+#: holiday half belongs to ``calendar.py`` -- this module must not import it --
+#: so a public holiday resolves here like an ordinary weekday and the caller
+#: gates on the trading calendar. The weekday half is carried here because it
+#: is a property of the *rule*, not of any one venue's clock table, and it must
+#: survive a venue whose clock table has no row at this date.
+_TRADING_WEEKDAYS: FrozenSet[int] = frozenset({0, 1, 2, 3, 4})
+
+#: A half-open clock window ``[start, end)`` inside one trading day.
+Window = Tuple[_time, _time]
+
+
+def _within(window: Optional[Window], clock: _time) -> bool:
+    """Half-open containment, ``start <= clock < end``. ``None`` never covers.
+
+    Half-open for the reason stated in the module docstring: Vietnamese
+    session boundaries abut exactly, so 09:15:00 both ends HOSE's opening
+    auction and begins its continuous session, and an inclusive upper bound
+    puts one instant in two phases and makes the answer order-dependent.
+    """
+    return window is not None and window[0] <= clock < window[1]
+
+
+@dataclass(frozen=True)
+class SessionSchedule:
+    """One venue's trading-day clock, as a DATED rule value.
+
+    Every window is half-open and optional, and ``None`` means *this venue has
+    no such session at this date* -- HNX has never run an opening auction, and
+    UPCoM runs no auction and no post-close session of any kind. That is a
+    sourced absence, not a gap: the rows that carry these values cite the
+    documents, and a venue whose clock is genuinely unknown gets no row at all
+    and resolves ``UNKNOWN``.
+
+    **``continuous`` spans the noon break by construction.** HOSE's continuous
+    window is 09:15-14:30 *with a hole in it*, not two intervals, exactly as
+    ``ExchangeSpec.lo_session`` has it -- which is why :meth:`phase_at` tests
+    the break first. The break is a hard shutdown (QD 352 Dieu 21: no entry,
+    amend, cancel, or put-through activity of any kind), so getting that order
+    wrong admits orders into a closed market.
+
+    **Put-through windows are deliberately absent.** They differ from the
+    matched windows at three of the four venues -- HOSE negotiates to 15:00
+    while it stops matching at 14:45 -- but this session models order matching
+    only (``ExchangeSession._reserve`` refuses a negotiated side outright), so
+    carrying a window nothing reads would be a claim without a caller. The
+    ``method`` axis on :meth:`RuleSet.tick_size` is where put-through enters
+    this module today.
+    """
+
+    #: Continuous order matching, spanning ``noon_break``.
+    continuous: Optional[Window] = None
+    #: The opening call auction. ``None`` where the venue has none.
+    opening_auction: Optional[Window] = None
+    #: The closing call auction. ``None`` where the venue has none.
+    closing_auction: Optional[Window] = None
+    #: The lunch shutdown, inside ``continuous``.
+    noon_break: Optional[Window] = None
+    #: HNX's post-close session. ``None`` everywhere else.
+    post_close_plo: Optional[Window] = None
+
+    def __post_init__(self) -> None:
+        if not self.windows:
+            raise ValueError(
+                'a SessionSchedule with no windows at all cannot resolve a '
+                'phase; a venue whose clock is unknown belongs in an '
+                '_unsourced() row, where it resolves UNKNOWN rather than '
+                'answering PRE_OPEN for every instant of the day')
+
+    @property
+    def windows(self) -> Tuple[Window, ...]:
+        """Every window this venue runs, in no particular order."""
+        return tuple(w for w in (self.continuous, self.opening_auction,
+                                 self.closing_auction, self.noon_break,
+                                 self.post_close_plo) if w is not None)
+
+    @property
+    def day_open(self) -> _time:
+        """The first instant the venue does anything. Derived, never stated.
+
+        Derived from the windows rather than carried as a field so a row
+        cannot state a day boundary that contradicts the sessions it also
+        states. It is what separates PRE_OPEN from the day, and PRE_OPEN is
+        the one phase below that **no document defines**: see :meth:`phase_at`.
+        """
+        return min(start for start, _ in self.windows)
+
+    @property
+    def day_close(self) -> _time:
+        """The instant after which nothing more happens. Derived, as above."""
+        return max(end for _, end in self.windows)
+
+    def phase_at(self, clock: _time) -> SessionPhase:
+        """The phase this clock time falls in. Total; never raises.
+
+        **The order is normative.** The noon break is tested first because
+        ``continuous`` spans it; the auctions before ``continuous`` because
+        HOSE's ATC begins at 14:30 exactly where the continuous window ends,
+        and a half-open ``continuous`` already excludes 14:30 but the ordering
+        is stated rather than relied upon.
+
+        ``PRE_OPEN`` and ``POST_CLOSE`` are **ADOPTED, not sourced**: no
+        Vietnamese document defines a "pre-open" window, and the rulebook's
+        schedule rows state only when each session runs. They are the clock
+        before :attr:`day_open` and at or after :attr:`day_close`, adopted so
+        that every instant of a trading weekday resolves to something. Both
+        are phases in which ``legal_order_types`` is the empty set at every
+        venue, so nothing is admitted on the strength of the adoption --
+        ``ExchangeSession.cancel`` says so in its own refusal reason.
+
+        ``UNKNOWN`` is reachable only for a clock inside the day but in none
+        of the venue's windows, which is a gap in the row rather than in the
+        caller's question.
+        """
+        if _within(self.noon_break, clock):
+            return SessionPhase.NOON_BREAK
+        if _within(self.opening_auction, clock):
+            return SessionPhase.OPENING_AUCTION
+        if _within(self.closing_auction, clock):
+            return SessionPhase.CLOSING_AUCTION
+        if _within(self.post_close_plo, clock):
+            return SessionPhase.POST_CLOSE_PLO
+        if _within(self.continuous, clock):
+            return SessionPhase.CONTINUOUS
+        if clock < self.day_open:
+            return SessionPhase.PRE_OPEN
+        if clock >= self.day_close:
+            return SessionPhase.POST_CLOSE
+        return SessionPhase.UNKNOWN
 
 
 # --------------------------------------------------------------------------
@@ -836,6 +966,132 @@ def _tick_size_table() -> Dict[Tuple[Any, ...], Tuple[RuleInterval, ...]]:
                        note='No negotiated tick for HNXDS appears in any '
                             'document read. The cash-venue 1d rule must not be '
                             'assumed to carry across to an index-point quote.'),
+        ),
+    }
+
+
+def _session_schedule_table() -> Dict[Tuple[Any, ...], Tuple[RuleInterval, ...]]:
+    """The trading-day clock, keyed ``(venue,)``. Rulebook section 2.1.
+
+    The rule behind :meth:`RuleSet.phase`, and therefore behind order-type
+    legality, the cancel/amend lock and the instant a day order dies. It was
+    the last rule in this module resolved from a ``core.constant``
+    ``ExchangeSpec`` -- one undated window per venue, no document, no
+    confidence -- and the three HOSE rows below are why that mattered: the
+    clock does not move across them, but the **evidence** does, from an
+    inference by continuity whose governing articles were never obtained to a
+    regulation read verbatim. A singleton cannot express that difference, and
+    a run whose provenance record claims a sourced session table when the
+    source was a guess is the failure this package exists to prevent.
+
+    Two shapes here are worth naming because a naive table gets both wrong:
+
+    * **HNX has no opening auction**, so its continuous session starts at
+      09:00 and not 09:15. Four sources give 09:00; MBS's HNX sheet prints
+      09:15 and is read as a copy-paste from its own HOSE table.
+    * **HNXDS opens fifteen minutes before the cash market.** The contract
+      template defines the hours *relatively* -- "mo cua truoc thi truong co
+      so 15 phut; dong cua cung thi truong co so" -- so its ATO is 08:45-09:00
+      and the 14:45 close comes from broker sheets only.
+    """
+    hose_2020 = ('QD 66+67/QD-SGDHCM (2018-03-02) as amended by QD 462 '
+                 '(2020-08-14) and QD 894 (2020-12-30) -- articles never read')
+    hose_352 = 'QD 352/QD-SGDHCM (2021-06-30, eff. 2021-07-05) Dieu 4.2'
+    hose_krx = ('HOSE "Quy dinh giao dich" (to trinh 51/TTr-HTGD, 2025-04-26), '
+                'read in Vietnamese and English')
+    hnx_pre = ('Broker rule sheets + KRX before/after write-ups; the pre-2022 '
+               'governing text QD 653/QD-SGDHN was never read')
+    hnx_krx = ('ASEANSC HNX sheet 05/2025 S2.1; MBS HNX 2025-05-03; '
+               'Bao Dau tu 2025-04-26 verbatim')
+    upcom = ('MBS UPCoM sheet 2024-10-14 and ASEANSC UPCoM sheet 05/2025 '
+             '(identical); VNX QD 34 Dieu 11')
+    ds = ('HNX contract templates for VN30F/VN100F/GB05/GB10, which define the '
+          'hours RELATIVELY to the cash market; VNX QD 21 Dieu 14 delegates '
+          'the times to a VNX decision')
+    lunch = 'QD 352/QD-SGDHCM Dieu 21'
+
+    #: 11:30-13:00 at every venue and every date, and a hard shutdown rather
+    #: than a quiet period: no entry, amend or cancel, and no put-through
+    #: advertisement, withdrawal, execution or cancellation.
+    noon = (_time(11, 30), _time(13, 0))
+
+    hose = SessionSchedule(
+        opening_auction=(_time(9, 0), _time(9, 15)),
+        continuous=(_time(9, 15), _time(14, 30)),
+        noon_break=noon,
+        closing_auction=(_time(14, 30), _time(14, 45)),
+    )
+    hnx = SessionSchedule(
+        continuous=(_time(9, 0), _time(14, 30)),
+        noon_break=noon,
+        closing_auction=(_time(14, 30), _time(14, 45)),
+        post_close_plo=(_time(14, 45), _time(15, 0)),
+    )
+    return {
+        # --- HOSE: one clock, three grades of evidence -------------------
+        (Venue.HSX,): (
+            _interval(hose, date(2020, 1, 1), date(2021, 7, 5),
+                      document=f'{hose_2020}; {lunch}',
+                      confidence=Confidence.LOW,
+                      note='Inferred by continuity from QD 352: the clock is '
+                           'the same, but the articles governing THIS interval '
+                           'were never read. Graded low so a run before '
+                           '2021-07-05 cannot claim a sourced session table.'),
+            _interval(hose, date(2021, 7, 5), KRX_CUTOVER,
+                      document=f'{hose_352}; {lunch}', article='Dieu 4.2',
+                      confidence=Confidence.HIGH,
+                      note='ATO 09:00-09:15; continuous 09:15-11:30 and '
+                           '13:00-14:30; ATC 14:30-14:45. Read verbatim.'),
+            _interval(hose, KRX_CUTOVER, document=f'{hose_krx}; {lunch}',
+                      confidence=Confidence.HIGH,
+                      note='Unchanged by KRX -- the delta table lists session '
+                           'times as explicitly NOT a delta. The afternoon '
+                           'put-through split at 14:45 asserted by one broker '
+                           'sheet is REJECTED (two HOSE publications show a '
+                           'single undivided 13:00-15:00 negotiated window), '
+                           'and no put-through window is carried here anyway.'),
+        ),
+        # --- HNX: no opening auction, and a post-close session ------------
+        (Venue.HNX,): (
+            _interval(hnx, date(2020, 1, 1), KRX_CUTOVER,
+                      document=f'{hnx_pre}; {lunch}',
+                      confidence=Confidence.MEDIUM,
+                      note='No ATO at any date. Continuous starts 09:00, not '
+                           '09:15. PLO 14:45-15:00, matched continuously at '
+                           "the day's last round-lot price."),
+            _interval(hnx, KRX_CUTOVER, document=f'{hnx_krx}; {lunch}',
+                      confidence=Confidence.MEDIUM,
+                      note='In-hours unchanged. The post-close session SPLITS '
+                           'at 14:55 -- 14:45-14:55 periodic auction, '
+                           '14:55-15:00 continuous, both round lot. '
+                           'SessionPhase has one POST_CLOSE_PLO member and '
+                           'cannot say which half, so the window is carried '
+                           'whole and the split is recorded here rather than '
+                           'silently dropped.'),
+        ),
+        # --- UPCoM: continuous only, one row, whole window ----------------
+        (Venue.UPCOM,): (
+            _interval(SessionSchedule(
+                continuous=(_time(9, 0), _time(15, 0)), noon_break=noon),
+                date(2020, 1, 1), document=f'{upcom}; {lunch}', article='Dieu 11',
+                confidence=Confidence.HIGH,
+                note='Continuous only, 09:00-11:30 and 13:00-15:00. No ATO, '
+                     'no ATC, no PLO -- which is why UPCoM is still matching '
+                     'at 14:50 when HOSE has closed.'),
+        ),
+        # --- HNXDS: fifteen minutes ahead of the cash market --------------
+        (Venue.HNXDS,): (
+            _interval(SessionSchedule(
+                opening_auction=(_time(8, 45), _time(9, 0)),
+                continuous=(_time(9, 0), _time(14, 30)),
+                noon_break=noon,
+                closing_auction=(_time(14, 30), _time(14, 45))),
+                date(2020, 1, 1), document=f'{ds}; {lunch}',
+                confidence=Confidence.MEDIUM,
+                note='ATO 08:45-09:00; continuous 09:00-11:30 and 13:00-14:30; '
+                     'ATC 14:30-14:45; market closes 14:45. The template gives '
+                     'the hours only relatively, and the 14:45 close comes '
+                     'from broker sheets, so this is medium and not high.'),
         ),
     }
 
@@ -1540,6 +1796,7 @@ def _build_tables(rulebook_id: str) -> Dict[RuleName, Dict[Tuple[Any, ...], Tupl
         RuleName.DAILY_TRADING_LIMIT: _daily_trading_limit_table(),
         RuleName.WIDENED_TRADING_LIMIT: _widened_trading_limit_table(),
         RuleName.TICK_SIZE: _tick_size_table(),
+        RuleName.SESSION_SCHEDULE: _session_schedule_table(),
         RuleName.LEGAL_ORDER_TYPES: _legal_order_types_table(),
         RuleName.SETTLEMENT: _settlement_table(),
         RuleName.INITIAL_MARGIN_RATE: {
@@ -1811,65 +2068,76 @@ class RuleSet:
 
     # -- session phase --------------------------------------------------
 
+    def session_schedule(self, venue: Venue) -> SessionSchedule:
+        """This venue's trading-day clock, in force at ``self.ts``.
+
+        The typed accessor for :data:`RuleName.SESSION_SCHEDULE`, so a caller
+        that wants the windows themselves -- a calendar computing a session
+        open, a report printing the day's shape -- reads a dated, cited row
+        rather than ``core.constant``'s undated ``ExchangeSpec``.
+
+        Raises :class:`UnresolvedRule` outside the rulebook's coverage, like
+        every other typed accessor. :meth:`phase` takes the total path instead,
+        because a phase has an ``UNKNOWN`` member to put the answer in.
+        """
+        return self.require(RuleName.SESSION_SCHEDULE, venue)
+
     def phase(self, venue: Venue) -> SessionPhase:
-        """The session phase at ``self.ts``.
+        """The session phase at ``self.ts``, from the DATED schedule row.
+
+        Resolved through :data:`RuleName.SESSION_SCHEDULE` like every other
+        rule in this module. It previously read a module-level
+        ``ExchangeSpec``, which is locked shape 1's forbidden build at the
+        rule that decides order-type legality, the cancel/amend lock and the
+        instant a day order dies: one undated window per venue, no citation,
+        and -- the part that cannot be patched -- **no way to say "unknown"**.
+        A date outside the rulebook's coverage now resolves ``UNKNOWN`` rather
+        than being answered from a singleton that has no dates on it.
 
         **The noon break is tested BEFORE the continuous session**, because
-        ``ExchangeSpec.lo_session`` spans the break by construction -- HOSE's
-        09:15-14:30 window is one interval with a hole in it, not two -- so
-        testing continuous first reports 12:00 as CONTINUOUS. Nothing in the
-        repository does this ordering today: both adapters hardcode
-        CONTINUOUS. The break is a hard shutdown (no entry, amend, cancel, or
-        put-through activity of any kind), so getting it wrong admits orders
-        into a closed market.
+        ``SessionSchedule.continuous`` spans the break by construction --
+        HOSE's 09:15-14:30 window is one interval with a hole in it, not two
+        -- so testing continuous first reports 12:00 as CONTINUOUS. Nothing in
+        the repository does this ordering today: both adapters hardcode
+        CONTINUOUS. The break is a hard shutdown (QD 352 Dieu 21: no entry,
+        amend, cancel, or put-through activity of any kind), so getting it
+        wrong admits orders into a closed market. The ordering lives on
+        :meth:`SessionSchedule.phase_at`, next to the windows it orders.
 
-        Two things this deliberately does not know, both declared:
+        Three things this deliberately does not know, all declared:
 
         * **Holidays.** The trading calendar is ``calendar.py``'s, and this
           module must not import it. A public holiday therefore resolves like
           an ordinary weekday here, and the caller must gate on the trading
-          calendar. Weekends *are* handled, because ``ExchangeSpec``'s own
-          ``effective_day`` carries Mon-Fri.
+          calendar. Weekends *are* handled, from :data:`_TRADING_WEEKDAYS`,
+          which is the sourced Mon-Fri half of QD 352 Dieu 4.1 and is tested
+          before the clock table because it is a different rule: a Saturday is
+          closed whatever a venue's session windows say.
         * **Daily bars.** A daily bar is stamped midnight, so this returns
           ``PRE_OPEN`` for it. That is why ``protocol.SessionPhase`` says the
           phase is set by the adapter and never inferred from a timestamp: a
           daily run that called this would mark every bar pre-open and reject
           the entire measurement. Use this for a tick-resolution clock, not for
           a daily one.
+        * **Halts and restricted-securities windows.** A halted ticker and a
+          RES symbol on post-KRX HOSE run a different clock from the venue's,
+          and the phase is per venue here, not per ticker. Both are Tier 2.
         """
-        spec = _SPEC_BY_VENUE[venue]
         ts = self.ts.astimezone(_ICT) if self.ts.tzinfo is not None else self.ts
-        if ts.weekday() not in (0, 1, 2, 3, 4):
+        if ts.weekday() not in _TRADING_WEEKDAYS:
             # No SessionPhase member says "closed all day". POST_CLOSE is the
             # only one meaning "not matching, and not going to today", and it
             # is what `equity.py` refuses with SESSION_SEMANTICS -- the right
             # outcome for a Saturday.
             return SessionPhase.POST_CLOSE
-        clock = ts.time()
-
-        def within(session) -> bool:
-            return session is not None and session.start <= clock < session.end
-
-        # Order is normative. Noon break first, for the reason above; the
-        # auctions before the continuous window because HSX's ATC (14:30-14:45)
-        # begins exactly where lo_session ends and an inclusive bound would put
-        # 14:30 in both.
-        if within(spec.noon_break):
-            return SessionPhase.NOON_BREAK
-        if within(spec.ato_session):
-            return SessionPhase.OPENING_AUCTION
-        if within(spec.atc_session):
-            return SessionPhase.CLOSING_AUCTION
-        if within(spec.plo_session):
-            return SessionPhase.POST_CLOSE_PLO
-        if within(spec.lo_session):
-            return SessionPhase.CONTINUOUS
-        if within(spec.before_trading_session):
-            return SessionPhase.PRE_OPEN
-        after = spec.after_trading_session
-        if after is not None and clock >= after.start:
-            return SessionPhase.POST_CLOSE
-        return SessionPhase.UNKNOWN
+        resolution = self.resolve(RuleName.SESSION_SCHEDULE, venue)
+        if not resolution.is_known:
+            # The total path, not `session_schedule`: an unresolved clock is
+            # an UNKNOWN phase, which every caller in this package already
+            # handles as INDETERMINATE. Falling back to the venue's singleton
+            # here is the defect this method was rewritten to remove.
+            return SessionPhase.UNKNOWN
+        return resolution.value.phase_at(ts.time())
 
     # -- settlement, margin, limits -------------------------------------
 

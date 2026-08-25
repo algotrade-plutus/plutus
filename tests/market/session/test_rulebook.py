@@ -400,6 +400,52 @@ def test_a_midnight_daily_bar_resolves_pre_open_which_is_why_phase_is_never_infe
     assert at(datetime(2022, 6, 15, 0, 0)).phase(Venue.HSX) is SessionPhase.PRE_OPEN
 
 
+def test_the_session_schedule_is_a_dated_sourced_rule_like_every_other():
+    """``phase()`` resolves a rulebook row, not a module-level ``ExchangeSpec``.
+
+    The clock behind a phase is a *rule*: rulebook section 2.1 carries three
+    dated HOSE rows for it, and the earliest is graded ``low`` ("inferred by
+    continuity from QD 352; the governing articles were never read") while the
+    two later ones are graded ``high``. A resolver reading
+    ``constant.py``'s ``HSX`` singleton cannot report any of that -- it has one
+    undated window per venue and no citation at all -- so a caller auditing the
+    run cannot tell a read regulation from an inference.
+
+    Two dates, two citations, is the whole test.
+    """
+    early = at(datetime(2020, 6, 15, 10, 0)).citation(
+        RuleName.SESSION_SCHEDULE, Venue.HSX)
+    later = at(PRE_KRX_TS).citation(RuleName.SESSION_SCHEDULE, Venue.HSX)
+    assert early is not None and later is not None
+    assert early.confidence is Confidence.LOW
+    assert later.confidence is Confidence.HIGH
+    assert early.document != later.document
+    # The clock itself did not move across that boundary; only the evidence
+    # for it did, which is exactly what a citation is for.
+    assert (at(datetime(2020, 6, 15, 10, 0)).phase(Venue.HSX)
+            is at(PRE_KRX_TS).phase(Venue.HSX)
+            is SessionPhase.CONTINUOUS)
+
+
+def test_a_phase_outside_the_dated_schedule_is_unknown_not_the_singleton():
+    """No dated row means UNKNOWN, and never a silent fall-back.
+
+    2019-06-14 is a Friday one rulebook-year before ``COVERAGE_START``. A
+    resolver backed by ``_SPEC_BY_VENUE`` answers ``CONTINUOUS`` for it with
+    the same confidence it answers 2024 -- a value invented from a singleton
+    that has no dates on it, which is locked shape 1's forbidden build at the
+    rule that decides order-type legality, the cancel lock, and when a day
+    order dies.
+    """
+    outside = datetime(2019, 6, 14, 10, 0)
+    for venue in (Venue.HSX, Venue.HNX, Venue.UPCOM, Venue.HNXDS):
+        assert at(outside).resolve(
+            RuleName.SESSION_SCHEDULE, venue).status is RuleStatus.UNKNOWN
+        assert at(outside).phase(venue) is SessionPhase.UNKNOWN
+    with pytest.raises(UnresolvedRule):
+        at(outside).session_schedule(Venue.HSX)
+
+
 # --------------------------------------------------------------------------
 # Tick grid
 # --------------------------------------------------------------------------

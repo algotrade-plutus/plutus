@@ -95,6 +95,7 @@ from plutus.market.session.types import (AccountRef, BrokerProfile,
                                          RejectionRule, ResourceKind,
                                          StatefulRule, Transferred, Venue,
                                          signed_quantity)
+from plutus.market.verdicts import Verdict
 
 __all__ = [
     # collaborator protocols
@@ -464,6 +465,18 @@ def account_margin_requirement(account: 'DerivativesAccount',
     marked. :meth:`DerivativesAccount.settle_daily` is the strict path and
     refuses a missing settlement price outright.
 
+    **That is true on the first bar and false on the twelfth.** A price is the
+    latest matched price only for as long as it is the latest, and nothing in
+    the chain above notices when a session passes without one. So every held
+    contract is asked :meth:`DerivativesAccount.mark_is_current`, and any whose
+    price predates ``ts``'s session lands in ``MarginView.stale_marks`` and
+    turns ``status`` into :attr:`MarginStatus.INDETERMINATE`. Design section 9
+    requires exactly this: ``settlement_price`` absent => margin marks
+    ``INDETERMINATE``. The requirement itself is still computed and still
+    reported -- it is arithmetic, and the caller may want it -- but the ladder
+    position is withheld, because a rung is a claim about a price and there
+    was no price.
+
     **Tier 1 sums strict per-contract IM and takes no spread credit.** Netting
     *within* a contract is required and implemented (it is what
     ``ContractLedger`` being net-signed buys); netting *across* contracts is
@@ -504,8 +517,11 @@ def account_margin_requirement(account: 'DerivativesAccount',
 
     initial = _ZERO
     portfolio_pnl = _ZERO
+    stale = []
     for code, position in account.contracts.positions().items():
         price = account.mark_for(code, marks)
+        if not account.mark_is_current(code, ts, marks):
+            stale.append(code)
         rate = resolve_initial_margin_rate(rules, code, ts) + account.margin_buffer
         initial += rate * position.notional(price)
         reference = account.variation_reference(code)
@@ -523,15 +539,18 @@ def account_margin_requirement(account: 'DerivativesAccount',
 
     balance = account.deposit_balance
     required = initial + resting_margin + variation
+    stale_marks = tuple(sorted(stale))
     return MarginView(
         initial_margin=initial + resting_margin,
         variation_margin=variation,
         deposit_balance=balance,
         posted_margin=initial,
         resting_order_margin=resting_margin,
-        status=margin_status(required, balance, terms),
+        status=(MarginStatus.INDETERMINATE if stale_marks
+                else margin_status(required, balance, terms)),
         as_of=ts,
         cure_by=None,
+        stale_marks=stale_marks,
     )
 
 
@@ -638,6 +657,14 @@ class DerivativesAccount:
         #: Latest observed price per contract. Seeded by fills (a fill price
         #: *is* a matched price) and refreshed by ``observe_marks``.
         self._marks: Dict[str, Decimal] = {}
+        #: When each entry of ``_marks`` was observed. Kept beside the price
+        #: rather than inside it because a price with no age is a price that
+        #: cannot be called stale, and design section 9 requires an unmarked
+        #: session to read ``INDETERMINATE`` rather than as the last rung the
+        #: account happened to be on. Written by exactly the four places that
+        #: write ``_marks``: a fill, ``observe_marks``, ``settle_daily`` and
+        #: ``settle_expiry``.
+        self._mark_ts: Dict[str, datetime] = {}
         #: The variation-margin baseline per contract: the previous daily
         #: settlement price once one exists, and the position's own opening
         #: price until then. Both readings are VSDC's, per contract:
@@ -709,6 +736,33 @@ class DerivativesAccount:
                 f'been observed, so there is nothing to compute a requirement '
                 f'on. Pass it in `marks` or call observe_marks() first.')
         return price
+
+    def mark_is_current(self, contract_code: str, ts: datetime,
+                        marks: Optional[Mapping[str, Decimal]] = None) -> bool:
+        """Whether the price :meth:`mark_for` would return belongs to ``ts``.
+
+        Two ways for it to be current, and they are the two the rulebook
+        recognises as a mark: the caller supplied one for this call, or the
+        cache holds one observed in **this session**. Anything else is a price
+        carried over from a session that has ended, which is what design
+        section 9 calls an absent ``settlement_price``.
+
+        Currency is judged per **session day**, not per instant. That is not a
+        convenience: rulebook 6.3 gives two marks and no third -- "the latest
+        matched price at the moment of calculation" within the session and the
+        daily settlement price at its end -- so a price from 09:30 is still
+        this session's mark at 14:45, while yesterday's DSP is not. Which
+        session a ``ts`` belongs to is its date, because no Vietnamese session
+        crosses midnight.
+
+        An unmarked contract that is nevertheless held is **not** current: its
+        only price is ``average_entry``, which was a matched price on the day
+        it was matched and is a guess on any later one.
+        """
+        if marks is not None and marks.get(contract_code) is not None:
+            return True
+        observed = self._mark_ts.get(contract_code)
+        return observed is not None and observed.date() >= ts.date()
 
     def variation_reference(self, contract_code: str) -> Decimal:
         """The baseline the account's P&L is measured from, for VM.
@@ -800,38 +854,81 @@ class DerivativesAccount:
                      ) -> Union[Transferred, Rejected]:
         """The deposit leg of a deposit -> securities transfer.
 
-        Bounded by ``free_deposit = balance - posted - resting-order margin``,
-        which is what stops a caller withdrawing the margin backing an open
-        position. Short -> ``Rejected(INSUFFICIENT_DEPOSIT)`` carrying
-        ``free_deposit`` as the binding constraint, per the interface
-        contract's per-rule table.
+        Rulebook 6.3 ("Margin withdrawal", VSDC section VI and section IV.3,
+        confidence HIGH) states three conditions. Two of them bind an investor
+        and both are enforced here:
 
-        **A known tightening, not implemented.** Rulebook 6.3 ("Margin
-        withdrawal", VSDC section VI) puts the investor-level test at *assets
-        minus the required maintenance value*, i.e. assets minus ``MR``, "not
-        assets minus IM". The difference is exactly ``VM``, so ``free_deposit``
-        is an upper bound on the truly withdrawable amount and is loose by the
-        unrealised loss whenever the account is in loss. ``MarginView.equity``
-        is that stricter figure and is reported in ``detail`` on a rejection so
-        the gap is visible rather than silent.
+        1. **The utilisation ratio AFTER the withdrawal is below the level-3
+           threshold.** So the bound is ``balance - MR / forced_close``, which
+           at the default 1.00 threshold is exactly ``MarginView.equity`` --
+           "the withdrawable amount is assets minus MR at the broker's
+           threshold, **not** assets minus IM".
+        3. **The account is not currently suspended** for a
+           margin-utilisation breach, i.e. its status is not ``FORCED``.
+
+        Condition (2) -- withdrawn securities not exceeding securities posted
+        -- has no representation here because Tier 1 models cash-only margin;
+        see :attr:`deposit_balance`.
+
+        **``free_deposit`` is not this bound and never was.** It subtracts IM
+        and leaves VM standing, so it is loose by exactly the unrealised loss,
+        and the gap is not academic: an account holding 110m against a 117m
+        requirement is ``FORCED`` with equity of *minus* 7m, and
+        ``free_deposit`` still reads 93m. Paying that out empties the
+        segregated pool at the moment VSDC has the account suspended and takes
+        utilisation from 1.06 to 6.88. ``free_deposit`` remains the figure a
+        *new order* is tested against, which is a different question.
+
+        **The threshold is exclusive.** Withdrawing exactly ``equity`` leaves
+        ``MR / assets`` at precisely the forced-close level, and
+        :func:`margin_status` counts that as the breach, not as the last legal
+        point below it -- so the withdrawable amount reported in
+        ``binding_constraint`` is a supremum the caller must stay under while
+        any requirement stands. With no requirement at all there is no ratio to
+        breach and the account may be emptied.
+
+        Short or suspended -> ``Rejected(INSUFFICIENT_DEPOSIT)`` carrying the
+        withdrawable amount as the binding constraint, per the interface
+        contract's per-rule table. ``detail`` carries ``free_deposit`` beside
+        it so the two figures can be compared where they used to be confused.
         """
         if amount <= 0:
             raise ValueError(f'a transfer must move a positive amount, got '
                              f'{amount}')
-        view = self.margin(marks, rules,
-                           terms if terms is not None else self.terms, ts,
-                           resting=resting)
-        if amount > view.free_deposit:
+        terms = terms if terms is not None else self.terms
+        view = self.margin(marks, rules, terms, ts, resting=resting)
+        threshold = terms.forced_close_utilisation
+        withdrawable = view.deposit_balance - (
+            view.required / threshold if threshold > 0 else view.required)
+        if withdrawable < _ZERO:
+            withdrawable = _ZERO
+        after = margin_status(view.required, view.deposit_balance - amount,
+                              terms)
+
+        # An indeterminate view refuses for the same reason a FORCED one does:
+        # condition (1) asks whether utilisation *after* the withdrawal is
+        # below the threshold, and on a stale mark that question has no
+        # answer. Paying out on "we could not tell" is the failure mode the
+        # whole staleness field exists to make visible.
+        if (view.status is MarginStatus.FORCED
+                or view.is_indeterminate
+                or after is MarginStatus.FORCED
+                or amount > withdrawable):
             return Rejected(
                 rule=StatefulRule.INSUFFICIENT_DEPOSIT,
-                binding_constraint=view.free_deposit,
+                binding_constraint=withdrawable,
                 ts=ts,
                 detail={'requested': amount,
+                        'withdrawable': withdrawable,
+                        'status': view.status,
+                        'status_after': after,
                         'free_deposit': view.free_deposit,
                         'deposit_balance': view.deposit_balance,
                         'posted_margin': view.posted_margin,
                         'resting_order_margin': view.resting_order_margin,
+                        'required': view.required,
                         'equity': view.equity,
+                        'utilisation': view.utilisation,
                         'pool': Pool.DERIVATIVES},
             )
         self._move(-amount, ts, 'transfer out to securities')
@@ -851,6 +948,7 @@ class DerivativesAccount:
         for code, price in marks.items():
             if price is not None:
                 self._marks[code] = price
+                self._mark_ts[code] = ts
 
     def settle_daily(self, settlements: Mapping[str, Decimal],
                      ts: datetime) -> None:
@@ -879,6 +977,7 @@ class DerivativesAccount:
             price = settlements[code]
             self._settlement_reference[code] = price
             self._marks[code] = price
+            self._mark_ts[code] = ts
 
     # -- orders ----------------------------------------------------------
 
@@ -962,6 +1061,28 @@ class DerivativesAccount:
         # let a caller manufacture free deposit with an absurd limit. The
         # caller is expected to have called observe_marks() for the interval.
         view = self.margin({}, rules, self.terms, ts)
+        if increment > 0 and view.is_indeterminate:
+            # The level-3 gate below asks whether the account is at or above
+            # the forced-close level. On a stale mark that is unanswerable,
+            # and an unanswered gate is an open one: an account actually in
+            # breach would be admitted on any session the data missed. Refused
+            # as ignorance rather than as a rule, so the rejection log does not
+            # report a data gap as a market rule.
+            return Rejected(
+                rule=StatefulRule.INSUFFICIENT_DEPOSIT,
+                binding_constraint=None,
+                ts=ts,
+                order_id=order_id,
+                verdict=Verdict.INDETERMINATE,
+                detail={'reason': 'the account cannot be shown to be below '
+                                  'the level-3 threshold: no mark was '
+                                  'observed this session for every contract '
+                                  'it holds',
+                        'stale_marks': view.stale_marks,
+                        'required': view.required,
+                        'deposit_balance': view.deposit_balance,
+                        'contract_code': code},
+            )
         if increment > 0 and view.status is MarginStatus.FORCED:
             # Level 3 suspends the account from OPENING new positions. An
             # offsetting order -- increment == 0 -- is explicitly excepted, and
@@ -1026,7 +1147,8 @@ class DerivativesAccount:
                                           resource=ResourceKind.DEPOSIT)
 
     def apply_fill(self, fill: Fill, rules: Optional[RuleSetLike],
-                   ts: Optional[datetime] = None) -> FillEffect:
+                   ts: Optional[datetime] = None, *,
+                   expiry: Optional[date] = None) -> FillEffect:
         """Net the contract ledger, realise any close-out, convert order margin.
 
         Three effects, in this order:
@@ -1055,9 +1177,23 @@ class DerivativesAccount:
 
         The fill price also becomes the contract's latest mark: a fill *is* a
         matched price, which is what in-session IM is computed on.
+
+        Args:
+            expiry: the contract's last trading day, resolved by the caller at
+                the fill instant. Recorded on the account so later fills in the
+                same contract keep it, and the constructor's ``expiries`` map
+                stays the override. It is a keyword and not a build-time table
+                on purpose: a session cannot know which contracts it will trade
+                before it trades them, and a table filled in at construction is
+                locked shape 1's forbidden per-ticker cache one level up. A
+                position with no expiry can never reach ``ExpirySettled`` and
+                is margined for the rest of the run, so the caller supplying
+                nothing here is a real cost and not a neutral default.
         """
         stamp = ts if ts is not None else fill.ts
         code = fill.ticker
+        if expiry is not None:
+            self._expiries[code] = expiry
         multiplier = self.multiplier_for(code)
         before = self.contracts.position(code)
 
@@ -1073,6 +1209,7 @@ class DerivativesAccount:
         position = self.contracts.apply_fill(
             fill, multiplier, self._expiries.get(code))
         self._marks[code] = fill.price
+        self._mark_ts[code] = stamp
         if position is None:
             # Flat: the baseline described a position that no longer exists.
             self._settlement_reference.pop(code, None)
@@ -1116,6 +1253,7 @@ class DerivativesAccount:
         self.contracts.remove(contract_code)
         self._settlement_reference.pop(contract_code, None)
         self._marks[contract_code] = settlement
+        self._mark_ts[contract_code] = ts
         if cash_flow != 0:
             self._move(cash_flow, ts,
                        f'final settlement of {contract_code} at {settlement}')
@@ -1264,6 +1402,14 @@ class MarginMonitor:
     The window is measured in **sessions** through a ``TradingCalendar``, not
     in settlement business days: the two calendars diverge around Tet, and a
     cure deadline is a trading deadline.
+
+    :attr:`liquidation` is the selection rule this monitor's forced closes are
+    to be reported under. It is **read**, not merely stored: ``exchange.py``
+    takes it for ``SessionProvenance.liquidation_rule`` and for the
+    ``selection_rule`` on every ``FORCED_LIQUIDATION`` event. Design section
+    7.4 requires a forced close to state its rule, and a stored-but-ignored
+    parameter meant a run configured one way reported the other -- which is
+    worse than stating nothing, because it is checkable and false.
     """
 
     def __init__(self, terms: BrokerTerms, calendar: TradingCalendarLike, *,
@@ -1271,6 +1417,8 @@ class MarginMonitor:
                  venue: Venue = Venue.HNXDS) -> None:
         self.terms = terms
         self.calendar = calendar
+        #: The selection rule a forced close under this monitor is reported
+        #: under. See the class docstring: this is read by ``exchange.py``.
         self.liquidation = liquidation
         self.venue = venue
         self._cure_by: Optional[datetime] = None
@@ -1317,7 +1465,21 @@ class MarginMonitor:
         still at or above the call level. A mark reports at most one step, and
         a jump straight past the call level reports ``FORCED`` without
         inventing an intermediate call that never happened.
+
+        **An ``INDETERMINATE`` view is not a mark at all** and the machine does
+        not advance on one -- no news, no cure, no escalation, and
+        ``last_status`` still reports the last thing actually observed. Both
+        of the other readings are wrong in a way that matters: clearing an
+        outstanding call would report a cure nobody paid, and forcing on an
+        elapsed deadline would liquidate an account against a price nobody
+        saw. A cure deadline that passes during a blind stretch therefore
+        survives it and bites on the first session that has data, which is the
+        conservative direction and is also what a clearing member does when
+        its own price feed is down.
         """
+        if view.status is MarginStatus.INDETERMINATE:
+            return ()
+
         ladder = view.status
         out: Tuple[MarginView, ...] = ()
 
