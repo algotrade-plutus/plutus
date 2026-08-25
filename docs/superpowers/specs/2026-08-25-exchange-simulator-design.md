@@ -1,0 +1,673 @@
+# Design — `plutus.market`: a high-fidelity Vietnamese exchange simulator
+
+**Date:** 2026-08-25 · **Status:** approved for planning
+**Supersedes:** substantial parts of `2026-08-24-exchange-fill-model-design.md` (see §2)
+
+---
+
+## 1. Thesis
+
+A backtest is only as faithful as its model of the exchange. Vietnam's exchanges
+enforce rules that general-purpose backtesters do not carry — a price-dependent
+tick grid, daily price-limit bands, 100% pre-funding, T+2 settlement with a
+13:00 delivery cut, ATO/ATC call auctions, foreign-ownership caps, and a
+*segregated* derivatives margin account under VSD rules.
+
+**Plutus is a simulated Vietnamese exchange you point a strategy at.** It exposes
+the same shape of interface a live broker does — submit an order, receive its
+status, read your holdings and your margin — and it enforces the Vietnamese
+rulebook behind that interface. The strategy author does not have to remember
+that a share bought today cannot be sold today, or that a futures margin call
+cannot be met with equity cash.
+
+The consequence, and the point: **the same strategy code can run against history
+and against production.** That is what makes it a pre-live validation tool rather
+than another backtester.
+
+### What it is not
+
+It is not a backtesting engine. It does not run strategies, hold a portfolio,
+compute returns, value positions, or report performance. The caller does all of
+that. Plutus is the **counterparty**.
+
+The commodity parts of a trading stack — event loop, portfolio accounting, data
+handling, reporting — already exist in NautilusTrader, Backtrader and vectorbt,
+and are not rebuilt here. What does not exist anywhere is the Vietnamese exchange.
+That is the whole scope.
+
+## 2. What changed from the previous spec, and why
+
+The 2026-08-24 spec is superseded in four respects. Each change was forced by a
+finding, not by preference.
+
+| Previous position | Now | Why |
+|---|---|---|
+| The exchange is **stateless**: `admits(order, state) -> Verdict` and nothing more | The exchange is a **stateful session**: resting orders, settlement state, margin balances | A real exchange and depository *do* hold this state. Declaring it trader-side was wrong, and it made the T+2 rule unimplementable — which is the single most-wanted feature. |
+| The framework claim is the **asymmetry** between admission rules (equity) and position rules (derivatives) | Dropped as an organising claim | The author does not want it, and it does not survive contact with T+2 — a settlement rule that is stateful, equity-side, and exchange-enforced. |
+| Non-goal: **no order lifecycle**, no partial fills | Order lifecycle is **in scope** | Without order status there is no API worth using. |
+| Reframe to a **backtest auditor** ("feed us your trade log") | Rejected | It requires other researchers to submit their code for inspection. They will not, and "we will tell you your results are wrong" does not sell. |
+
+Two structural insights arrived with those changes and are load-bearing below:
+
+**Exchange rules and broker terms are different objects** (§6). Exchange rules
+are gazetted, dated and identical for everyone. Broker terms are commercial,
+differ by firm and change at will. `margin.py` already gets the *shape* of this right —
+`vsd_initial` and `broker_buffer` are separate fields summing to `initial_rate`. What
+is new is applying the same split to settlement, fees, taxes and the sale advance, and
+requiring that everything on the exchange side carry a dated citation. (The narrow bug
+in the existing code is that `vsd_initial` is `0.175`, which matches no VSD publication,
+and `maintenance_rate` is set equal to it — see §7.4 and the rulebook research.)
+
+**Fill determination is a pluggable policy, not a fixed rule** (§8). This is the
+product's most useful feature, not a workaround for missing depth.
+
+## 3. Non-goals
+
+- **No strategy execution.** Plutus never calls user code.
+- **No portfolio, P&L, returns, or performance reporting.** The caller owns these.
+  Plutus reports positions only to the extent an exchange does — for settlement
+  eligibility and for margin.
+- **Charges ARE modelled**, because they move cash and therefore change admission
+  outcomes. Statutory taxes and exchange/VSD fees are dated `exchange_rules`;
+  brokerage commission and the sale-advance rate are `broker_profile`. Each venue has
+  its own schedule, so the model is a generic table (§6.1), not a pair of constants.
+  Plutus debits them and reports them; it never nets them into a return.
+- **No market impact.** Orders fill against observed history; the simulated order
+  never moves the market and never induces a counterparty reaction. This is the
+  standing limitation of any replay simulator and must be stated in every result.
+- **No queue-priority matching against a full book** in this cycle. Fill
+  determination is policy-driven (§8), and where the data cannot decide, the
+  answer is `INDETERMINATE` rather than a guess.
+- **No event-driven callbacks** in this cycle. Synchronous `submit`/`poll` only;
+  event-driven is future work (§13).
+- **No auto-transfer between accounts.** Vietnam has no such feature; transfers
+  are always explicit caller actions (§7.3).
+
+## 4. Object model
+
+```
+Session                        the simulation: clock, routing, one Account
+  ├── clock                    advances through dates and session phases
+  ├── exchanges                {HSX, HNX, UPCOM, HNXDS} — as configured
+  │     └── Exchange           rulebook + admits() + sustains()   [EXISTS]
+  ├── Account
+  │     ├── SecuritiesAccount  CashLedger + HoldingsLedger
+  │     └── DerivativesAccount DepositLedger + ContractLedger + margin view
+  ├── OrderBookOfRecord        the caller's own resting orders, by id
+  ├── FillPolicy               pluggable fill determination
+  └── MarketDataSource         supplies MarketState per symbol per instant
+```
+
+A `Session` may hold **several exchanges at once**. Symbols route to their
+exchange automatically from the ticker master. This is required for pair trading
+— a VN30 basket against VN30F is the canonical Vietnamese use case and it spans
+HSX and HNXDS.
+
+## 5. API surface
+
+Synchronous, call-and-response. Deliberately close in shape to a broker API.
+
+```python
+session = Session.from_config("config.json")
+
+# --- clock -----------------------------------------------------------------
+session.advance_to(ts)                  # -> list[Event]  (marks, calls, expiries)
+session.now()                           # -> Timestamp
+session.phase("HSX")                    # -> SessionPhase
+
+# --- orders ----------------------------------------------------------------
+ack = session.submit(Order(
+    side=Side.BUY, symbol="FPT", quantity=1000,
+    order_type=OrderType.LIMIT, limit_price=Decimal("95.5"),
+))
+# -> Accepted(order_id, ts) | Rejected(rule, binding_constraint, detail)
+
+session.cancel(ack.order_id)            # -> Cancelled | Rejected(rule, ...)
+session.amend(ack.order_id, ...)        # Tier 2
+session.orders(status=OrderStatus.RESTING)
+session.poll()                          # -> list[Event] since last poll
+
+# --- state the exchange legitimately knows ---------------------------------
+session.holdings("FPT")
+# -> Holding(settled, committed, unsettled=[(qty, settles_at), ...])
+#    sellable = settled - committed        (see §7.0)
+
+session.cash()
+# -> Cash(available, settled_balance, committed,
+#         pending_proceeds=[(amount, settles_at), ...], advanced, interest_accrued)
+
+session.positions()                     # derivatives contract ledger
+# -> {contract_code: Position(net_qty_signed, avg_entry, multiplier, expiry)}
+
+session.margin()
+# -> MarginView(required, deposit_balance, free_deposit, equity, utilisation,
+#               status, cure_by)
+
+session.charges()                       # everything debited so far, itemised
+# -> [Charge(kind, venue, base, amount, levied_by, ts), ...]
+
+session.transfer(Pool.SECURITIES, Pool.DERIVATIVES, amount)
+# -> Transferred(ts) | Rejected(rule, ...)
+```
+
+`MarginView` is the **session-level** aggregate and is deliberately a different type
+from the existing per-position `plutus.market.margin.MarginState`
+([margin.py:70](../../../src/plutus/market/margin.py)), which it wraps and aggregates.
+`Pool` is the transfer target enum, distinct from the `Account` composite in §4.
+
+**Event delivery has one cursor.** `advance_to()` returns the events it generated *and*
+consumes them; `poll()` drains anything since the last read of either. The cursor is
+destructive and single-consumer — a strategy and a separate logger cannot both drain it,
+which is acceptable because §3 puts all reporting on the caller's side. Events carry
+`(order_id, transition, ts)`, which is a dedupe key if a caller wants one.
+
+`Rejected` always carries the **rule** that refused the order, not a string. The
+existing `AdmissionRule` vocabulary is extended with the new stateful rules:
+
+```
+TICK_GRID · ROUND_LOT · BAND_LIMIT · BAND_LOCK · FOREIGN_ROOM · SESSION_SEMANTICS
+UNSETTLED_HOLDING · INSUFFICIENT_CASH · INSUFFICIENT_DEPOSIT · POSITION_LIMIT
+```
+
+### Events
+
+```
+Filled · PartiallyFilled · Cancelled · Expired · Indeterminate
+MarginCall · ForcedLiquidation · SettlementCredited · ExpirySettled
+```
+
+## 6. Configuration
+
+Two objects, because they are two kinds of fact.
+
+```json
+{
+  "period": {"start": "2021-06-01", "end": "2022-12-30"},
+  "resolution": "tick",
+
+  "exchange_rules": {
+    "venues": ["HSX", "HNXDS"],
+    "rulebook": "vn-2020-2026"
+  },
+
+  "broker_profile": {
+    "name": "generic-retail-2022",
+    "margin_buffer": 0.05,
+    "margin_cure_window": "next_session",
+    "advance_sale_proceeds": {"enabled": true, "daily_rate": 0.0004},
+    "commission": [
+      {"venue": "HSX",   "base": "trade_value", "rate": 0.0015},
+      {"venue": "HNXDS", "base": "per_contract", "amount": 2700}
+    ]
+  },
+
+  "accounts": {
+    "securities":  {"initial_cash": 150000000},
+    "derivatives": {"initial_deposit": 50000000}
+  },
+
+  "fill_policy": {"kind": "hard", "max_participation": 0.10},
+
+  "data": {"adapter": "plutus.datahub", "root": "/path/to/corpus"}
+}
+```
+
+**The rulebook is resolved per event instant — `rulebook.at(ts)` — not once at config
+load.** A `period` spans regime changes (settlement changed inside 2022; KRX changed
+HOSE inside 2025), so a single scalar version cannot be right for a multi-month run.
+Named values under `exchange_rules` are therefore **counterfactual pins**: legal, but
+recorded as overrides in the session's provenance record, which is exactly how a
+post-KRX rulebook can be run against pre-KRX data as a control. No pin appears in the
+example above, because a pinned `T+2@13:00` against a `period` starting 2021-06-01 would
+contradict the in-force regime for most of the run — a bug dressed as a demonstration.
+
+Every value in the rulebook must be traceable to a HOSE/HNX/VSD/MoF document with an
+effective date. That traceability is the rulebook's whole claim, and it is why broker
+terms must not live here.
+
+### 6.1 Charges — one generic table, per venue
+
+Charges are modelled (§3) and every venue has a different schedule, so they are rows in
+a table rather than named constants:
+
+```
+Charge = {
+  venue, applies_to,        # HSX | HNX | UPCOM | HNXDS ; equity | warrant | etf | future
+  base,                     # trade_value | per_contract | per_trade | per_open_contract_per_day
+                            # | monthly_per_security
+  rate | amount,
+  min, max,                 # optional
+  side,                     # buy | sell | both
+  levied_by,                # state | exchange | vsd | broker
+  debited_at,               # fill | daily | monthly
+  pool                      # securities | derivatives
+}
+```
+
+This shape is required by the rules themselves, not by taste: the **0.1% personal
+income tax** is sell-side only and withheld at source, so a sale credits cash net —
+without it every sale is wrong by more than most commissions. The **VSD position
+maintenance fee** accrues *per open contract per day*, which no per-trade constant can
+express. **Custody** is monthly per security. Rows with `levied_by` of `state`,
+`exchange` or `vsd` belong in the dated rulebook; `broker` rows belong in
+`broker_profile`.
+
+Estimated charges enter the buy encumbrance (§7.0) so `available` stays honest.
+
+## 7. Ledgers and settlement
+
+### 7.0 Encumbrance — accepting an order commits resources
+
+Because orders now **rest**, every ledger check must test a balance *net of live
+orders*, not the raw balance. Without this the spec claims 100% pre-funding and T+2
+enforcement while describing ledgers that permit two individually-affordable resting
+buys to overdraw cash, and 500 settled shares to back 1,000 shares of resting sells —
+a short equity position, which Vietnam does not permit at all.
+
+Definitions:
+
+```
+Cash.available   = settled_balance + advanced_proceeds - Σ encumbrance(live buys)
+Holding.sellable = settled - Σ qty committed to live sells
+free_deposit     = deposit_balance - Σ posted margin - Σ margin on resting derivative orders
+```
+
+Encumbrance is taken **on accept** and released on **every** terminal transition —
+filled at the fill price, cancelled/expired/rejected in full, partial fills pro rata.
+
+Amount encumbered, by order type:
+
+| Order type | Buy encumbers | Rationale |
+|---|---|---|
+| `LIMIT` (LO) | `qty × limit_price` + estimated charges | Known worst case |
+| `MKT`, `MTL`, `MOK`, `MAK` | `qty × ceiling` + estimated charges | Matches the code's own "buy at ceiling" semantics ([order.py:56](../../../src/plutus/core/order.py)) |
+| `ATO`, `ATC` | `qty × ceiling` + estimated charges | Fundable before a clearing price exists |
+
+Sells encumber quantity from `settled`, never from `unsettled`.
+
+Transfers are bounded by the *net* figures: out of securities by `Cash.available`, out
+of the deposit by `free_deposit`. This is what stops a caller withdrawing the margin
+backing an open position.
+
+**Estimated charges are inside the buy encumbrance** (§6.1), so `available` stays
+consistent with what a fill will actually cost.
+
+### 7.1 Holdings — equity settlement
+
+Bought quantity is **unsettled** until the settlement instant, and unsettled
+quantity is not sellable. The regime is date-dependent, and this is where the
+"T+1.5" folk term is resolved: there has never been a T+1.5 cycle in Vietnamese
+law. It is a T+2 cycle with delivery before 13:00.
+
+**`unsettled` is a list of tranches, not a scalar.** Under T+2 up to two tranches are
+open at once; under the pre-2012 T+4 regime, four. A single `(quantity, sellable_from)`
+pair forces a wrong choice — either the earlier tranche's instant frees the later
+tranche's shares (permitting exactly the sale this section exists to prevent), or the
+later instant blocks the earlier one (a spurious rejection). So `Holding` carries
+`unsettled=[(qty, settles_at), ...]`, mirroring the shape `Cash.pending_proceeds`
+already uses.
+
+`sellable_from` is therefore **not stored**. It is computed as the earliest instant at
+which the *requested* quantity becomes sellable, and attached to the rejection.
+
+**Settlement instants are counted in sessions the data source actually yields**, not in
+calendar days (see §9). Instants come from real session dates, so T+N is holiday-correct
+through Tết by construction, with no separate trading calendar.
+
+**On daily bars, `T+2 @ 13:00` behaves as T+3.** A daily bar is stamped midnight
+([protocol.py:32](../../../src/plutus/market/protocol.py)), so a 13:00 threshold is not
+met by the T+2 bar. This is the conservative direction and is intended, but it is stated
+here rather than left to emerge from timestamp arithmetic — it is the difference the
+Tier 1 demo turns on.
+
+| Effective | Rule |
+|---|---|
+| 2002-01-02 → 2012-09-03 | T+4, sellable at session open |
+| 2012-09-04 → 2022-08-26 | T+3, sellable at session open |
+| 2022-08-29 → | T+2, sellable from 13:00 on T+2 |
+
+> **UNVERIFIED — must be sourced before Tier 1 lands.** These effective dates, the VSD
+> margin ratios, the tick and lot tables, the band special cases, the fee and tax
+> schedules and the KRX delta all come from secondary research and are not yet traced to
+> primary documents. Every one is a dated entry in the versioned rulebook and needs a
+> citation to a HOSE / HNX / VSD / MoF decision.
+>
+> A dedicated rulebook research pass covering **2020–2026** is under way; its output
+> lands at `docs/reference/vn-exchange-rulebook-2020-2026.md` and supersedes every
+> number in this spec. Do not pin a value into a test until it appears there with a
+> citation and a confidence level.
+
+A sell whose settled quantity is insufficient is `Rejected(UNSETTLED_HOLDING)`
+carrying `sellable_from`. That rejection is the feature people will notice first.
+
+### 7.2 Cash — proceeds and the sale advance
+
+Sale proceeds are **pending** until the same T+N instant and are not spendable.
+Because equity requires 100% pre-funding, a buy is
+`Rejected(INSUFFICIENT_CASH)` when available cash is short — even if pending
+proceeds would cover it.
+
+When `advance_sale_proceeds.enabled` is true, pending proceeds become available
+immediately and accrue interest at `daily_rate` until they settle. This is the
+brokerage product *ứng trước tiền bán*. It is a **broker term**, not an exchange
+rule, and it is the reason the two config objects are separate.
+
+Interest is reported in `Cash.interest_accrued`. Plutus does not net it against
+anything — the caller decides what to do with it.
+
+### 7.3 The derivatives deposit is a separate account
+
+Vietnamese derivatives margin is posted to a segregated deposit account
+("ký quỹ"). It is funded by an explicit transfer out of the securities account,
+and the two pools have **independent purchasing power**.
+
+- Equity orders draw on securities cash only.
+- Futures margin draws on the deposit only.
+- A margin call resolves against the deposit only. If the deposit is short,
+  the futures position is force-liquidated and **securities cash is untouched**.
+- There is **no auto-transfer**. The caller must call `transfer()`.
+
+**The `ContractLedger`.** A deposit balance with no positions behind it is not a
+coherent object, so `DerivativesAccount` also holds
+`{contract_code: (net_qty_signed, avg_entry, multiplier, expiry)}`, resolved
+open/close/net on each fill and readable via `session.positions()`. Everything the
+derivatives half promises depends on it: `POSITION_LIMIT` needs a quantity to compare
+against the cap, the daily mark needs a position to mark, `ForcedLiquidation` must name
+which contracts closed, and `ExpirySettled` must have a ledger effect.
+
+It is also where **shorts** live. A SELL on an HNXDS symbol opens or increases a short
+and is never checked against holdings; a SELL on an equity symbol requires settled
+holdings, because Vietnamese cash equity permits no short selling.
+
+Assumptions adopted for this cycle, both deliberately simple and both to be
+stated in any published result:
+
+- A transfer arrives **immediately** during trading hours. Intra-day transfer
+  timing is not modelled.
+- The margin-call cure window is the **next session** (`margin_cure_window`,
+  a broker term).
+
+This makes the strategy's *response* to a margin call part of the simulation,
+which is the realistic behaviour and the more useful one.
+
+### 7.4 The margin-call state machine
+
+```
+day T   mark every open contract to its settlement price
+        assets no longer cover the required margin  ->  MarginCall(cure_by = next session)
+        caller may transfer cash, reduce the position, or do nothing
+day T+1 re-mark
+        still short  ->  ForcedLiquidation
+        restored     ->  call cleared
+```
+
+**The test is account-level, and it is a utilisation test.** Valid margin assets are
+the whole ký quỹ deposit including free cash — not one position's equity. So:
+
+```
+required   = Σ initial_rate × notional(position)   +  margin on resting derivative orders
+assets     = deposit_balance + Σ mark-to-market gain/loss
+utilisation = required / assets      ->  a call fires when utilisation ≥ 1
+```
+
+Marking per position and comparing that position's own equity would **over-call**
+whenever the deposit holds spare cash — which is the normal case under §7.3's explicit
+transfer model. Resting derivative orders must contribute to `required`, or a caller can
+rest futures orders it cannot fund.
+
+> **The trigger's *semantics* must be fixed before its *numbers* are sourced.** The
+> existing code sets `maintenance_rate == vsd_initial`
+> ([margin.py:40](../../../src/plutus/market/margin.py)), which is the utilisation ≥ 1
+> test written differently. A draft of this spec instead paired initial 0.13 with
+> maintenance 0.10, which fires at utilisation 1.30 — an 8.89% adverse move, which the
+> ±7% VN30F band makes unreachable in a single session. Two correctly-cited numbers can
+> still produce a wrong rule if the mechanism between them is wrong.
+
+`ForcedLiquidation` must state its **selection rule** (largest-loss-first, or pro rata),
+the price used (the settlement price, or a `FillPolicy` call at the next open), and the
+resulting deposit balance. `ExpirySettled` is a cash movement into or out of the deposit
+at the index-referenced final settlement, with the contract removed from the ledger.
+
+**What the session uses from existing code.** `margin.py`'s per-position computation is
+reused and aggregated. `Exchange.sustains()` is **not** what the session runs per mark —
+its signature takes a whole `Sequence[MarketState]` and evaluates it in one batch, with
+nowhere to carry an outstanding call across days, and ~20 tests depend on that form. It
+stays untouched as the batch research path (§10).
+
+## 8. `FillPolicy` — the extension point
+
+A resting order's fate is often genuinely unknowable from historical data: we
+have three price levels, sizes only after the pending backfill, and never an
+order id or a true queue position. Rather than guess, the policy is explicit and
+swappable.
+
+```python
+class FillPolicy(Protocol):
+    def evaluate(
+        self,
+        order: RestingOrder,
+        interval: MarketInterval,   # prices traded, volume, book if available
+        rules: Exchange,
+    ) -> FillDecision: ...
+```
+
+`FillDecision` is one of `Fill(qty, price, confidence)`,
+`NoFill(reason)`, or `Indeterminate(reason)`.
+
+Two conventions must be fixed, because §8's whole value is a *spread across policies*
+and a drifting convention would contaminate the comparison:
+
+- **Fill price.** In a call auction, the published open/close (§11 item 10). In
+  continuous session under §3's no-impact replay, a limit order fills at its **limit
+  price** — the only non-arbitrary choice available.
+- **Fill quantity.** A `max_participation`-capped quantity is floored to
+  `instrument.trading_unit`. Otherwise the ledger holds an odd lot that `ROUND_LOT`
+  ([equity.py:58](../../../src/plutus/market/exchanges/equity.py)) will later refuse to
+  sell.
+- **`max_participation`** is a fraction of the volume observed in the evaluated
+  interval, and it aggregates across all of the caller's own live orders in that
+  instrument.
+
+| Policy | Rule | Represents |
+|---|---|---|
+| `SoftFillPolicy` | Fill if the price traded at or through the limit, full size | What every backtester does today — the baseline arm |
+| `HardFillPolicy` | Fill only when the market demonstrably traded *through* the limit; touched-at-limit → `INDETERMINATE`; capped at `max_participation` of observed volume | What is defensible going live |
+| `ProbabilisticFillPolicy` | Fill probability from queue estimate and observed volume; seeded | The middle, once sizes land |
+
+Ship `Soft` in Tier 1 (it is trivial, and it is the comparison arm). `Hard` in
+Tier 2. `Probabilistic` when sizes are available.
+
+### Why this is the selling point
+
+Run one strategy against all three policies and report the spread. *"Sharpe 1.8
+under soft fills, 0.4 under hard fills"* is a pre-live warning no existing tool
+produces, and the share of results resting on `INDETERMINATE` fills is a direct
+measure of how much of a backtest is unknowable.
+
+The boundary holds: the caller runs their strategy three times against three
+configured sessions. Plutus still never executes strategy code.
+
+## 9. Data source contract
+
+A source must supply, per symbol per instant, whatever it can of:
+
+| Field | Required | Absent ⇒ |
+|---|---|---|
+| `last`, `open/high/low/close` | yes | cannot simulate |
+| `reference`, `ceiling`, `floor` | one of | band rules → `INDETERMINATE` |
+| `session` phase | derivable from ts | `SESSION_SEMANTICS` → `INDETERMINATE` |
+| `volume` | per policy | `Soft` needs none; `Hard`'s participation cap and `Probabilistic` degrade to `INDETERMINATE` |
+| `book` (3 levels ± sizes) | no | `Probabilistic` unavailable; `Hard` degrades |
+| `foreign_room` | no | `FOREIGN_ROOM` → `INDETERMINATE` |
+| `settlement_price` | derivatives | margin marks → `INDETERMINATE` |
+
+**Nothing silently defaults.** A missing field produces `INDETERMINATE` with the
+field named, and the session reports the rate. Resolution (`daily` | `tick`) is
+declared by the source, and the session states which mode it is running in.
+
+This contract is what makes "arbitrary data source" a checkable claim rather
+than an assertion: a source either satisfies it or the session reports exactly
+which rules it cannot evaluate.
+
+## 10. What is reused
+
+This is **additive**. Nothing is thrown away and the suite stays green.
+
+- `Exchange.admits()` keeps its signature and becomes the admission gate inside
+  `submit()`. The new stateful checks (§7.0, §7.1) run in the session *around* it,
+  because they need account state `admits()` does not see.
+- `Exchange.sustains()` keeps its signature and is **untouched** — it stays the batch
+  research path used by `measurements/margin_incidence.py`. The session does *not* call
+  it per mark (§7.4): it takes a whole price path in one call, has nowhere to carry an
+  outstanding margin call between days, and ~20 tests in
+  `tests/market/test_derivatives_sustains.py` depend on the batch form. The session
+  aggregates `margin.py` primitives instead.
+- `margin.py`, `expiry.py`, the four rulebooks, tick grids, band reconstruction,
+  the three-state `Verdict` and evidence provenance: unchanged.
+- The 617 existing tests continue to pass. New stateful rules are new
+  `AdmissionRule` members, added rather than substituted.
+- `plutus.core.constant` supplies the session-phase boundaries the clock needs;
+  they are already encoded per exchange.
+
+## 11. Build order
+
+### Tier 1 — the walking skeleton
+
+1. `Session`: config load, clock, exchange registry, symbol routing. The rulebook
+   resolves **per event instant** (§6), not once at load.
+2. Order lifecycle: ids and the state machine (§12), including release of encumbrance
+   on every terminal transition.
+3. `submit` / `cancel` / `poll`
+4. `HoldingsLedger`: tranche list keyed by settlement instant (T+N resolved per instant
+   by regime); `settled` / `unsettled[]` / `committed` to live sells
+5. `CashLedger`: pre-funding via encumbrance at accept and release on terminal, pending
+   proceeds, advance-on-proceeds with interest, charge debits (§6.1)
+6. `DerivativesAccount`: deposit balance, `ContractLedger`,
+   `free_deposit = balance − posted − resting-order margin`, `transfer()` bounded by
+   the net figure in both directions
+7. `FillPolicy` protocol + `SoftFillPolicy`
+
+Deliverable: a tradeable exchange on daily bars. The demo is one screen — buy
+FPT, try to sell it the same session, get `Rejected(UNSETTLED_HOLDING,
+sellable_from=...)`.
+
+### Tier 2 — fidelity
+
+8. `HardFillPolicy` and `INDETERMINATE` accounting
+9. Session clock driven by real tick timestamps; ATO/ATC/PLO reachable from data
+10. Auction orders fill at the **published** open/close (cheap and correct)
+11. Margin call state machine, cure window, forced liquidation
+12. Foreign room wired from `quote_foreignroom` (the adapter currently hardcodes
+    `None`, and the comment claiming the data does not exist is false)
+13. Multi-exchange sessions exercised by a VN30/VN30F pair-trade fixture
+
+### Tier 3 — evidence for the paper
+
+14. Auction **clearing price computed by us**, graded against the published
+    close. This is evidence, not a feature: if it slips, the simulator still works.
+15. Occupancy census: the exchange never displayed a state our rules forbid.
+16. The fill-spread experiment (§8).
+
+## 12. Order state machine
+
+```
+                 submit()
+                    │
+        ┌───────────┴───────────┐
+     REJECTED                ACCEPTED
+   (rule named)                 │
+                             RESTING ──────┬──> CANCELLED   (caller)
+                                │          └──> EXPIRED     (phase/session end, per type)
+                                ▼
+                        PARTIALLY_FILLED ──┬──> FILLED
+                                           ├──> CANCELLED   (caller)
+                                           └──> EXPIRED
+```
+
+**`INDETERMINATE` is not an order state.** It is an *event* (§5) meaning the policy
+could not decide for that interval; the order is still `RESTING` and is re-evaluated on
+the next. Drawing it as a leaf beside `CANCELLED` was wrong — the ledgers in §7 need a
+definite answer, and "maybe 1000 shares" is not one. The exits from
+`PARTIALLY_FILLED` matter for the same reason: a half-filled resting order is exactly
+the one a caller cancels, and `core/order.py:291` already models
+`is_partial_filled_and_cancelled`.
+
+**Expiry is per order type**, not per phase boundary for every order. An MOK never
+rests; an unmatched ATO dies at the 09:15 cross; the noon break must not expire the
+book. In Vietnam the order type *is* the time-in-force, and all seven types already
+exist in `core/order.py:47`.
+
+Invariants, asserted:
+
+1. `filled + remaining = original`.
+2. A terminal **order** state is never left.
+3. Every transition carries a timestamp and a cause.
+4. **Σ encumbrance over live orders equals the ledgers' committed totals, and committed
+   returns to zero when no order is live.** One test, and it catches the whole leak
+   class in §7.0.
+
+## 13. Deferred, with reasons
+
+- **Event-driven callbacks.** Synchronous is simpler to test and reason about.
+- **Queue-position matching against a full reconstructed book.** 81% of
+  best-quote changes carry no trade, and there are no order ids, so order flow
+  cannot be recovered. `Probabilistic` is the honest ceiling here.
+- **The live Calibrator.** Deferred — but see §14.
+- **Continuous-session matching validated empirically.** Report the
+  `INDETERMINATE` rate as a bound on ignorance instead.
+- **Post-KRX (May 2025) rulebook.** The versioning mechanism is built in Tier 1;
+  populating the KRX rulebook is later work.
+
+## 14. Validation, in one paragraph
+
+Validation is **not a deliverable** — it is how the paper shows §5–§8 are
+correct. Three strands, in cost order: the occupancy census (needs no simulator,
+already has a working pilot); the chained test where our own computed close feeds
+next-day reference and band, graded against published values; and the firm's own
+2021–2022 order and reject logs, which are the gold standard retrospectively and
+require no live trading. One non-vendor data source should be obtained for a few
+hundred ticker-days, because every series currently arrives through the same
+pipeline we maintain.
+
+## 15. Declared limitations
+
+Omissions listed here are deliberate. An omission that is *declared* is not a defect;
+a silent one is.
+
+1. **Production parity awaits the post-KRX rulebook.** §1's claim that the same strategy
+   code runs against history and production does not hold today: KRX went live on HOSE
+   on 2025-05-05 and changed several modelled rules. §13 defers that rulebook, so §1 is
+   conditional until it exists.
+2. **Landing Tier 1 does not retro-validate the published numbers.** `admits()` has zero
+   non-test callers today, and three of the project's five headline figures come from
+   DuckDB SQL that parallels the rules rather than calling them. §10 makes `admits()`
+   the gate inside `submit()`, but the parallel SQL remains the source of those figures
+   until it is replaced by real calls.
+3. **Foreign room changes no result on this corpus.** `quote_foreignroom` has 12.79M
+   intraday rows, but the constraint never binds in sample — minimum remaining room is
+   1 and no row reaches 0. Tier 2 item 12 is a **coverage** claim (an unconditional
+   `INDETERMINATE` becomes a decision), not evidence that the cap bit. No paper text may
+   imply otherwise.
+4. **The final-settlement chain is approximate.** `expiry.py`'s `TWAP_30M` tier averages
+   the *expiring contract's own* matched price, while the regulation is index-referenced.
+   Its error was calibrated against published rows confined to 2022-06→2022-12, roughly
+   7 of the 24 in-corpus expiries, and extrapolated backwards.
+5. **No corporate-action engine in Tier 1.** Dividends, splits, bonus and rights issues
+   change both the reference price and the holdings quantity. Until §6's rulebook
+   carries the adjustment formulas, a run spanning an ex-date is wrong for that
+   instrument. Tier 2 at the latest; the rulebook research is sourcing the formulas.
+6. **No trading calendar object**, by design — T+N counts instants the data source
+   yields (§7.1), which is holiday-correct by construction.
+7. **Continuous-session fills are not empirically validated.** Report the
+   `INDETERMINATE` rate as a bound on ignorance rather than a fill rate (§13).
+
+## 16. Stated assumptions
+
+To be repeated in any published result:
+
+1. No market impact; no counterparty reaction.
+2. Transfers to the derivatives deposit arrive immediately during trading hours.
+3. The margin-call cure window is the next session.
+4. There is no auto-transfer between accounts.
+5. Fill determination is policy-dependent, and the policy must be reported
+   alongside any result derived from it.
