@@ -88,14 +88,15 @@ utilisation ladder -- are refused here and live in
 :class:`plutus.market.broker.BrokerTerms` instead.
 """
 
+import copy
 from dataclasses import dataclass, fields, replace
 from datetime import date, datetime, timedelta, timezone
 from datetime import time as _time
 from decimal import Decimal
 from enum import Enum
 from itertools import product
-from typing import (Any, Dict, FrozenSet, Iterable, Mapping, Optional, Sequence,
-                    Tuple)
+from typing import (Any, Callable, Dict, FrozenSet, Iterable, Mapping,
+                    Optional, Sequence, Tuple)
 
 from plutus.core.constant import (get_hsx_tick_size, get_trading_unit,
                                   is_covered_warrant, is_etf)
@@ -115,7 +116,7 @@ __all__ = [
     'KRX_CUTOVER', 'COVERAGE_START', 'COVERAGE_END',
     'RuleName', 'RuleStatus', 'RuleResolution', 'RuleInterval',
     'SessionSchedule', 'UnresolvedRule', 'RuleSet', 'Rulebook', 'SymbolRouter',
-    'VenueListing', 'RULEBOOK_IDS',
+    'TickSizeFunction', 'VenueListing', 'RULEBOOK_IDS',
 ]
 
 
@@ -376,12 +377,28 @@ def _pick(series: Sequence[RuleInterval], on: date) -> Optional[RuleInterval]:
 #: :data:`RuleName.SESSION_SCHEDULE`, a dated table like every other rule.
 #:
 #: The ``exchanges/`` object that judges each venue's orders.
+#:
+#: **Import-time, and therefore undated by construction**: each object holds
+#: the ``core.constant`` :class:`~plutus.core.constant.ExchangeSpec` for its
+#: venue, whose tick function, round lot, band and session windows carry no
+#: date. Nothing in this module hands one of these out unmodified --
+#: :meth:`SymbolRouter.exchange` copies the object and installs a dated tick
+#: grid on the copy -- and the mapping exists only so that copy has a base to
+#: start from. The originals stay untouched for the batch research path, which
+#: judges on ``ExchangeSpec`` deliberately.
 _EXCHANGE_BY_VENUE: Mapping[Venue, Exchange] = {
     Venue.HSX: HSX_EXCHANGE,
     Venue.HNX: HNX_EXCHANGE,
     Venue.UPCOM: UPCOM_EXCHANGE,
     Venue.HNXDS: HNXDS_EXCHANGE,
 }
+
+#: ``(ticker, price) -> tick``, the shape ``ExchangeSpec.tick_size_function``
+#: has. ``None`` is a legitimate answer and means *no band of the price table
+#: matches this price*, which ``exchanges/equity.py`` reads as
+#: ``INDETERMINATE`` on ``TICK_GRID`` -- the existing ``get_hsx_tick_size``
+#: behaviour, preserved rather than tidied away.
+TickSizeFunction = Callable[[str, Decimal], Optional[Decimal]]
 
 #: Vietnam's wall clock. ``AbstractTradingSession.is_current`` compares
 #: ``given_datetime.time()`` and ignores ``tzinfo`` entirely, so an aware
@@ -2082,6 +2099,52 @@ class RuleSet:
         """
         return self.require(RuleName.SESSION_SCHEDULE, venue)
 
+    def session_open(self, venue: Venue) -> _time:
+        """The first instant this venue does anything, in force at ``self.ts``.
+
+        The opening auction where the venue runs one (HOSE 09:00, HNXDS 08:45)
+        and the continuous open otherwise (HNX and UPCoM 09:00) -- derived
+        from :attr:`SessionSchedule.day_open` rather than carried as a field,
+        so a row cannot state a day boundary contradicting the sessions it
+        also states.
+
+        **This exists because ``calendar.py`` was looking for it.**
+        ``VnTradingCalendar._session_open_time`` prefers
+        ``rules.session_open(venue)`` and falls back to a map built at import
+        from ``core.constant``'s four ``ExchangeSpec`` objects -- one undated
+        window per venue, no document, no confidence grade, and no way to say
+        "unknown". That fallback is what a margin call's ``cure_by`` and a DAY
+        order's expiry instant were measured against, and it is locked shape
+        1's forbidden build at the two moments the session stamps on an event.
+        The clock has been :data:`RuleName.SESSION_SCHEDULE` since ``phase()``
+        stopped reading a singleton; this is the same dated row, exposed in
+        the shape that method already asks for.
+
+        The numbers are unchanged today -- no session-time change is attested
+        in 2020-2026 -- so this is a provenance repair, not a behaviour
+        change: what moves is that the answer now carries a citation and a
+        confidence grade, and that a date outside the rulebook's coverage
+        raises :class:`UnresolvedRule` instead of being answered from an
+        object with no dates on it.
+        """
+        return self.session_schedule(venue).day_open
+
+    def session_close(self, venue: Venue) -> _time:
+        """The instant after which this venue does nothing more.
+
+        The end of the **last matching phase**, which is why it is HNX 15:00
+        (after the PLO) against HOSE 14:45 (after the ATC) and UPCoM 15:00
+        (which has neither auction nor post-close session and simply stops
+        matching). Dated, cited, and raising outside coverage, for the reasons
+        :meth:`session_open` gives.
+
+        Note what this deliberately is *not*: the end of the put-through day.
+        HOSE negotiates to 15:00 while it stops matching at 14:45, and
+        :class:`SessionSchedule` carries no put-through window because this
+        package models order matching only.
+        """
+        return self.session_schedule(venue).day_close
+
     def phase(self, venue: Venue) -> SessionPhase:
         """The session phase at ``self.ts``, from the DATED schedule row.
 
@@ -2557,9 +2620,79 @@ class SymbolRouter:
             note=(f'no venue for {ticker!r} at {on}: no dated listing, not a '
                   f'futures code, and no data source classified it')))
 
-    def exchange(self, ticker: str, ts: datetime) -> Exchange:
-        """The ``exchanges/`` object that judges this ticker at this instant."""
-        return _EXCHANGE_BY_VENUE[self.venue(ticker, ts)]
+    def exchange(self, ticker: str, ts: datetime, *,
+                 tick_size: Optional[TickSizeFunction] = None) -> Exchange:
+        """The ``exchanges/`` judge for this ticker, **dated at ``ts``**.
+
+        ``ts`` reaches the returned object and is not merely consumed by
+        :meth:`venue`. The four objects in :data:`_EXCHANGE_BY_VENUE` are
+        built at import from ``core.constant``'s undated
+        :class:`~plutus.core.constant.ExchangeSpec`, so handing one back
+        unmodified returns the singleton grid under a dated signature -- the
+        forbidden build of locked shape 1, wearing the seam's own clothes.
+        Two verified failures follow from it, and they run in opposite
+        directions:
+
+        * **An illegal price admitted.** GB05F2306 routes to HNXDS, where the
+          tick is 1 VND on a 100,000d face (HIGH confidence, from the contract
+          template). The singleton says 0.1, so a limit of 100,523.5 -- off
+          the real grid -- is admitted and the run reports a fill HNX would
+          never have matched.
+        * **A legal order refused.** HNX's ETF tick is 0.001 from 2022-03-31
+          (VNX QD 17 Phu luc III S2.2), a hundredth of the singleton's 0.1, so
+          99 of every 100 legal FUEHNX01 prices come back
+          ``Rejected(TICK_GRID, binding_constraint=0.1)``.
+
+        The repair is a shallow copy carrying an ``ExchangeSpec`` whose
+        ``tick_size_function`` reads this module's dated
+        :meth:`RuleSet.tick_size`. It lives **here**, once, because both
+        callers need it: ``ExchangeSession`` closed the seam inside itself
+        first, which left this method -- advertised as public API by the Tier
+        1 interface contract -- still handing out the undated grid.
+
+        **Installed rather than pre-checked.** A dated pre-check before
+        ``admits()`` would fix the illegal-price half and leave the
+        refused-legal-order half untouched, because ``admits()`` would still
+        re-judge the same price against the singleton. Installing means the
+        grid is resolved once and judged once by the rule that owns it:
+        ``TICK_GRID`` stays first in the admission sequence,
+        ``binding_constraint`` is still the tick that bound, and the per-rule
+        composition of the rejection log is unchanged.
+
+        ``tick_size`` overrides the resolution for callers that must resolve
+        the grid themselves *before* ``admits()`` runs -- ``ExchangeSession``
+        does, because ``RuleSet.tick_size`` raises :class:`UnresolvedRule`
+        where the rulebook carries no row and the session has to turn that
+        into ``Rejected(verdict=INDETERMINATE)`` filed under ``TICK_GRID``
+        rather than let it escape from inside ``admits()``. It is the same
+        number by the same route; passing it pins the value the caller already
+        reported on. Left ``None``, the grid is resolved lazily, per price, so
+        a router with no data source never touches one.
+
+        ``copy.copy`` rather than ``type(base)(spec)`` because the derivatives
+        exchange also carries a margin config and a position limit, and
+        rebuilding it from its spec alone would silently reset both.
+        **Nothing is cached**: a fresh object per call, because a venue-keyed
+        cache of tick-bearing exchanges is the forbidden build one level up,
+        and because the batch research path shares these singletons with 997
+        tests that must keep judging on ``ExchangeSpec`` exactly as they do.
+
+        ``method`` is left at ``ORDER_MATCHING`` deliberately: a put-through
+        is negotiated at a hundredfold finer grid, and no caller in this
+        package models a negotiated side.
+        """
+        venue = self.venue(ticker, ts)
+        if tick_size is None:
+            def tick_size(judged: str,
+                          price: Decimal) -> Optional[Decimal]:
+                """The dated grid for this instrument at this price."""
+                return self._rulebook.at(ts).tick_size(
+                    venue, self._classify(judged, self._base(judged)),
+                    price, ticker=judged)
+        base = _EXCHANGE_BY_VENUE[venue]
+        judge = copy.copy(base)
+        judge.spec = replace(base.spec, tick_size_function=tick_size)
+        return judge
 
     # -- instrument -----------------------------------------------------
 
@@ -2582,7 +2715,7 @@ class SymbolRouter:
         """
         rules = self._rulebook.at(ts)
         venue = self.venue(ticker, ts)
-        base = self._source.instrument(ticker) if self._source else None
+        base = self._base(ticker)
         kind = self._classify(ticker, base)
         limit = rules.daily_trading_limit(venue, kind, ticker)
         if limit is None:
@@ -2604,6 +2737,16 @@ class SymbolRouter:
         )
 
     # -- private --------------------------------------------------------
+
+    def _base(self, ticker: str) -> Optional[InstrumentSpec]:
+        """The source's undated spec, or ``None`` with no source at all.
+
+        The one place this class touches ``MarketDataSource.instrument()``,
+        which takes no ``ts``. Naming it keeps the containment visible: every
+        dated field of what :meth:`instrument` returns is overwritten from the
+        :class:`RuleSet`, and what survives from here is classification only.
+        """
+        return self._source.instrument(ticker) if self._source else None
 
     @staticmethod
     def _classify(ticker: str,

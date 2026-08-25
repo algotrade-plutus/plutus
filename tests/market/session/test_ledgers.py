@@ -23,8 +23,12 @@ import pytest
 from plutus.core.order import OrderType, Side
 from plutus.market.broker import BrokerTerms
 from plutus.market.protocol import BandSource, MarketState, Order
-from plutus.market.session.ledgers import (CashLedger, EncumbranceLedger,
-                                           HoldingsLedger, SecuritiesAccount,
+from plutus.market.session.ledgers import (ANNUALISATION_BASIS_360,
+                                           ANNUALISATION_BASIS_365,
+                                           DECLARED_ANNUALISATION_BASIS,
+                                           AdvanceTerms, CashLedger,
+                                           EncumbranceLedger, HoldingsLedger,
+                                           SaleAdvance, SecuritiesAccount,
                                            assess_charges, estimate_charges,
                                            trade_value)
 from plutus.market.session.types import (AccountRef, BrokerProfile, Charge,
@@ -32,7 +36,7 @@ from plutus.market.session.types import (AccountRef, BrokerProfile, Charge,
                                          ChargeSide, Confidence, DebitedAt,
                                          Fill, FillEvidence, FillId, LeviedBy,
                                          Encumbrance, OrderId, Pool,
-                                         ResourceKind, RuleCitation,
+                                         Rejected, ResourceKind, RuleCitation,
                                          StatefulRule, Venue)
 from plutus.market.verdicts import AdmissionRule, Verdict
 
@@ -116,10 +120,11 @@ T2_1300 = datetime(2022, 3, 16, 13, 0)
 
 
 def account(cash=Decimal('150000000'), terms=None, holdings=None,
-            profile=BARE_BROKER, rules_profile=None):
+            profile=BARE_BROKER, rules_profile=None, advance_terms=None):
     """A securities account wired to one shared encumbrance ledger."""
     enc = EncumbranceLedger()
-    cash_ledger = CashLedger(cash, terms or BrokerTerms(), enc)
+    cash_ledger = CashLedger(cash, terms or BrokerTerms(), enc,
+                             advance_terms=advance_terms)
     holdings_ledger = HoldingsLedger(enc, initial=holdings)
     return SecuritiesAccount(
         AccountRef.securities('SEC-0001'), cash_ledger, holdings_ledger, enc,
@@ -764,6 +769,23 @@ def test_a_cash_dividend_pays_on_unsettled_parcels_too():
     assert holdings.holding('FPT').total == 1500
 
 
+def test_an_action_on_an_unheld_ticker_leaves_no_trace_in_the_ledger():
+    """``tickers()`` is this ledger's answer to "what did this run touch", and
+    ``corporate.CorporateActionAudit`` sweeps it to decide which crossings the
+    account was actually exposed to. Writing a zero back for a name the
+    account never held would put every ticker in a market-wide corporate-action
+    schedule into that answer, and the audit would then report exposure to all
+    of them -- which trains the caller to ignore the report."""
+    holdings = HoldingsLedger(EncumbranceLedger(), initial={'FPT': 1000})
+
+    cash_leg, tranches = holdings.apply_corporate_action(
+        'VIC', Decimal('2'), Decimal('2000'), T0)
+
+    assert (cash_leg, tranches) == (Decimal('0'), ())
+    assert holdings.tickers() == frozenset({'FPT'})
+    assert holdings.holding('VIC').total == 0
+
+
 # --------------------------------------------------------------------------
 # Atomicity -- apply_fill moves all three ledgers or none of them
 # --------------------------------------------------------------------------
@@ -875,3 +897,467 @@ def test_a_fill_that_cannot_be_paid_for_moves_no_ledger_at_all():
     assert acct.holding('FPT').unsettled == ()
     assert acct.cash().settled_balance == Decimal('1000000')
     assert acct.cash_ledger.charges() == ()
+
+
+# --------------------------------------------------------------------------
+# ung truoc tien ban -- the advance against unsettled sale proceeds
+#
+# Rulebook 8.3/8.4 and 12.7. The formula and the legal status are sourced; the
+# rate, the cap and the annualisation basis are not, and every test below that
+# depends on one of those says so.
+# --------------------------------------------------------------------------
+
+#: A firm that offers the product. 0.05%/day is the top of the observed
+#: 0.025-0.05%/day band (rulebook 12.7, medium confidence), chosen because it
+#: makes the arithmetic in these tests legible, not because it is typical.
+ADVANCE_ON = BrokerTerms(advance_on_sale_enabled=True,
+                         advance_on_sale_daily_rate=Decimal('0.0005'))
+
+#: The same firm, but the investor must ask per sale rather than the broker
+#: advancing every tranche on a standing registration.
+ON_REQUEST = AdvanceTerms.from_broker(ADVANCE_ON, auto_register=False)
+
+
+def cash_ledger(cash=Decimal('0'), terms=ADVANCE_ON, advance_terms=ON_REQUEST):
+    return CashLedger(cash, terms, EncumbranceLedger(),
+                      advance_terms=advance_terms)
+
+
+def test_the_declared_annualisation_basis_is_365_and_is_recorded_not_baked_in():
+    """Rulebook 12.1: "Declare one basis and use it... Recommend 365 with the
+    basis recorded in the config."
+
+    Recorded, not baked in: it is a field on the terms, so a caller reading a
+    360-basis quote can say so and get that quote's own arithmetic."""
+    assert DECLARED_ANNUALISATION_BASIS == ANNUALISATION_BASIS_365 == 365
+    assert ANNUALISATION_BASIS_360 == 360
+    assert AdvanceTerms.from_broker(ADVANCE_ON).annualisation_basis == 365
+
+    on_360 = AdvanceTerms.from_broker(ADVANCE_ON, annualisation_basis=360)
+    assert on_360.annualisation_basis == 360
+
+
+def test_the_two_bases_in_the_sources_disagree_by_about_one_point_four_percent():
+    """Rulebook 8.3's ANNUALISATION BASIS CONFLICT, reproduced.
+
+    The 0.025-0.05%/day industry range is annualised as "9-18% p.a.", which is
+    x360; DSC's "0.0356%/day = 13%/yr" is x365. Feeding one annual quote
+    through the other basis misprices the advance by 365/360 - 1, and the
+    error is systematic rather than noisy. So the basis is a named argument
+    and it is stored on the result."""
+    thirteen = Decimal('0.13')
+    on_365 = AdvanceTerms.from_annual_rate(thirteen)
+    on_360 = AdvanceTerms.from_annual_rate(
+        thirteen, annualisation_basis=ANNUALISATION_BASIS_360)
+
+    # DSC's published pair is reproduced by the 365 basis, not the 360 one.
+    assert on_365.daily_rate.quantize(Decimal('0.000001')) == Decimal('0.000356')
+    assert on_360.daily_rate.quantize(Decimal('0.000001')) == Decimal('0.000361')
+
+    divergence = on_360.daily_rate / on_365.daily_rate - 1
+    assert divergence.quantize(Decimal('0.0001')) == Decimal('0.0139')
+
+    # And each basis inverts with its own number, so a printed headline rate
+    # cannot silently be on a different basis from the terms it came from.
+    assert on_365.annual_rate == thirteen
+    assert on_360.annual_rate == thirteen
+
+
+def test_the_basis_never_enters_the_daily_accrual():
+    """Accrual counts actual calendar days between two instants; no year
+    length appears in it. Two ledgers on the same daily rate and different
+    bases must charge the same interest -- if they did not, the basis would be
+    being applied twice."""
+    on_365 = cash_ledger(advance_terms=AdvanceTerms.from_broker(
+        ADVANCE_ON, auto_register=False))
+    on_360 = cash_ledger(advance_terms=AdvanceTerms.from_broker(
+        ADVANCE_ON, auto_register=False, annualisation_basis=360))
+    for ledger in (on_365, on_360):
+        ledger.credit_pending(Decimal('10000000'), T2_1300, T0)
+        ledger.request_advance(T0)
+
+    assert (on_365.accrue_interest(T2_1300)
+            == on_360.accrue_interest(T2_1300)
+            == Decimal('10000000') * Decimal('0.0005') * 2)
+
+
+def test_an_advance_is_drawn_against_the_tranche_the_caller_names():
+    """The product is a draw on a *particular* receivable. A request naming
+    one parcel must leave the others untouched -- otherwise "request an
+    advance" is just "turn the flag on"."""
+    ledger = cash_ledger()
+    first = ledger.credit_pending(Decimal('20000000'), T2_1300, T0,
+                                  OrderId('S1'))
+    ledger.credit_pending(Decimal('30000000'), T2_1300, T0, OrderId('S2'))
+    assert ledger.advanced() == Decimal('0')
+
+    drawn = ledger.request_advance(T0, tranche=first)
+
+    assert len(drawn) == 1
+    assert drawn[0].amount == Decimal('20000000')
+    assert drawn[0].source_order_id == OrderId('S1')
+    assert ledger.advanced() == Decimal('20000000')
+
+    by_order = {t.source_order_id: t for t in ledger.cash().pending_proceeds}
+    assert by_order[OrderId('S1')].advanced is True
+    assert by_order[OrderId('S2')].advanced is False
+
+
+def test_a_partial_draw_leaves_the_rest_advanceable():
+    """A cap phrased as "up to 100%" is meaningless if the only representable
+    draw is exactly 100%. Tier 1's boolean could not express this at all."""
+    ledger = cash_ledger()
+    tranche = ledger.credit_pending(Decimal('50000000'), T2_1300, T0)
+
+    ledger.request_advance(T0, Decimal('20000000'))
+    assert ledger.advanced() == Decimal('20000000')
+    assert ledger.advanceable() == Decimal('30000000')
+    assert ledger.cash().pending_proceeds[0].advanced is True
+
+    ledger.request_advance(T0, Decimal('30000000'), tranche=tranche)
+    assert ledger.advanced() == Decimal('50000000')
+    assert ledger.advanceable() == Decimal('0')
+    assert len(ledger.advances()) == 2
+
+
+def test_the_bound_is_the_unsourced_hundred_percent_of_net_after_fees_and_pit():
+    """Rulebook 8.3: "up to 100% of net proceeds after fees and PIT" -- and it
+    is flagged there as the common *description*, not a sourced figure. No
+    statutory cap exists and no broker schedule stating a maximum could be
+    retrieved (low confidence).
+
+    "After fees and PIT" comes for free, because ``credit_pending`` already
+    receives the net: the bound here is 96m gross less the 0.1% PIT withheld
+    at source and less the broker's 0.15%."""
+    acct = account(holdings={'FPT': 1000}, terms=ADVANCE_ON, profile=BROKER,
+                   advance_terms=ON_REQUEST)
+    acct.reserve_for_sell(OrderId('S'), sell(), Venue.HSX, T0)
+    executed = fill('S', side=Side.SELL, price='96.0')
+    acct.apply_fill(executed, T2_1300,
+                    assess_charges(RULES, BROKER, executed, ChargeClass.EQUITY))
+
+    net = Decimal('96000000') - Decimal('96000') - Decimal('144000')
+    assert acct.cash().pending_total == net
+    assert acct.advanceable() == net
+
+    # The caveat travels with the number, not just with the prose.
+    provenance = AdvanceTerms.PROVENANCE['max_advanceable_fraction']
+    assert 'ASSUMPTION' in provenance
+    assert 'not a sourced figure' in provenance
+
+
+def test_a_request_beyond_the_bound_is_refused_rather_than_clamped():
+    """Silently clamping turns a funding decision into an unexplained
+    INSUFFICIENT_CASH two calls later. Refused with the bound in the message,
+    and refused as a ValueError rather than a Rejected -- the rejection enums
+    are the record of what the *market* refused, and a broker declining to
+    lend more than it agreed to is not that."""
+    ledger = cash_ledger()
+    ledger.credit_pending(Decimal('10000000'), T2_1300, T0)
+
+    with pytest.raises(ValueError, match='at most 10000000 is advanceable'):
+        ledger.request_advance(T0, Decimal('10000001'))
+    assert ledger.advanced() == Decimal('0')
+    assert ledger.advances() == ()
+
+
+def test_the_cap_is_configurable_and_a_seventy_percent_cap_bites():
+    """The 100% default is an assumption, so it must be possible to run a
+    result against a different one and see the difference."""
+    terms = AdvanceTerms.from_broker(
+        ADVANCE_ON, auto_register=False,
+        max_advanceable_fraction=Decimal('0.7'))
+    ledger = cash_ledger(advance_terms=terms)
+    ledger.credit_pending(Decimal('10000000'), T2_1300, T0)
+
+    assert ledger.advanceable() == Decimal('7000000')
+    with pytest.raises(ValueError, match='at most 7000000'):
+        ledger.request_advance(T0, Decimal('7000001'))
+    assert ledger.request_advance(T0)[0].amount == Decimal('7000000')
+
+
+def test_a_cap_above_one_is_refused_because_that_would_be_a_loan():
+    """A securities company may not lend money in any form except margin and
+    error correction (TT 121/2020 Art. 27, rulebook 8.4). Advancing more than
+    the sale produced is exactly the thing the product is structured to avoid
+    being."""
+    with pytest.raises(ValueError, match=r'\[0, 1\]'):
+        AdvanceTerms(daily_rate=Decimal('0.0005'),
+                     max_advanceable_fraction=Decimal('1.2'))
+
+
+def test_a_negative_net_tranche_cannot_be_advanced_on_request_either():
+    """Tier 1 established that auto-registration skips a negative net. The
+    request path must refuse it too, or the rule holds only on the path that
+    happens not to be used."""
+    ledger = cash_ledger()
+    tranche = ledger.credit_pending(Decimal('-100100'), T2_1300, T0)
+
+    assert tranche.advanced is False
+    assert ledger.advanceable() == Decimal('0')
+    with pytest.raises(ValueError, match='nothing is advanceable'):
+        ledger.request_advance(T0, tranche=tranche)
+    with pytest.raises(ValueError, match='nothing is advanceable'):
+        ledger.request_advance(T0, Decimal('50000'), tranche=tranche)
+
+    assert ledger.accrue_interest(T2_1300) == Decimal('0')
+    ledger.settle_due(T2_1300)
+    assert ledger.cash().interest_accrued == Decimal('0')
+    assert ledger.cash().settled_balance == Decimal('-100100')
+
+
+def test_interest_runs_per_advance_so_each_draw_pays_for_its_own_days():
+    """Two draws against one tranche, taken a day apart. The second owes one
+    day, not two. A model that prices interest per *tranche* charges the
+    later draw for a day it did not have the money -- 3,000 instead of
+    2,000 here."""
+    ledger = cash_ledger()
+    ledger.credit_pending(Decimal('10000000'), T2_1300, T0)
+    ledger.request_advance(T0, Decimal('1000000'))
+    day_two = datetime(2022, 3, 15, 9, 30)
+    ledger.request_advance(day_two, Decimal('2000000'))
+
+    accrued = ledger.accrue_interest(T2_1300)
+    two_days = Decimal('1000000') * Decimal('0.0005') * 2
+    one_day = Decimal('2000000') * Decimal('0.0005') * 1
+    assert accrued == two_days + one_day == Decimal('2000')
+    assert accrued != Decimal('3000000') * Decimal('0.0005') * 2
+
+
+def test_settlement_repays_every_advance_and_interest_stops_there():
+    """Rulebook 8.3: the advance "is recovered automatically from the sale
+    proceeds at T+2 settlement". After that there is no principal outstanding
+    and no further interest, however far the clock is advanced."""
+    ledger = cash_ledger(cash=Decimal('1000000'))
+    ledger.credit_pending(Decimal('10000000'), T2_1300, T0)
+    ledger.request_advance(T0)
+    before = ledger.cash().available
+
+    settled = ledger.settle_due(T2_1300)
+
+    assert len(settled) == 1
+    assert ledger.advanced() == Decimal('0')
+    assert ledger.advances() == ()
+    assert ledger.cash().settled_balance == Decimal('11000000')
+    assert ledger.cash().available == before
+
+    charged = ledger.cash().interest_accrued
+    assert charged == Decimal('10000000') * Decimal('0.0005') * 2
+    assert ledger.accrue_interest(datetime(2022, 4, 30, 9, 30)) == Decimal('0')
+    assert ledger.cash().interest_accrued == charged
+
+
+def test_the_cost_does_not_depend_on_how_often_the_caller_accrues():
+    """The bill for an advance is a property of the advance, not of the
+    caller's polling loop. Tier 1 lost every day between the last watermark
+    and settlement, so a caller that never called ``accrue_interest`` got the
+    advance for free -- which is precisely the free intraday turnover the
+    product exists to charge for (rulebook 12.7)."""
+    daily = cash_ledger()
+    never = cash_ledger()
+    once = cash_ledger()
+    for ledger in (daily, never, once):
+        ledger.credit_pending(Decimal('10000000'), T2_1300, T0)
+        ledger.request_advance(T0)
+
+    daily.accrue_interest(datetime(2022, 3, 15, 9, 30))
+    daily.accrue_interest(datetime(2022, 3, 16, 9, 30))
+    once.accrue_interest(datetime(2022, 3, 16, 11, 0))
+    for ledger in (daily, never, once):
+        ledger.settle_due(T2_1300)
+
+    expected = Decimal('10000000') * Decimal('0.0005') * 2
+    assert daily.cash().interest_accrued == expected
+    assert never.cash().interest_accrued == expected
+    assert once.cash().interest_accrued == expected
+
+
+def test_an_advance_funds_a_buy_the_same_session_which_is_the_whole_product():
+    """Rulebook 5.1: without the advance, sell-then-rebuy on the same day is
+    not possible on settled cash alone. Rulebook 12.7: the advance "is the
+    only way to recycle sale proceeds intraday, and it must be charged for".
+
+    So the test is the round trip: the buy is refused, the advance is drawn,
+    the same buy is accepted, and the account is charged for it."""
+    acct = account(cash=Decimal('1000000'), terms=ADVANCE_ON,
+                   holdings={'FPT': 1000}, advance_terms=ON_REQUEST)
+    acct.reserve_for_sell(OrderId('S'), sell(), Venue.HSX, T0)
+    acct.apply_fill(fill('S', side=Side.SELL, price='96.0'), T2_1300)
+    acct.release(OrderId('S'), T0)
+
+    refused = acct.reserve_for_buy(OrderId('B'), buy(), Venue.HSX, state(),
+                                   RULES, T0)
+    assert isinstance(refused, Rejected)
+    assert refused.rule is StatefulRule.INSUFFICIENT_CASH
+
+    acct.request_advance(T0, order_id=OrderId('S'))
+    assert acct.cash().advanced == Decimal('96000000')
+    assert acct.cash().available == Decimal('97000000')
+
+    reserved = acct.reserve_for_buy(OrderId('B'), buy(), Venue.HSX, state(),
+                                    RULES, T0)
+    assert isinstance(reserved, Encumbrance)
+
+    acct.apply_fill(fill('B', price='95.0'), datetime(2022, 3, 16, 13, 0))
+    acct.release(OrderId('B'), T0)
+    assert acct.cash().settled_balance == Decimal('-94000000')
+    assert acct.holding('FPT').total == 1000
+
+    acct.cash_ledger.accrue_interest(T2_1300)
+    assert acct.cash().interest_accrued == (Decimal('96000000')
+                                            * Decimal('0.0005') * 2)
+
+
+def test_a_request_by_order_id_spans_every_tranche_of_a_partial_fill():
+    """A partially filled sell produces one tranche per fill, and they settle
+    separately. Naming the order draws on all of them, earliest-settling
+    first -- the shortest-lived, cheapest advance is used up first, which is a
+    DECLARED choice: no source states the recovery order."""
+    ledger = cash_ledger()
+    later = datetime(2022, 3, 17, 13, 0)
+    ledger.credit_pending(Decimal('4000000'), later, T0, OrderId('S'))
+    ledger.credit_pending(Decimal('6000000'), T2_1300, T0, OrderId('S'))
+    ledger.credit_pending(Decimal('9000000'), T2_1300, T0, OrderId('OTHER'))
+
+    drawn = ledger.request_advance(T0, Decimal('7000000'),
+                                   order_id=OrderId('S'))
+
+    assert [a.amount for a in drawn] == [Decimal('6000000'),
+                                         Decimal('1000000')]
+    assert [a.settles_at for a in drawn] == [T2_1300, later]
+    assert ledger.advanced() == Decimal('7000000')
+    assert ledger.advanceable(order_id=OrderId('OTHER')) == Decimal('9000000')
+
+
+def test_a_tranche_read_from_an_older_cash_view_still_names_the_same_parcel():
+    """Tranches are matched on (amount, settles_at, source_order_id) -- their
+    economic identity, fixed the moment the sale fills -- not on object
+    identity. Tier 1 replaced the tranche object on every accrual, so no
+    caller-held tranche stayed valid for longer than one call."""
+    day_two = datetime(2022, 3, 15, 9, 30)
+    ledger = cash_ledger()
+    ledger.credit_pending(Decimal('10000000'), T2_1300, T0, OrderId('S'))
+
+    # Read the parcel out *after* it is already financed, so the view the
+    # caller is holding carries live accrual state and not just the credit.
+    ledger.request_advance(T0, Decimal('1000000'))
+    ledger.accrue_interest(day_two)
+    stale = ledger.cash().pending_proceeds[0]
+    assert stale.advanced is True
+    assert stale.interest_accrued == Decimal('500')
+
+    # Now the view moves under it: another day of interest, another draw.
+    ledger.accrue_interest(datetime(2022, 3, 16, 9, 30))
+    fresh = ledger.cash().pending_proceeds[0]
+    assert fresh != stale
+    assert fresh.interest_accrued > stale.interest_accrued
+
+    drawn = ledger.request_advance(day_two, Decimal('2000000'), tranche=stale)
+    assert drawn[0].amount == Decimal('2000000')
+    assert ledger.advanced() == Decimal('3000000')
+    assert ledger.advanceable(tranche=stale) == Decimal('7000000')
+
+
+def test_a_tranche_that_has_reached_its_settlement_instant_is_not_advanceable():
+    """There is nothing to advance *against* once the money is due: the
+    advance is a bridge over the T+2 gap and outside that gap it is a loan."""
+    ledger = cash_ledger()
+    ledger.credit_pending(Decimal('10000000'), T2_1300, T0)
+
+    assert ledger.advanceable(now=T0) == Decimal('10000000')
+    assert ledger.advanceable(now=T2_1300) == Decimal('0')
+    with pytest.raises(ValueError, match='nothing is advanceable'):
+        ledger.request_advance(T2_1300)
+
+
+def test_a_broker_that_does_not_offer_the_product_cannot_advance():
+    """It is a licensable service requiring prior written SSC approval (Luat
+    Chung khoan 54/2019 Art. 86(1)(b), rulebook 8.4), and the SSC has
+    sanctioned firms for offering it without one. A firm that has not
+    registered it simply cannot advance, whatever the mechanics say."""
+    ledger = CashLedger(Decimal('0'), BrokerTerms(), EncumbranceLedger())
+    ledger.credit_pending(Decimal('10000000'), T2_1300, T0)
+
+    assert ledger.advanced() == Decimal('0')
+    with pytest.raises(ValueError, match='does not offer ung truoc tien ban'):
+        ledger.request_advance(T0)
+
+
+def test_naming_both_a_tranche_and_an_order_id_is_refused():
+    """The two selectors would have to be intersected, and a request that
+    silently matched nothing because they disagreed is a quiet no-op."""
+    ledger = cash_ledger()
+    tranche = ledger.credit_pending(Decimal('10000000'), T2_1300, T0,
+                                    OrderId('S'))
+    with pytest.raises(ValueError, match='not both'):
+        ledger.request_advance(T0, tranche=tranche, order_id=OrderId('S'))
+
+
+def test_a_minimum_charge_is_a_floor_applied_once_at_recovery():
+    """Rulebook 12.7 lists a per-firm minimum per advance and 8.3 quotes
+    30,000 and 50,000 -- while flagging that Vietnamese fee schedules often
+    quote thousand-dong, so the figure may be a thousandfold out. It is off by
+    default for that reason, and when set it lands at recovery, which is where
+    the rulebook puts the charge."""
+    terms = AdvanceTerms.from_broker(ADVANCE_ON, auto_register=False,
+                                     minimum_charge=Decimal('50000'))
+    assert AdvanceTerms.from_broker(ADVANCE_ON).minimum_charge is None
+
+    ledger = cash_ledger(advance_terms=terms)
+    ledger.credit_pending(Decimal('1000000'), T2_1300, T0)
+    ledger.request_advance(T0)
+
+    # Accrual alone is the raw formula; the floor is not applied per day.
+    assert ledger.accrue_interest(T2_1300) == Decimal('1000')
+    ledger.settle_due(T2_1300)
+    assert ledger.cash().interest_accrued == Decimal('50000')
+
+
+def test_a_repaid_advance_stays_itemised_after_its_tranche_is_gone():
+    """The interest on a closed advance is a real cost. ``advanced()`` must
+    forget it -- it is not spendable money -- and the itemisation must not."""
+    ledger = cash_ledger()
+    ledger.credit_pending(Decimal('10000000'), T2_1300, T0, OrderId('S'))
+    ledger.request_advance(T0)
+    ledger.settle_due(T2_1300)
+
+    assert ledger.advances() == ()
+    closed = ledger.advances(include_repaid=True)
+    assert len(closed) == 1
+    assert isinstance(closed[0], SaleAdvance)
+    assert closed[0].is_outstanding is False
+    assert closed[0].repaid_at == T2_1300
+    assert closed[0].days_accrued == 2
+    assert closed[0].interest_accrued == Decimal('10000')
+    assert closed[0].source_order_id == OrderId('S')
+
+
+def test_auto_registration_still_advances_the_whole_tranche_at_the_fill():
+    """Rulebook 8.3's mechanics row: "On registration the advance is credited
+    to buying power immediately after the sell order fills on T". Tier 1's
+    behaviour, unchanged -- but now it is a SaleAdvance record with a
+    principal and a repayment instant, not a flag."""
+    ledger = CashLedger(Decimal('0'), ADVANCE_ON, EncumbranceLedger())
+    assert ledger.advance_terms.auto_register is True
+
+    tranche = ledger.credit_pending(Decimal('10000000'), T2_1300, T0,
+                                    OrderId('S'))
+    assert tranche.advanced is True
+    assert ledger.advanced() == Decimal('10000000')
+    assert ledger.advanceable() == Decimal('0')
+
+    only = ledger.advances()[0]
+    assert only.amount == Decimal('10000000')
+    assert only.taken_at == T0
+    assert only.settles_at == T2_1300
+
+
+def test_every_unsourced_advance_default_is_declared():
+    """The counterpart of BrokerTerms.PROVENANCE. Nothing on this object is
+    sourced to a document, and a field that acquired a default without
+    acquiring a provenance line is how an assumption becomes a fact."""
+    fields = {'daily_rate', 'annualisation_basis', 'max_advanceable_fraction',
+              'minimum_charge', 'auto_register'}
+    assert set(AdvanceTerms.PROVENANCE) == fields
+    assert 'DECLARED' in AdvanceTerms.PROVENANCE['annualisation_basis']
+    assert 'UNSOURCED' in AdvanceTerms.PROVENANCE['minimum_charge']

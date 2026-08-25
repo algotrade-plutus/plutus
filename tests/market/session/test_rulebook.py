@@ -10,16 +10,19 @@ Numbers are taken from ``docs/reference/vn-exchange-rulebook-2020-2026.md``
 with their citations; nothing is pinned here that does not appear there.
 """
 
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 
 import pytest
 
 from plutus.core.constant import get_trading_unit
-from plutus.market.exchanges import HNXDS_EXCHANGE, HSX_EXCHANGE
+from plutus.core.order import Side
+from plutus.market.exchanges import HNX_EXCHANGE, HNXDS_EXCHANGE
 from plutus.market.margin import vsd_initial_margin
-from plutus.market.protocol import (InstrumentKind, InstrumentSpec, OrderType,
+from plutus.market.protocol import (BandSource, InstrumentKind, InstrumentSpec,
+                                    MarketState, Order, OrderType,
                                     SessionPhase)
+from plutus.market.verdicts import AdmissionRule, Verdict
 from plutus.market.session.rulebook import (COVERAGE_START, KRX_CUTOVER,
                                             RuleName, RuleSet, RuleStatus,
                                             Rulebook, SymbolRouter,
@@ -444,6 +447,50 @@ def test_a_phase_outside_the_dated_schedule_is_unknown_not_the_singleton():
         assert at(outside).phase(venue) is SessionPhase.UNKNOWN
     with pytest.raises(UnresolvedRule):
         at(outside).session_schedule(Venue.HSX)
+
+
+@pytest.mark.parametrize('venue, opens, closes', [
+    (Venue.HSX, time(9, 0), time(14, 45)),      # ATO 09:00, ATC ends 14:45
+    (Venue.HNX, time(9, 0), time(15, 0)),       # no ATO; PLO ends 15:00
+    (Venue.UPCOM, time(9, 0), time(15, 0)),     # continuous only
+    (Venue.HNXDS, time(8, 45), time(14, 45)),   # fifteen minutes ahead
+])
+def test_the_day_boundaries_are_dated_rules_and_not_an_exchangespec(
+        venue, opens, closes):
+    """``calendar.py`` was already looking for these; now they exist.
+
+    ``VnTradingCalendar`` prefers ``rules.session_open(venue)`` and falls back
+    to a map built at import from ``core.constant``'s four ``ExchangeSpec``
+    objects -- one undated window per venue, no document, no confidence grade,
+    and no way to say "unknown". That fallback is what a margin call's
+    ``cure_by`` and a DAY order's expiry instant were measured against, which
+    makes it locked shape 1's forbidden build at the two moments the session
+    stamps on an event.
+
+    The numbers are unchanged -- no session-time change is attested in
+    2020-2026 -- so what this pins is that they now come from the dated,
+    cited ``SESSION_SCHEDULE`` row. The venue axis is real in both: HNXDS
+    opens before the cash market and HNX closes after it.
+    """
+    rules = at(PRE_KRX_TS)
+    assert rules.session_open(venue) == opens
+    assert rules.session_close(venue) == closes
+    assert rules.citation(RuleName.SESSION_SCHEDULE, venue) is not None
+
+
+def test_a_day_boundary_outside_coverage_raises_rather_than_inventing_one():
+    """The half of "unknown is not a value" a singleton cannot express.
+
+    ``ExchangeSpec.trading_time_start`` answers 09:00 for 2019 with exactly
+    the confidence it answers 2024. A typed accessor raises instead, so a
+    caller measuring a cure window outside the rulebook's coverage is told it
+    cannot be measured rather than handed a plausible instant.
+    """
+    outside = at(datetime(2019, 6, 14, 10, 0))
+    with pytest.raises(UnresolvedRule):
+        outside.session_open(Venue.HSX)
+    with pytest.raises(UnresolvedRule):
+        outside.session_close(Venue.HSX)
 
 
 # --------------------------------------------------------------------------
@@ -966,7 +1013,10 @@ def test_a_transferred_ticker_resolves_to_a_different_venue_on_each_side():
     ])
     assert router.venue('AAA', datetime(2022, 3, 1, 10)) is Venue.HSX
     assert router.venue('AAA', datetime(2025, 8, 1, 10)) is Venue.UPCOM
-    assert router.exchange('AAA', datetime(2022, 3, 1, 10)) is HSX_EXCHANGE
+    # The judge is HOSE's, and it is a *copy* -- see
+    # `test_the_router_dates_the_judge_it_returns_not_just_the_venue`.
+    assert router.exchange('AAA', datetime(2022, 3, 1, 10)).code == 'HSX'
+    assert router.exchange('AAA', datetime(2025, 8, 1, 10)).code == 'UPCOM'
 
 
 def test_the_router_overwrites_the_adapters_undated_trading_unit():
@@ -1004,7 +1054,8 @@ def test_a_futures_code_routes_to_hnxds_without_a_ticker_master():
     """
     router = SymbolRouter(_StaticSource('HSX'), BOOK)
     assert router.venue('VN30F2206', datetime(2022, 6, 1, 10)) is Venue.HNXDS
-    assert router.exchange('VN30F2206', datetime(2022, 6, 1, 10)) is HNXDS_EXCHANGE
+    assert router.exchange('VN30F2206',
+                           datetime(2022, 6, 1, 10)).code == 'HNXDS'
 
 
 def test_an_unroutable_ticker_refuses_rather_than_defaulting():
@@ -1027,3 +1078,145 @@ def test_the_router_holds_no_ticker_keyed_cache():
     """
     router = SymbolRouter(_StaticSource('HSX'), BOOK)
     assert not any(isinstance(v, dict) and v for v in vars(router).values())
+
+
+# --------------------------------------------------------------------------
+# `exchange()` must date the JUDGE, not merely consume `ts` on the way to it
+#
+# Both tests below drive a `SymbolRouter` DIRECTLY -- no `ExchangeSession`
+# anywhere -- because that is the caller the defect was invisible to. The
+# session had closed this seam on its own side, so every session test passed
+# while `router.exchange(ticker, ts)` still handed a direct caller the
+# import-time `ExchangeSpec` grid: one flat 0.1 per venue, at every date, for
+# every instrument. The interface contract advertises the router as public
+# API, so that caller exists.
+# --------------------------------------------------------------------------
+
+#: A Monday inside the continuous session, after every tick row below opens.
+TICK_TS = datetime(2024, 6, 3, 9, 30)
+
+
+def judged(router: SymbolRouter, ticker: str, price: str,
+           quantity: int = 1, ts: datetime = TICK_TS):
+    """``admits()`` on the router's own judge, with a band that is not the point."""
+    order = Order(ticker=ticker, side=Side.BUY, quantity=quantity,
+                  order_type=OrderType.LIMIT, limit_price=Decimal(price))
+    state = MarketState(
+        ticker=ticker, ts=ts, session=SessionPhase.CONTINUOUS,
+        band_source=BandSource.PUBLISHED,
+        reference=Decimal(price), last=Decimal(price),
+        ceiling=Decimal(price) * 2, floor=Decimal('0.001'))
+    return router.exchange(ticker, ts).admits(order, state)
+
+
+def test_a_direct_router_judges_a_bond_future_on_its_own_one_vnd_grid():
+    """GB05 steps 1 VND, and 100,523.5 is off that grid.
+
+    The tick of an HNXDS contract is a **contract-template** value, not a
+    venue value: VN30F steps 0.1 INDEX POINT and GB05 steps 1 VND on a
+    100,000d face. ``ExchangeSpec`` is a venue-keyed lookup -- one flat
+    ``Decimal('0.1')`` for everything HNXDS lists, at every date -- so under
+    the singleton 100,523.5 is a legal price and the order is ADMITTED with
+    ``rule=None``. It is not a legal price: HNX would refuse it, and a
+    simulator that accepts it reports a fill that could never have happened.
+    """
+    router = SymbolRouter(_StaticSource('HNXDS', InstrumentKind.FUTURE), BOOK)
+    judge = router.exchange('GB05F2306', TICK_TS)
+    assert judge.code == 'HNXDS'
+    assert judge.spec.get_tick_size('GB05F2306', Decimal('100523.5')) == Decimal('1')
+
+    off_grid = judged(router, 'GB05F2306', '100523.5')
+    assert off_grid.verdict is Verdict.REJECTED
+    assert off_grid.rule is AdmissionRule.TICK_GRID
+    assert off_grid.binding_constraint == Decimal('1')
+    # And a price ON the 1-VND grid is not refused by the grid rule.
+    assert judged(router, 'GB05F2306', '100523').rule \
+        is not AdmissionRule.TICK_GRID
+
+
+def test_a_direct_router_judges_an_hnx_etf_on_the_thousandth_grid():
+    """HNX's ETF tick is 0.001 from 2022-03-31, so 15.501 is a legal price.
+
+    The mirror image of the bond-future defect, and the one that costs orders
+    rather than admitting impossible ones: VNX QD 17 Phu luc III S2.2 makes
+    the HNX ETF tick 1d where the share grid is 100d, and the ``ExchangeSpec``
+    singleton returns 100d for every HNX instrument. Every legal ETF price
+    that is not also a multiple of 100d -- 99 out of every 100 of them --
+    comes back ``Rejected(TICK_GRID, binding_constraint=0.1)``.
+    """
+    router = SymbolRouter(_StaticSource('HNX', InstrumentKind.FUND), BOOK)
+    judge = router.exchange('FUEHNX01', TICK_TS)
+    assert judge.code == 'HNX'
+    assert judge.spec.get_tick_size('FUEHNX01', Decimal('15.501')) == Decimal('0.001')
+
+    admitted = judged(router, 'FUEHNX01', '15.501', quantity=100)
+    assert admitted.verdict is Verdict.ADMITTED, admitted.detail
+    # The venue axis is still real: an HNX *share* keeps the 100d grid, so the
+    # fine tick is a property of the instrument and not of the copy.
+    shares = SymbolRouter(_StaticSource('HNX'), BOOK)
+    assert shares.exchange('SHS', TICK_TS).spec.get_tick_size(
+        'SHS', Decimal('15.5')) == Decimal('0.1')
+
+
+def test_a_direct_routers_judge_says_unknown_where_the_rulebook_has_no_row():
+    """A tick the rulebook cannot supply raises rather than answering.
+
+    HNX's ETF tick is sourced only from 2022-03-31; before that the rulebook
+    carries no row. The singleton answers every question ever asked of it, at
+    every date, which is precisely why it cannot be trusted -- "unknown" is
+    not a value it can express. The dated judge raises
+    :class:`UnresolvedRule`, and that is the whole reason
+    :meth:`SymbolRouter.exchange` takes a ``tick_size`` override:
+    ``ExchangeSession`` resolves the grid *before* ``admits()`` so it can
+    report the gap as ``Rejected(verdict=INDETERMINATE)`` under ``TICK_GRID``
+    instead of letting the exception escape mid-admission.
+    """
+    router = SymbolRouter(_StaticSource('HNX', InstrumentKind.FUND), BOOK)
+    early = datetime(2021, 6, 15, 9, 30)
+    judge = router.exchange('FUEHNX01', early)
+
+    with pytest.raises(UnresolvedRule):
+        judge.spec.get_tick_size('FUEHNX01', Decimal('15.5'))
+
+    pinned = router.exchange('FUEHNX01', early,
+                             tick_size=lambda _t, _p: Decimal('0.001'))
+    assert pinned.spec.get_tick_size('FUEHNX01', Decimal('15.5')) == Decimal('0.001')
+
+
+def test_the_dated_judge_is_a_copy_and_never_mutates_the_shared_singleton():
+    """The ``exchanges/`` objects are shared with the batch research path.
+
+    997 tests judge on them and must keep judging on ``ExchangeSpec`` exactly
+    as they do. So the repair is a per-call shallow copy, and two things have
+    to hold: the original's tick function is untouched, and no copy is cached
+    -- a venue-keyed cache of tick-bearing exchanges is the forbidden build
+    one level up, wearing the fix's clothes.
+    """
+    router = SymbolRouter(_StaticSource('HNX', InstrumentKind.FUND), BOOK)
+    before = HNX_EXCHANGE.spec.tick_size_function
+
+    first = router.exchange('FUEHNX01', TICK_TS)
+    second = router.exchange('FUEHNX01', TICK_TS)
+
+    assert first is not second
+    assert first is not HNX_EXCHANGE
+    assert HNX_EXCHANGE.spec.tick_size_function is before
+    assert HNX_EXCHANGE.spec.get_tick_size('FUEHNX01',
+                                           Decimal('15.5')) == Decimal('0.1')
+
+
+def test_the_dated_judge_keeps_what_is_not_on_the_exchange_spec():
+    """Why ``copy.copy`` and not ``type(base)(dated_spec)``.
+
+    ``HNXDSExchange`` carries a margin config and a position limit *beside*
+    its ``ExchangeSpec``. Rebuilding it from a spec alone would silently reset
+    both to their constructor defaults -- and a derivatives judge whose margin
+    config quietly reverted would be far harder to notice than a wrong tick,
+    because nothing in the answer says which config produced it.
+    """
+    router = SymbolRouter(_StaticSource('HNXDS', InstrumentKind.FUTURE), BOOK)
+    judge = router.exchange('GB05F2306', TICK_TS)
+
+    assert judge.margin_config is HNXDS_EXCHANGE.margin_config
+    assert judge.position_limit == HNXDS_EXCHANGE.position_limit
+    assert type(judge) is type(HNXDS_EXCHANGE)

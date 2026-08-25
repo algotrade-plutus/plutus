@@ -30,14 +30,22 @@ grid is a tick-grid rejection whether or not the caller could afford it).
 **The dated rules the venue objects cannot see are resolved here.** The four
 ``exchanges/`` objects are stateless evaluators built on a module-level
 ``ExchangeSpec`` -- undated by construction -- and they are shared with the
-batch research path, so this module closes the gap on its own side rather than
-by editing them. Order-type legality and the per-order size cap are refused
-before ``admits()`` runs; the tick grid is *installed on the venue object for
-one call* (:meth:`ExchangeSession._venue_at`), so ``admits()`` still owns the
-``TICK_GRID`` rule and still runs it first, against a number the rulebook
-resolved at the instant for that instrument. A pre-check would have caught only
-half of that defect: it would refuse the illegal price and still let the
-singleton refuse a legal one.
+batch research path, so the gap is closed by copying a venue object and dating
+the copy rather than by editing them. Order-type legality and the per-order
+size cap are refused before ``admits()`` runs; the tick grid is *installed on
+the venue object for one call*, so ``admits()`` still owns the ``TICK_GRID``
+rule and still runs it first, against a number the rulebook resolved at the
+instant for that instrument. A pre-check would have caught only half of that
+defect: it would refuse the illegal price and still let the singleton refuse a
+legal one.
+
+**That dating lives in ``SymbolRouter.exchange``, not here.** This module
+closed the seam inside itself first, which left the router -- public API under
+the Tier 1 interface contract -- still returning the import-time judge to
+every direct caller, ``ts`` consumed to pick a venue and then discarded. One
+mechanism, in the object that owns ``(ticker, ts)``;
+:meth:`ExchangeSession._venue_at` and :meth:`ExchangeSession._evaluate_fills`
+are both callers of it.
 
 **Expiry runs before fills** inside :meth:`ExchangeSession.advance_to`, or an
 order that died at the cross could still fill in the phase that killed it.
@@ -71,7 +79,6 @@ things the contract could not see until the modules were written:
   bar later than a real exchange decides them and is declared as such.
 """
 
-import copy
 import importlib
 import json
 from dataclasses import replace
@@ -145,6 +152,19 @@ __all__ = [
 #: constant because the four objects are stateless rule evaluators; the
 #: *session's* registry is the subset named in ``exchange_rules.venues``, and
 #: a ticker routing outside that subset is refused rather than silently traded.
+#:
+#: **No ``ExchangeSession`` method judges an order on one of these.** Each
+#: holds the import-time ``core.constant`` ``ExchangeSpec``, undated by
+#: construction, and this session reaches every judge through
+#: ``SymbolRouter.exchange(ticker, ts)``, which copies the object and installs
+#: the rulebook's dated tick grid on the copy. The constant stays exported
+#: because ``exchanges/`` is a public surface and the batch research path
+#: judges on ``ExchangeSpec`` deliberately -- but a session-side caller
+#: reading it is reintroducing locked shape 1's forbidden build. It mirrors
+#: ``rulebook._EXCHANGE_BY_VENUE``, which is the copy the router starts from;
+#: the two hold the same four singleton objects and neither is authoritative
+#: over the other, because a venue's judge is never keyed by anything but the
+#: venue.
 EXCHANGE_BY_VENUE: Mapping[Venue, Exchange] = {
     Venue.HSX: HSX_EXCHANGE,
     Venue.HNX: HNX_EXCHANGE,
@@ -252,6 +272,25 @@ _MARKET_FAMILY: FrozenSet[OrderType] = frozenset({
     OrderType.MARKET_IMMEDIATE_OR_CANCEL,
     OrderType.MARKET_WITH_LEFTOVER_AS_LIMIT,
     OrderType.AT_THE_OPENING, OrderType.AT_THE_CLOSE,
+})
+
+
+#: The two refusals that mean "**this pool** could not fund the order".
+#:
+#: They are the pair a **pair trade** falls foul of, and the reason a
+#: Vietnamese pair trade behaves differently from a Western one. Securities
+#: cash and the derivatives deposit are segregated accounts with independent
+#: purchasing power and **no auto-transfer** (design section 7.3, rulebook 6.3
+#: "Where margin is held; segregation"), so a two-leg trade whose total cost
+#: the account can easily meet is still refused on the leg whose own pool is
+#: short. A caller told only ``INSUFFICIENT_DEPOSIT`` cannot tell that case --
+#: one ``transfer()`` away from funded -- apart from being broke, and the
+#: difference decides whether the sensible response is to move cash or to
+#: cancel the other leg. :meth:`ExchangeSession._annotate_segregation` is what
+#: makes the two distinguishable in the rejection itself.
+_SEGREGATED_FUNDING_RULES: FrozenSet[StatefulRule] = frozenset({
+    StatefulRule.INSUFFICIENT_CASH,
+    StatefulRule.INSUFFICIENT_DEPOSIT,
 })
 
 
@@ -449,9 +488,18 @@ class ExchangeSession:
         self._monitor = monitor or MarginMonitor(
             config.broker_profile.terms, trading)
 
+        #: The venues this session is configured for. A ticker routing
+        #: outside the set is refused rather than silently traded.
+        #:
+        #: **Deliberately not a ``Dict[Venue, Exchange]``.** It was one, built
+        #: at construction from :data:`EXCHANGE_BY_VENUE`, and after the
+        #: judging moved to ``SymbolRouter.exchange`` nothing read its values
+        #: any more -- leaving a venue-keyed map of undated exchange objects
+        #: sitting inside the session for the next author to reach for. A
+        #: tuple of venues cannot be mistaken for a source of judges, which is
+        #: the point: every ``admits()`` in this module goes through the
+        #: router, and there is no second place to get an exchange from.
         self._venues: Tuple[Venue, ...] = tuple(config.exchange_rules.venues)
-        self._exchanges: Dict[Venue, Exchange] = {
-            venue: EXCHANGE_BY_VENUE[venue] for venue in self._venues}
         self._daily = config.resolution is Resolution.DAILY
 
         #: The session mints every order id, including a rejected order's, so
@@ -768,6 +816,13 @@ class ExchangeSession:
         sell comes back ``Rejected(UNSETTLED_HOLDING, binding_constraint=0)``
         carrying ``sellable_from`` -- the instant the requested quantity
         actually becomes sellable.
+
+        **A funding refusal also says which pool was short and what the other
+        one held** -- see :meth:`_annotate_segregation`. That is the pair
+        trade's refusal: the two legs of a VN30-basket-against-VN30F trade
+        draw on two segregated accounts, so a pair the account funds in
+        aggregate can still be refused on one leg, and the caller is told
+        which of the two situations it is in rather than left to infer it.
         """
         ts = self._now
         order_id = self._ids.next()
@@ -777,7 +832,7 @@ class ExchangeSession:
             return self._reject_unrouted(order, routed)
         venue, instrument = routed
 
-        if venue not in self._exchanges:
+        if venue not in self._venues:
             return self._reject(order, venue, order_id, Rejected(
                 rule=AdmissionRule.SESSION_SEMANTICS, binding_constraint=None,
                 ts=ts, order_id=order_id,
@@ -803,7 +858,7 @@ class ExchangeSession:
         if isinstance(tick, Rejected):
             return self._reject(order, venue, order_id, tick)
 
-        adm = self._venue_at(venue, tick).admits(
+        adm = self._venue_at(order.ticker, ts, tick).admits(
             order, state, instrument=instrument, regime_tag=regime_tag)
         if adm.verdict is not Verdict.ADMITTED:
             return self._reject(order, venue, order_id,
@@ -814,6 +869,7 @@ class ExchangeSession:
         if isinstance(reservation, Rejected):
             if reservation.regime_tag is None:
                 reservation = replace(reservation, regime_tag=regime_tag)
+            reservation = self._annotate_segregation(reservation, venue)
             return self._reject(order, venue, order_id, reservation)
 
         record = self._book.accept(order, venue, ts, regime_tag=regime_tag,
@@ -1380,32 +1436,30 @@ class ExchangeSession:
         except UnresolvedRule as exc:
             return self._unresolved(exc, order_id, ts)
 
-    def _venue_at(self, venue: Venue, tick: Optional[Decimal]) -> Exchange:
+    def _venue_at(self, ticker: str, ts: datetime,
+                  tick: Optional[Decimal]) -> Exchange:
         """The venue object for ONE submission, holding the dated tick.
 
-        The exchange objects in ``exchanges/`` are stateless rule evaluators
-        shared with the batch research path, which 997 tests cover and which
-        must keep judging on ``ExchangeSpec`` exactly as it does today. So the
-        seam is closed on the session side: a shallow copy of the venue object
-        carries an ``ExchangeSpec`` whose ``tick_size_function`` returns the
-        tick :meth:`_dated_tick` already resolved at this instant, for this
-        instrument, from the rulebook.
+        **The mechanism is the router's, not this session's.**
+        ``SymbolRouter.exchange`` builds the dated judge -- a shallow copy of
+        the ``exchanges/`` singleton carrying an ``ExchangeSpec`` whose
+        ``tick_size_function`` reads the dated ``RuleSet.tick_size``. It has
+        to live there rather than here: the Tier 1 interface contract
+        advertises the router as public API, and a session-private copy of the
+        repair left ``router.exchange(ticker, ts)`` handing every direct
+        caller the import-time grid back -- ``ts`` consumed to pick a venue
+        and then thrown away. One seam, one closure of it, in the object that
+        owns the ``(ticker, ts)`` question.
 
-        **Installed rather than pre-checked**, and the difference matters. A
-        dated pre-check before ``admits()`` would fix the illegal-price half
-        of the defect and leave the refused-legal-order half untouched, since
-        ``admits()`` would still re-judge the same price against the
-        singleton. Installing means the grid is resolved once and judged once,
-        by the rule that already owns it: ``TICK_GRID`` stays first in the
-        admission sequence, ``binding_constraint`` is still the tick that
-        bound, and the per-rule composition of the rejection log is unchanged.
-
-        ``copy.copy`` rather than ``type(base)(spec)`` because the derivatives
-        exchange also carries a margin config and a position limit, and
-        reconstructing it from its spec alone would silently reset both to
-        their defaults. Nothing is cached: this is a fresh object per
-        submission, because a venue-keyed cache of tick-bearing exchanges is
-        exactly the forbidden build one level up.
+        What this method still owns is the *pre-resolution*. The grid is
+        resolved here first, by :meth:`_dated_tick`, because
+        ``RuleSet.tick_size`` raises ``UnresolvedRule`` where the rulebook
+        carries no row -- HNX's ETF tick before 2022-03-31 -- and the session
+        must report that as ``Rejected(verdict=INDETERMINATE)`` filed under
+        ``TICK_GRID`` rather than let it escape from inside ``admits()``.
+        Passing the resolved value on as ``tick_size`` pins the judge to the
+        exact number this session already reported on, instead of trusting two
+        independent resolutions to agree.
 
         ``tick`` is ``None`` for an order with no limit price -- where the
         installed function is never called -- and for a price that matches no
@@ -1413,11 +1467,8 @@ class ExchangeSession:
         answers ``INDETERMINATE`` on ``TICK_GRID``, which is the behaviour
         ``get_hsx_tick_size`` has always had and which this preserves.
         """
-        base = self._exchanges[venue]
-        judge = copy.copy(base)
-        judge.spec = replace(base.spec,
-                             tick_size_function=lambda _ticker, _price: tick)
-        return judge
+        return self._router.exchange(
+            ticker, ts, tick_size=lambda _ticker, _price: tick)
 
     # -- market data ----------------------------------------------------
 
@@ -1553,6 +1604,95 @@ class ExchangeSession:
         except KeyError:
             return None
 
+    def _annotate_segregation(self, rejection: Rejected,
+                              venue: Venue) -> Rejected:
+        """Say, on a funding refusal, what the *other* pool could have done.
+
+        **This is the pair-trading refusal.** The canonical Vietnamese pair
+        trade is a VN30 basket on HSX against VN30F on HNXDS, and its two legs
+        draw on two segregated accounts with independent purchasing power:
+        the equity leg spends securities cash, the futures leg spends the
+        derivatives deposit, and **no auto-transfer exists between them**
+        (design section 7.3; rulebook 6.3, "Where margin is held;
+        segregation", confidence HIGH). So a pair the account can fund *in
+        aggregate* can still be refused on one leg -- which is precisely the
+        behaviour that makes a Vietnamese pair trade different from a Western
+        one, where a single margin account would have netted the two.
+
+        ``Rejected`` already names the rule and the number that bound. What it
+        could not say is *which of two very different situations* the caller
+        is in:
+
+        * ``funded_in_aggregate`` is True -- the other pool holds at least the
+          shortfall. One ``transfer()`` of ``shortfall`` and the same order
+          fits. The trade is fundable; the account is merely mis-partitioned.
+        * ``funded_in_aggregate`` is False -- the money is not there at all.
+          Transferring cannot help and the caller must resize or drop a leg.
+
+        Told only ``INSUFFICIENT_DEPOSIT``, a caller cannot tell those apart,
+        and the two call for opposite responses. Told them apart, it can
+        either fund the leg or cancel its partner -- and *not* discover the
+        segregation by holding a naked basket with no hedge behind it.
+
+        Three things this deliberately does **not** do, all for the same
+        reason -- the exchange has no notion of a "pair":
+
+        * it does not transfer. ``auto_transfer`` is reported as ``False``
+          because that is the market fact, and a session that quietly swept
+          securities cash into the deposit would model a Vietnam that does
+          not exist;
+        * it does not cancel, amend or re-price the other leg. The session
+          never learns that two orders were meant to be one trade;
+        * it does not fire on an ``INDETERMINATE`` refusal. A stale-mark
+          refusal has no shortfall to report -- ``binding_constraint`` is
+          ``None`` there -- and naming an aggregate-funding verdict on a
+          number nobody computed would dress a data gap as a funding fact.
+
+        ``other_pool_available`` is the *net* figure in both directions,
+        matching :meth:`transfer`'s own bounds: ``Cash.available`` on the
+        securities side (money already committed to a resting buy cannot
+        move) and ``MarginView.free_deposit`` on the deposit side (margin
+        backing an open position cannot move). So a caller acting on
+        ``funded_in_aggregate`` is reading the same number the transfer would
+        be tested against, not a gross balance the transfer would then refuse.
+        """
+        if rejection.rule not in _SEGREGATED_FUNDING_RULES:
+            return rejection
+        required = rejection.detail.get('required')
+        bound = rejection.binding_constraint
+        if not isinstance(required, Decimal) or not isinstance(bound, Decimal):
+            return rejection
+        shortfall = required - bound
+        if shortfall <= 0:
+            return rejection
+
+        short_pool = pool_for_venue(venue)
+        other = (Pool.SECURITIES if short_pool is Pool.DERIVATIVES
+                 else Pool.DERIVATIVES)
+        elsewhere = (self._securities.cash().available
+                     if other is Pool.SECURITIES
+                     else self.margin().free_deposit)
+        return replace(rejection, detail={
+            **rejection.detail,
+            'short_pool': short_pool,
+            'shortfall': shortfall,
+            'other_pool': other,
+            'other_pool_available': elsewhere,
+            'funded_in_aggregate': elsewhere >= shortfall,
+            'auto_transfer': False,
+            'cure': (f'transfer({other.value} -> {short_pool.value}, '
+                     f'{shortfall}) and resubmit'
+                     if elsewhere >= shortfall else
+                     f'{other.value} holds {elsewhere}, which is short of the '
+                     f'{shortfall} this leg needs; no transfer can fund it'),
+            'segregation': (
+                'Vietnamese securities cash and the derivatives deposit are '
+                'segregated accounts with independent purchasing power and no '
+                'auto-transfer (rulebook 6.3). A pair trade funded in '
+                'aggregate can still fail on one leg, and this is that case '
+                'reported rather than half-filled.'),
+        })
+
     # -- the advance pipeline -------------------------------------------
 
     def _expire_boundaries(self, previous: datetime, ts: datetime) -> None:
@@ -1664,6 +1804,16 @@ class ExchangeSession:
         very thing the policy just said it could not establish. Those orders
         are caught instead by :meth:`_sweep_non_resting` at the day's close,
         which bounds the leak without inventing the fact.
+
+        **The venue object handed to the policy is dated too.** ``FillPolicy``
+        is an extension point and the contract says a policy "may consult it
+        and the venue spec", so passing ``EXCHANGE_BY_VENUE[venue]`` straight
+        through would publish the import-time ``ExchangeSpec`` -- one flat
+        0.1 tick per venue at every date -- as the fill seam's view of the
+        rules, which is the same singleton ``submit()`` stopped judging on.
+        It is :meth:`_venue_at`'s judge, resolved lazily by the router: the
+        policy's price is the market's, not the order's, so the grid cannot be
+        pre-resolved here the way admission's can.
         """
         filled_by_ticker: Dict[str, int] = {}
         decided: Set[OrderId] = set()
@@ -1679,8 +1829,20 @@ class ExchangeSession:
                 instrument = self._router.instrument(ticker, ts)
             except UnresolvedRule:
                 instrument = None
+            try:
+                judge = self._router.exchange(ticker, ts)
+            except UnresolvedRule:
+                # The ticker routes to no venue at THIS instant -- a dated
+                # listing that has ended is the way that happens -- so there
+                # is no rule set to evaluate it under. Falling back to
+                # ``record.venue`` would judge it on the venue it was accepted
+                # on while the router has just said it has none, which is the
+                # frozen-venue assumption shape 1 forbids. Treated like an
+                # unreachable bar above: undecided here, bounded at the close
+                # by :meth:`_sweep_non_resting`.
+                continue
             decision = self._policy.evaluate(
-                record, interval, self._exchanges[record.venue],
+                record, interval, judge,
                 already_filled=filled_by_ticker.get(ticker, 0),
                 instrument=instrument)
             self._evaluations += 1

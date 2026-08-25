@@ -29,7 +29,15 @@ __all__ = ['HNXDSExchange', 'HNXDS_EXCHANGE']
 
 
 class HNXDSExchange(Exchange):
-    """Order admission and position survival for VN30 futures."""
+    """Order admission and position survival for VN30 futures.
+
+    :meth:`admits` is sourced and current. :meth:`sustains` is the **legacy
+    batch research path**: its margin test models a maintenance margin ratio
+    Vietnam does not publish, and it is kept because the published
+    margin-incidence figures were computed through it. Read its warning before
+    using it for anything new; the session's margin entry point is
+    :func:`plutus.market.session.deposit.account_margin_requirement`.
+    """
 
     def __init__(
         self,
@@ -95,6 +103,38 @@ class HNXDSExchange(Exchange):
         margin_config: Optional[MarginConfig] = None,
     ) -> Viability:
         """Walk a position along a price path; report what the exchange would do.
+
+        .. warning::
+
+           **The margin test this walks is the legacy per-position one, and
+           the quantity it tests does not exist.** ``MARGIN_CALL`` fires when
+           ``evaluate_margin``'s ``equity / notional`` falls below
+           ``config.maintenance_rate`` -- a maintenance margin ratio no
+           Vietnamese rule states at any date. The real test is account-level:
+           ``MR = IM + VM`` over the whole portfolio, VM loss-only, against
+           ``utilisation = MR / margin assets`` on an 80/90/100 ladder
+           (rulebook 6.3; VSDC "Thông tin về ký quỹ" §II.4(b), §V.4).
+           See :mod:`plutus.market.margin`'s module warning and
+           ``PROVENANCE``.
+
+           This method is nevertheless **not deprecated and not rewired**, for
+           a reason that is about evidence rather than inertia. It is the path
+           the published margin-incidence figures were computed on, and
+           ``measurements/margin_incidence_account.py`` measured whether the
+           account-level model reproduces them: it does not, at any funding
+           level, and the disagreement is structural -- the utilisation test
+           divides by a deposit balance this signature has no way to receive.
+           Rewiring it would restate a published number without saying so,
+           which is the one thing that must not happen quietly.
+
+           Two further reasons this shape cannot simply become the session's:
+           it takes a whole ``Sequence[MarketState]`` in one batch with
+           nowhere to carry an outstanding call across days (which is what
+           :class:`~plutus.market.session.deposit.MarginMonitor` exists for),
+           and it takes a lone
+           :class:`~plutus.market.protocol.Position`, which
+           :func:`~plutus.market.session.deposit.account_margin_requirement`
+           refuses outright.
 
         Args:
             position: the open position.

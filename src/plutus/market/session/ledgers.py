@@ -59,20 +59,43 @@ Money conventions, declared once (rulebook 12.1):
 * **Rounding charges to whole dong is a MODELLING CHOICE, not a sourced rule.**
   No Vietnamese source states a rounding rule for any fee or tax, and any
   published result sensitive to it must say so.
+* **The annualisation basis for daily financing rates is 365, by
+  declaration.** The sources mix bases -- rulebook 8.3 records that the
+  0.025-0.05%/day advance range is annualised x360 while DSC's "0.0356%/day =
+  13%/yr" is x365, a systematic ~1.4% difference -- so 12.1 requires one basis
+  be chosen *and recorded in the config*. It is recorded in
+  :attr:`AdvanceTerms.annualisation_basis`, not baked into the arithmetic.
+  Accrual itself counts actual calendar days and never reads a year length.
+
+The one brokerage **product** modelled here is *ung truoc tien ban*, the
+advance against unsettled sale proceeds (:class:`AdvanceTerms`,
+:class:`SaleAdvance`). It earns its place because rulebook 12.7 is blunt about
+the consequence of leaving it out: it "is the only way to recycle sale
+proceeds intraday, and it must be charged for -- otherwise the backtest
+overstates achievable turnover". Its legal status is sourced and its cost
+formula is sourced; its rate, its cap and its day-count are not, and every
+unsourced default says so in :attr:`AdvanceTerms.PROVENANCE`.
 """
 
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_DOWN, Decimal
 from typing import (TYPE_CHECKING, Dict, FrozenSet, List, Mapping, Optional,
                     Sequence, Tuple, Union)
 
-from plutus.core.constant import VietnamMarketConstant
 from plutus.core.order import OrderType, Side
 from plutus.market.broker import BrokerTerms
 from plutus.market.protocol import MarketState, Order
+# The charge table is its own module -- design section 6.1's "one generic
+# table, per venue", dated and cited. ``charges.py`` imports nothing from
+# here, so the money conversions live with the charge bases they exist to
+# serve rather than inside the account that happens to spend them.
+from plutus.market.session.charges import (ChargeContext, CommissionSchedule,
+                                           to_dong as _to_dong, trade_value)
+from plutus.market.session.charges import assess as _assess_charges
+from plutus.market.session.charges import estimate as _estimate_charges
 from plutus.market.session.types import (AccountRef, BrokerProfile, Cash,
-                                         Charge, ChargeBase, ChargeClass,
-                                         ChargeRule, DebitedAt, Encumbrance,
+                                         Charge, ChargeClass, Encumbrance,
                                          Fill, Holding, HoldingTranche,
                                          OrderId, Pool, ProceedsTranche,
                                          Rejected, ResourceKind, StatefulRule,
@@ -88,9 +111,13 @@ if TYPE_CHECKING:  # pragma: no cover - import-time cycle avoidance
     from plutus.market.session.rulebook import RuleSet
 
 __all__ = [
+    'ANNUALISATION_BASIS_360',
+    'ANNUALISATION_BASIS_365',
+    'AdvanceTerms',
     'CashLedger',
     'EncumbranceLedger',
     'HoldingsLedger',
+    'SaleAdvance',
     'SecuritiesAccount',
     'assess_charges',
     'estimate_charges',
@@ -107,44 +134,24 @@ __all__ = [
 _DONG = Decimal('1')
 
 
-def _to_dong(amount: Decimal) -> Decimal:
-    """Round a charge to whole dong, half up.
+# ``_to_dong`` (round a charge to whole dong, half up) and ``trade_value``
+# (the cash-venue thousands-of-dong conversion) are imported from
+# ``charges.py`` above rather than defined here. Both are properties of the
+# charge table, not of the account: a second copy of either is a second answer
+# to "what does this trade cost", and the rounding in particular is a declared
+# modelling choice that must be made in exactly one place.
 
-    **UNVERIFIED and a modelling choice.** Rulebook 12.1: "No source states a
-    rounding rule for any fee or tax amount. Round to whole dong and record it
-    as a modelling choice." Half-up rather than banker's rounding only because
-    it is the convention a reader assumes; nothing supports either.
+
+def _floor_dong(amount: Decimal) -> Decimal:
+    """Round a **cap** down to whole dong.
+
+    Same declared modelling choice as :func:`_to_dong` -- no source states a
+    rounding rule -- but deliberately the other rounding. This one is applied
+    to a *ceiling* on how much may be advanced, and half-up on a ceiling can
+    hand out half a dong more than the ceiling allows. A cap must never be
+    exceeded by its own rounding.
     """
-    return amount.quantize(_DONG, rounding=ROUND_HALF_UP)
-
-
-def trade_value(venue: Venue, quantity: int, price: Decimal) -> Decimal:
-    """The VND value of a cash-venue trade at ``price``.
-
-    The corpus and the exchanges quote the three cash venues in **thousands of
-    dong** (``CURRENCY_UNIT[HSX/HNX/UPCOM] == 1000``), so an HSX price of 25.5
-    is 25,500 VND and a 1,000-share trade moves 25,500,000 VND. Every cash
-    movement in this module goes through here, because a missing factor of
-    1,000 is invisible in a ratio and fatal in a balance.
-
-    Raises:
-        ValueError: on ``HNXDS``. ``CURRENCY_UNIT['HNXDS'] == 1`` is
-            meaningless as a multiplier (rulebook 12.1) -- index futures quote
-            points and apply a 100,000 VND contract multiplier, and
-            government-bond futures quote VND on a 100,000 face. Derivatives
-            notional is ``deposit.py``'s business and must not be computed
-            here by accident.
-    """
-    if venue is Venue.HNXDS:
-        raise ValueError(
-            'trade_value is the cash-venue conversion; HNXDS notional is '
-            'index points x the contract multiplier and belongs in '
-            'deposit.py. CURRENCY_UNIT["HNXDS"] = 1 is not a multiplier.'
-        )
-    if quantity < 0:
-        raise ValueError(f'quantity must not be negative, got {quantity}')
-    unit = Decimal(VietnamMarketConstant.CURRENCY_UNIT[venue.value])
-    return Decimal(quantity) * price * unit
+    return amount.quantize(_DONG, rounding=ROUND_DOWN)
 
 
 #: Order types whose buy encumbrance is taken at the ceiling rather than at a
@@ -526,29 +533,40 @@ class HoldingsLedger:
     ) -> Tuple[Decimal, Tuple[HoldingTranche, ...]]:
         """Scale every parcel and return the cash leg. **Additive hook only.**
 
-        There is **no corporate-action engine in Tier 1**, and a run spanning
-        an ex-date is wrong for that instrument -- a declared limitation
-        (design section 15 item 5), not an oversight. This exists so the
-        engine is not later retrofitted into a scalar: a split scales open
-        parcels *without collapsing them*, so their distinct settlement
-        instants survive the adjustment, and that is only possible because the
-        holding is a list.
+        The primitive under ``session/corporate.py``. It was written for Tier
+        1 with no engine above it -- a declared limitation, design section 15
+        item 5 -- so that the engine would not later be retrofitted into a
+        scalar: a split scales open parcels *without collapsing them*, so
+        their distinct settlement instants survive the adjustment, and that is
+        only possible because the holding is a list.
 
         ``factor`` multiplies quantity (2 for a 1:1 bonus, 1 for a pure cash
-        dividend). ``cash_per_share`` is the **gross** cash leg per share held.
-        The 5% dividend withholding tax is deliberately *not* applied here: it
-        is a charge row, and inventing it inside the holdings ledger would put
-        a tax rate somewhere no charge table can see it.
+        dividend). ``cash_per_share`` is the **gross** cash leg per share held,
+        in **VND**, not in the venue's quote unit. The 5% dividend withholding
+        tax is deliberately *not* applied here: it is a charge row, and
+        inventing it inside the holdings ledger would put a tax rate somewhere
+        no charge table can see it.
 
-        The cash leg is computed on the **pre-adjustment** quantity, which is
-        the entitlement on the record date, and it counts unsettled parcels:
-        a share bought T+0 and unsettled on the ex-date still carries the
-        entitlement.
+        **The entitlement is settled by the RECORD DATE, not by settlement
+        state**, which is why the cash leg is computed on ``holding.total``
+        and counts unsettled parcels. The rule is the *ngay dang ky cuoi
+        cung*, and under T+2 it is struck one settlement cycle after the
+        ex-date precisely so that a buyer who traded on the last cum-rights
+        session -- whose parcel is still unsettled on the ex-date itself -- is
+        on the register when it is. Pricing the entitlement off settlement
+        state would deny the dividend to exactly the buyer the T+2 cycle was
+        designed to include, and would do it silently. The mirror needs no
+        special handling: a parcel sold before the ex-date left ``settled`` at
+        the fill and draws nothing.
 
-        **OPEN, and not settled by the interface contract:** whether a resting
-        order survives the ex-date with its quantity scaled or is cancelled.
-        That decision picks whether the future engine mutates live orders or
-        terminates them; this hook touches neither.
+        **The open question is now answered, and not here.** Whether an order
+        live across the ex-date is cancelled or scaled is decided by
+        ``corporate.RestingOrderPolicy``, which defaults to cancelling; the
+        rulebook does not settle it, and it does not settle it because
+        rulebook 2.3 makes the situation unreachable in the market (no
+        Vietnamese order type survives a session close). This hook still
+        touches no order: it moves quantity and reports cash, and the engine
+        composes the rest.
 
         Returns:
             ``(cash_leg, new_unsettled_tranches)``. The caller credits the
@@ -560,10 +578,289 @@ class HoldingsLedger:
         holding = self.holding(ticker)
         cash_leg = cash_per_share * Decimal(holding.total)
 
+        # An action on a ticker this account has never held must leave no
+        # trace. Writing the zero back would put the ticker into
+        # :meth:`tickers`, which is the account's own answer to "what did this
+        # run touch" and is what a corporate-action audit sweeps -- so a
+        # market-wide schedule applied blindly would report exposure to every
+        # name in it.
+        if not holding.total and ticker not in self._settled:
+            return cash_leg, ()
+
         self._settled[ticker] = int(Decimal(holding.settled) * factor)
         scaled = [t.scaled(factor) for t in self._unsettled.get(ticker, ())]
         self._unsettled[ticker] = scaled
         return cash_leg, tuple(scaled)
+
+
+# --------------------------------------------------------------------------
+# ung truoc tien ban -- the advance against unsettled sale proceeds
+# --------------------------------------------------------------------------
+
+#: The two annualisation bases the sources mix. Rulebook 8.3 records the
+#: conflict verbatim: the 0.025-0.05%/day broker range is annualised as
+#: "9-18% p.a." on a **360**-day year, while DSC's "0.0356%/day = 13%/yr" is a
+#: **365**-day year (0.0356 x 365 = 12.99). A sweep configured from both rows
+#: is internally inconsistent by ~1.4%, so one basis must be declared.
+ANNUALISATION_BASIS_360 = 360
+ANNUALISATION_BASIS_365 = 365
+
+#: **THE DECLARED BASIS OF THIS MODULE IS 365.** Rulebook 12.1's convention
+#: table: "Declare one basis and use it. The source material mixes x360 and
+#: x365, producing a ~1.4% inconsistency. Recommend 365 with the basis
+#: recorded in the config." It is recorded in the config -- it is a field on
+#: :class:`AdvanceTerms`, not a constant baked into the accrual -- so a caller
+#: reading a 360-basis quote can say so and get the arithmetic that quote
+#: meant. Nothing in this module reads this name except the default.
+DECLARED_ANNUALISATION_BASIS = ANNUALISATION_BASIS_365
+
+
+@dataclass(frozen=True)
+class AdvanceTerms:
+    """The commercial terms of *ung truoc tien ban*, and the conventions.
+
+    A **broker term, not an exchange rule**, and the clearest illustration of
+    why the two config objects are separate: the exchange never sees it, the
+    depository never sees it, and two investors selling the same shares on the
+    same day through different firms pay different amounts for it. The
+    statutory layer says only that a brokerage-licensed firm *may* offer the
+    service with prior written SSC approval (Luat Chung khoan 54/2019 Art.
+    86(1)(b), rulebook 8.4) and that it is **self-priced** -- neither TT
+    128/2018 nor TT 102/2021 lists a price for it, so it falls under the
+    unlisted-services clause and each firm sets its own charge (rulebook 8.3,
+    *high* confidence on that structural claim).
+
+    :class:`~plutus.market.broker.BrokerTerms` owns the two facts a caller is
+    most likely to want to set -- whether the firm offers the product at all,
+    and the daily rate -- because Tier 1 put them there. This object owns the
+    rest, and exists because three of its four remaining fields are things
+    **no source fixes** and which a published result may be sensitive to. Use
+    :meth:`from_broker` to derive one from a :class:`BrokerTerms`.
+
+    Attributes:
+        daily_rate: interest per calendar day, as a fraction of the amount
+            advanced. ``fee = amount_advanced x days_advanced x daily_rate``
+            is the sourced *structure* (rulebook 8.3, 12.7); the number is a
+            broker's own.
+        annualisation_basis: days per year used to convert between this daily
+            rate and an annual one. **365 by declaration** -- see
+            :data:`DECLARED_ANNUALISATION_BASIS`. Never read during accrual,
+            which is per-day; it is read by :attr:`annual_rate` and
+            :meth:`from_annual_rate`, which are the only two places the
+            conflict can bite.
+        max_advanceable_fraction: the cap, as a fraction of the tranche's net
+            proceeds. **UNSOURCED.** Rulebook 8.3 and 12.7 both say so in
+            terms: "up to 100% of net proceeds after fees and PIT" is the
+            common description, not a sourced figure -- no statutory cap
+            exists and no broker fee schedule stating an explicit maximum
+            percentage could be retrieved (*low* confidence). The default is
+            that unsourced 100%, and it is an **assumption** that any
+            published result must state.
+        minimum_charge: a per-advance floor on the interest, applied once when
+            the advance is recovered. ``None`` means no minimum, which is what
+            several firms do. **UNSOURCED in both value and unit**: rulebook
+            8.3 lists VSCS at 30,000 and SSI at 50,000 but flags that
+            Vietnamese fee schedules often quote thousand-dong, so the figure
+            may be 30,000d or 30,000,000d. Left ``None`` by default rather
+            than guessing which.
+        auto_register: whether the firm's standing registration advances each
+            new tranche in full the moment the sell fills. Rulebook 8.3's
+            mechanics row: "On registration the advance is credited to buying
+            power immediately after the sell order fills on T". ``True``
+            preserves the Tier 1 behaviour. Set ``False`` for a firm where the
+            investor asks per sale, which is the path
+            :meth:`CashLedger.request_advance` exists for.
+
+    Note that ``max_advanceable_fraction`` is applied to the tranche's **net**
+    amount -- net of the 0.1% PIT withheld at source and of commission -- for
+    free, because :meth:`CashLedger.credit_pending` already receives the net.
+    That is what "after fees and PIT" means and it is why the description can
+    be honoured without a second charge model.
+    """
+
+    daily_rate: Decimal
+    annualisation_basis: int = DECLARED_ANNUALISATION_BASIS
+    max_advanceable_fraction: Decimal = Decimal('1')
+    minimum_charge: Optional[Decimal] = None
+    auto_register: bool = True
+
+    #: Where each of these came from. Read before quoting any of them. The
+    #: counterpart of :attr:`BrokerTerms.PROVENANCE`, and the same rule: every
+    #: default here is a plausible market value, not a sourced one.
+    PROVENANCE = {
+        'daily_rate': 'broker term, self-priced, no statutory cap; observed '
+                      '0.00025-0.0005/day (rulebook 12.7, medium). The '
+                      'formula amount x days x rate is sourced; the number '
+                      'is not',
+        'annualisation_basis': 'DECLARED, not sourced. The sources mix x360 '
+                               'and x365 and disagree by ~1.4%; rulebook '
+                               '12.1 recommends 365 and requires the choice '
+                               'be recorded in the config',
+        'max_advanceable_fraction': 'ASSUMPTION. "Up to 100% of net proceeds '
+                                    'after fees and PIT" is a common '
+                                    'description, not a sourced figure; no '
+                                    'statutory cap exists and no broker '
+                                    'schedule stating a maximum was '
+                                    'retrieved (rulebook 8.3, low)',
+        'minimum_charge': 'UNSOURCED in value and in unit -- 30,000/50,000 '
+                          'are quoted but Vietnamese fee schedules often '
+                          'quote thousand-dong (rulebook 8.3). Default None',
+        'auto_register': 'market practice: the advance is credited to buying '
+                         'power immediately after the sell fills on T (some '
+                         'firms T+0 or T+1). Rulebook 8.3, low',
+    }
+
+    def __post_init__(self) -> None:
+        if self.daily_rate < 0:
+            raise ValueError(f'an advance daily_rate must not be negative, '
+                             f'got {self.daily_rate}')
+        if self.annualisation_basis <= 0:
+            raise ValueError(f'annualisation_basis must be positive, got '
+                             f'{self.annualisation_basis}')
+        if not 0 <= self.max_advanceable_fraction <= 1:
+            raise ValueError(
+                f'max_advanceable_fraction must lie in [0, 1], got '
+                f'{self.max_advanceable_fraction}; above 1 would advance more '
+                f'than the sale produced, which is a loan, and a Vietnamese '
+                f'securities company may not lend money (TT 121/2020 Art. 27, '
+                f'rulebook 8.4)')
+        if self.minimum_charge is not None and self.minimum_charge < 0:
+            raise ValueError(f'minimum_charge must not be negative, got '
+                             f'{self.minimum_charge}')
+
+    @classmethod
+    def from_broker(cls, terms: BrokerTerms, **overrides) -> 'AdvanceTerms':
+        """Derive the mechanics from a :class:`BrokerTerms`' daily rate.
+
+        ``terms.advance_on_sale_enabled`` is deliberately **not** copied here.
+        Whether the firm offers the product is a fact about the firm and stays
+        on ``BrokerTerms``, where Tier 1 put it and where
+        :meth:`CashLedger.credit_pending` reads it; this object says only what
+        the terms are *if* it is offered. Two objects, one fact each.
+        """
+        return cls(daily_rate=terms.advance_on_sale_daily_rate, **overrides)
+
+    @classmethod
+    def from_annual_rate(
+        cls,
+        annual_rate: Decimal,
+        *,
+        annualisation_basis: int = DECLARED_ANNUALISATION_BASIS,
+        **overrides,
+    ) -> 'AdvanceTerms':
+        """Terms from an annual quote, on an explicitly named basis.
+
+        This is where the conflict rulebook 8.3 flags actually bites. DSC
+        quotes "0.0356%/day = 13%/yr", which is x365; the 0.025-0.05%/day
+        industry range is annualised elsewhere as "9-18% p.a.", which is x360.
+        Feeding one annual figure through the other basis misprices the
+        advance by ``365/360 - 1`` = ~1.39%, and the error is systematic
+        rather than noisy. There is no default that is right for both, so the
+        basis is a named argument, it is stored on the result, and
+        :attr:`annual_rate` inverts with the same number.
+        """
+        basis = Decimal(annualisation_basis)
+        return cls(daily_rate=Decimal(annual_rate) / basis,
+                   annualisation_basis=annualisation_basis, **overrides)
+
+    @property
+    def annual_rate(self) -> Decimal:
+        """The daily rate annualised on **this object's own basis**.
+
+        Reported, never used in accrual. Accrual is ``amount x rate x days``
+        over actual calendar days, so it never touches a year length; this
+        exists so a caller can print a comparable headline number and so that
+        the number it prints cannot silently be on a different basis from the
+        one the terms were built with.
+        """
+        return self.daily_rate * Decimal(self.annualisation_basis)
+
+
+@dataclass(frozen=True)
+class SaleAdvance:
+    """One drawdown against one unsettled proceeds tranche.
+
+    Deliberately **not** a boolean on the tranche. Tier 1 carried
+    ``ProceedsTranche.advanced``, which can express "this whole tranche is
+    financed" and nothing else -- not a partial draw, not two draws taken on
+    different days at different points in the accrual, and not the repayment
+    instant. A cap phrased as "up to 100%" is meaningless if the only
+    representable draw is exactly 100%.
+
+    ``amount`` is the principal and is always strictly positive: a tranche
+    whose net proceeds are negative is never advanced (see
+    :meth:`CashLedger.request_advance`).
+
+    ``settles_at`` is copied from the tranche rather than referenced, because
+    it is the instant the advance is **repaid** and interest stops, and an
+    advance that could not answer that question on its own would have to be
+    read together with a tranche to be interpreted at all.
+
+    ``accrued_to`` is the watermark, moved by whole days only, so repeated
+    :meth:`CashLedger.accrue_interest` calls never double-charge a day and
+    never lose a part-day -- it is carried.
+    """
+
+    advance_id: str
+    amount: Decimal
+    taken_at: datetime
+    settles_at: datetime
+    accrued_to: datetime
+    interest_accrued: Decimal = Decimal('0')
+    source_order_id: Optional[OrderId] = None
+    repaid_at: Optional[datetime] = None
+
+    @property
+    def is_outstanding(self) -> bool:
+        """Whether the broker is still owed this principal.
+
+        The one thing ``Cash.advanced`` sums over. A repaid advance keeps its
+        row so its interest stays itemised, but it is no longer spendable
+        money and must not appear in ``available``.
+        """
+        return self.repaid_at is None
+
+    @property
+    def days_accrued(self) -> int:
+        """Whole calendar days interest has actually been charged for."""
+        return (self.accrued_to - self.taken_at).days
+
+
+@dataclass
+class _PendingRow:
+    """A pending tranche and the advances drawn against it.
+
+    Private, and the reason :class:`CashLedger` no longer stores a bare list
+    of tranches. ``ProceedsTranche`` lives in ``types.py`` and cannot grow an
+    ``advances`` field from here, so the association lives in the ledger --
+    which is the right place anyway: an advance is a fact about the account's
+    relationship with its broker, not about the sale.
+
+    ``tranche`` is stored **exactly as credited and is never replaced**. That
+    is load-bearing: it makes ``(amount, settles_at, source_order_id)`` a
+    stable key over the tranche's whole life, which is what lets a caller
+    hand a tranche back to :meth:`CashLedger.request_advance` and have it
+    name the same parcel. Tier 1 replaced the tranche object on every accrual,
+    so no caller-held tranche stayed valid for longer than one call.
+    """
+
+    tranche: ProceedsTranche
+    advances: List[SaleAdvance] = field(default_factory=list)
+
+    @property
+    def outstanding_advance(self) -> Decimal:
+        return sum((a.amount for a in self.advances if a.is_outstanding),
+                   Decimal('0'))
+
+    @property
+    def drawn(self) -> Decimal:
+        """Principal drawn against this tranche, repaid or not.
+
+        Repaid draws still count against the cap. Once the tranche has
+        settled it is gone from the ledger entirely, so the only way to see a
+        repaid draw here would be a bug.
+        """
+        return sum((a.amount for a in self.advances), Decimal('0'))
 
 
 # --------------------------------------------------------------------------
@@ -591,17 +888,42 @@ class CashLedger:
         initial_cash: Decimal,
         terms: BrokerTerms,
         encumbrances: EncumbranceLedger,
+        *,
+        advance_terms: Optional[AdvanceTerms] = None,
     ) -> None:
+        """
+        Args:
+            advance_terms: the mechanics of *ung truoc tien ban* -- the cap,
+                the annualisation basis, the per-advance minimum, whether the
+                firm auto-registers. Not in the interface contract's
+                signature, which passes only a ``BrokerTerms``; a trailing
+                keyword defaulting to :meth:`AdvanceTerms.from_broker`, so
+                every existing three-argument construction keeps the Tier 1
+                behaviour exactly. ``terms.advance_on_sale_enabled`` still
+                decides whether the product exists at all.
+        """
         self._settled = Decimal(initial_cash)
         self._terms = terms
+        self._advance_terms = (advance_terms
+                               if advance_terms is not None
+                               else AdvanceTerms.from_broker(terms))
         self._encumbrances = encumbrances
-        self._pending: List[ProceedsTranche] = []
+        self._rows: List[_PendingRow] = []
         self._charges: List[Charge] = []
         #: Cumulative interest on advances, including advances that have since
         #: settled. Reported, never netted.
         self._interest_accrued = Decimal('0')
+        #: Advances recovered at settlement, kept so the cost of a closed
+        #: advance stays itemised after its tranche has left the ledger.
+        self._repaid: List[SaleAdvance] = []
+        self._next_advance = 1
 
     # -- reading --------------------------------------------------------
+
+    @property
+    def advance_terms(self) -> AdvanceTerms:
+        """The advance's commercial terms. Read them before quoting a cost."""
+        return self._advance_terms
 
     def cash(self) -> Cash:
         """The read model. ``available`` is derived, never stored."""
@@ -611,22 +933,160 @@ class CashLedger:
                 pool=Pool.SECURITIES, resource=ResourceKind.CASH),
             advanced=self.advanced(),
             interest_accrued=self._interest_accrued,
-            pending_proceeds=tuple(self._pending),
+            pending_proceeds=tuple(self._view(row) for row in self._rows),
         )
 
     def advanced(self) -> Decimal:
         """Unsettled proceeds made spendable early by the sale advance.
 
-        Zero unless the broker offers *ung truoc tien ban* and the caller
-        enabled it. It is a **broker term, not an exchange rule** -- which is
-        the clearest illustration of why the two config objects are separate.
+        The sum of **outstanding principal**, not of financed tranches: a
+        tranche advanced 60% contributes 60%, and a tranche whose advance has
+        been recovered at settlement contributes nothing. Zero unless the
+        broker offers *ung truoc tien ban* and the caller enabled it. It is a
+        **broker term, not an exchange rule** -- which is the clearest
+        illustration of why the two config objects are separate.
         """
-        return sum((t.amount for t in self._pending if t.advanced),
+        return sum((row.outstanding_advance for row in self._rows),
                    Decimal('0'))
+
+    def advances(self, *, include_repaid: bool = False
+                 ) -> Tuple[SaleAdvance, ...]:
+        """Every drawdown, in the order it was taken.
+
+        Args:
+            include_repaid: also return advances already recovered out of a
+                settlement. They are kept because their interest is a real
+                cost that must stay itemised after the tranche is gone, and
+                excluded by default because the usual question is what is
+                still owed.
+        """
+        live = [a for row in self._rows for a in row.advances
+                if include_repaid or a.is_outstanding]
+        if include_repaid:
+            live = self._repaid + live
+        return tuple(sorted(live, key=lambda a: (a.taken_at, a.advance_id)))
+
+    def advanceable(
+        self,
+        *,
+        tranche: Optional[ProceedsTranche] = None,
+        order_id: Optional[OrderId] = None,
+        now: Optional[datetime] = None,
+    ) -> Decimal:
+        """How much may still be drawn, over the selected pending tranches.
+
+        The bound is ``max_advanceable_fraction x net_proceeds`` less what has
+        already been drawn, floored to whole dong (:func:`_floor_dong` -- a
+        cap must not be exceeded by its own rounding), summed over the
+        selection. Zero for a tranche whose net is not positive, and zero once
+        ``now`` has reached a tranche's settlement instant: there is nothing
+        left to advance *against* when the money is already due.
+
+        **The 100% default is an assumption, not a rule.** Rulebook 8.3 and
+        12.7 both record that "up to 100% of net proceeds after fees and PIT"
+        is the common description of the product and *not* a sourced figure --
+        no statutory cap exists and no broker schedule stating an explicit
+        maximum could be retrieved. See
+        :attr:`AdvanceTerms.max_advanceable_fraction`.
+
+        Args:
+            tranche: name one parcel. Matched on ``(amount, settles_at,
+                source_order_id)`` -- the tranche's economic identity, which
+                never changes -- not on object identity, so a tranche read out
+                of an older ``cash()`` still names the same parcel.
+            order_id: name every parcel from one sell order. A partially
+                filled order produces one tranche per fill and they are
+                separate parcels settling separately, so this selects all of
+                them.
+            now: the instant to judge maturity at. ``None`` means "do not
+                exclude matured tranches", which is the right answer for a
+                caller that only wants the headline number.
+        """
+        rows = self._select(tranche=tranche, order_id=order_id)
+        return sum((self._headroom(row, now) for row in rows), Decimal('0'))
 
     def charges(self) -> Tuple[Charge, ...]:
         """Everything levied so far, itemised. Backs ``session.charges()``."""
         return tuple(self._charges)
+
+    # -- the advance: selection, bound, view ----------------------------
+
+    @staticmethod
+    def _key(tranche: ProceedsTranche) -> Tuple:
+        """A pending tranche's economic identity.
+
+        ``amount``, ``settles_at`` and ``source_order_id`` are the three
+        fields that are fixed the moment the sale fills. ``accrued_at`` and
+        ``interest_accrued`` are not in the key because they are financing
+        state, and ``advanced`` is not because it is exactly what the caller
+        is asking to change.
+        """
+        return (tranche.amount, tranche.settles_at, tranche.source_order_id)
+
+    def _select(
+        self,
+        *,
+        tranche: Optional[ProceedsTranche] = None,
+        order_id: Optional[OrderId] = None,
+    ) -> List[_PendingRow]:
+        """The pending rows a request names, in settlement order.
+
+        Settlement order matters: a request that spans two tranches draws on
+        the one that settles first, so the advance with the shortest life --
+        and therefore the smallest interest bill -- is used up first. That is
+        the cheaper allocation for the investor and the one a broker's own
+        recovery order implies, but no source states it, so it is a **declared
+        choice**.
+
+        Raises:
+            ValueError: if both selectors are given. They would have to be
+                intersected, and a request that silently matched nothing
+                because its two selectors disagreed is the kind of quiet
+                no-op this module refuses everywhere else.
+        """
+        if tranche is not None and order_id is not None:
+            raise ValueError(
+                'name a tranche or an order id, not both: the two selectors '
+                'would have to be intersected and a request that silently '
+                'matched nothing is worse than a refusal')
+        rows = self._rows
+        if tranche is not None:
+            key = self._key(tranche)
+            rows = [r for r in rows if self._key(r.tranche) == key]
+        elif order_id is not None:
+            rows = [r for r in rows if r.tranche.source_order_id == order_id]
+        return sorted(rows, key=lambda r: r.tranche.settles_at)
+
+    def _headroom(self, row: _PendingRow,
+                  now: Optional[datetime] = None) -> Decimal:
+        """What may still be drawn against one tranche. Never negative."""
+        if row.tranche.amount <= 0:
+            return Decimal('0')
+        if now is not None and row.tranche.settles_at <= now:
+            return Decimal('0')
+        cap = _floor_dong(row.tranche.amount
+                          * self._advance_terms.max_advanceable_fraction)
+        return max(cap - row.drawn, Decimal('0'))
+
+    def _view(self, row: _PendingRow) -> ProceedsTranche:
+        """The tranche as the caller sees it, financing state folded in.
+
+        The stored tranche is never mutated (see :class:`_PendingRow`), so the
+        three fields that *do* move are recomputed here from the advances:
+        ``advanced`` is true while any principal is outstanding -- including a
+        partial draw, because a partly financed tranche is financed --
+        ``interest_accrued`` is the sum over its advances, and ``accrued_at``
+        is the furthest watermark any of them has reached.
+        """
+        if not row.advances:
+            return row.tranche
+        return replace(
+            row.tranche,
+            advanced=any(a.is_outstanding for a in row.advances),
+            interest_accrued=sum((a.interest_accrued for a in row.advances),
+                                 Decimal('0')),
+            accrued_at=max(a.accrued_to for a in row.advances),
+        )
 
     # -- movements ------------------------------------------------------
 
@@ -658,53 +1118,240 @@ class CashLedger:
         instead, and for the declared assumption about *when* the shortfall
         is collected, which no source states.
 
-        When ``terms.advance_on_sale_enabled`` the tranche is marked advanced
-        and its amount is spendable immediately, accruing interest at the
-        broker's daily rate until it settles. **A negative net is never
-        advanced**, whatever the terms say. Rulebook 8.3 describes the
-        product as advancing "up to 100% of net proceeds after fees and PIT"
-        -- itself flagged there as an unsourced common description rather
-        than a cap anyone published -- and 100% of a negative net is nothing
-        to lend. Marking one advanced would raise ``available`` on a sale
-        that lost money and accrue negative interest, paying the investor for
-        owing the broker.
+        When ``terms.advance_on_sale_enabled`` and the firm auto-registers
+        (:attr:`AdvanceTerms.auto_register`, the default) the tranche is
+        advanced up to the cap immediately and that amount is spendable at
+        once, accruing interest at the broker's daily rate until it settles.
+        Rulebook 8.3's mechanics row: "On registration the advance is credited
+        to buying power immediately after the sell order fills on T". With
+        ``auto_register=False`` nothing is drawn and the investor must ask --
+        see :meth:`request_advance`.
+
+        **A negative net is never advanced**, whatever the terms say.
+        Rulebook 8.3 describes the product as advancing "up to 100% of net
+        proceeds after fees and PIT" -- itself flagged there as an unsourced
+        common description rather than a cap anyone published -- and 100% of
+        a negative net is nothing to lend. Marking one advanced would raise
+        ``available`` on a sale that lost money and accrue negative interest,
+        paying the investor for owing the broker.
         """
-        tranche = ProceedsTranche(
+        row = _PendingRow(tranche=ProceedsTranche(
             amount=amount, settles_at=settles_at, accrued_at=ts,
             source_order_id=order_id,
-            advanced=self._terms.advance_on_sale_enabled and amount > 0,
+        ))
+        self._rows.append(row)
+        if (self._terms.advance_on_sale_enabled
+                and self._advance_terms.auto_register):
+            headroom = self._headroom(row, ts)
+            if headroom > 0:
+                self._draw(row, headroom, ts)
+        return self._view(row)
+
+    def request_advance(
+        self,
+        ts: datetime,
+        amount: Optional[Decimal] = None,
+        *,
+        tranche: Optional[ProceedsTranche] = None,
+        order_id: Optional[OrderId] = None,
+    ) -> Tuple[SaleAdvance, ...]:
+        """Draw an advance against named unsettled proceeds. *Ung truoc tien ban*.
+
+        The investor-initiated half of the product, and the reason the draw is
+        a :class:`SaleAdvance` record rather than a flag: the request is for
+        *an amount*, against *particular* parcels, and both are things a
+        boolean cannot carry. A request spanning two tranches produces two
+        advances, because each is recovered out of its own tranche's
+        settlement and they can settle on different days.
+
+        Args:
+            ts: when the advance is taken. Interest runs from here.
+            amount: the principal wanted. ``None`` means "everything
+                advanceable on the selection", which is the common case and
+                what auto-registration does.
+            tranche: draw against one parcel only.
+            order_id: draw against every parcel from one sell order.
+
+        Returns:
+            The advances created, earliest-settling first. Their principals
+            sum to ``amount``.
+
+        Raises:
+            ValueError: and deliberately **not** ``Rejected``. Every value in
+                :class:`~plutus.market.session.types.StatefulRule` and
+                :class:`~plutus.market.verdicts.AdmissionRule` is a reason the
+                *market* refused an order, and those two enums are the
+                rejected-order log that design section 8 measures. A broker
+                declining to advance more than it agreed to is a commercial
+                refusal that the exchange never sees; putting it in that log
+                would make ``broker_profile`` able to write rows into a
+                measurement of what ``exchange_rules`` refused. Refused, not
+                clamped, for the same reason: an advance silently smaller than
+                asked for shows up later as an unexplained ``INSUFFICIENT_CASH``
+                on a buy the caller believed it had funded.
+        """
+        if not self._terms.advance_on_sale_enabled:
+            raise ValueError(
+                'this broker does not offer ung truoc tien ban; set '
+                'BrokerTerms(advance_on_sale_enabled=True). It is a licensed, '
+                'SSC-approved service (Luat Chung khoan 54/2019 Art. 86(1)(b)) '
+                'and a firm that has not registered it simply cannot advance')
+        if amount is not None and amount <= 0:
+            raise ValueError(f'an advance must be for a positive amount, got '
+                             f'{amount}')
+
+        rows = self._select(tranche=tranche, order_id=order_id)
+        if not rows:
+            raise ValueError(
+                'no pending proceeds match that selection; there is nothing '
+                'to advance against. An advance is a draw on a receivable, '
+                'not a loan -- a Vietnamese securities company may not lend '
+                '(TT 121/2020 Art. 27, rulebook 8.4)')
+
+        headroom = [self._headroom(row, ts) for row in rows]
+        total = sum(headroom, Decimal('0'))
+        if total <= 0:
+            # Tested before the size of the request, so that "there is nothing
+            # here to draw on" never arrives dressed as "you asked for too
+            # much". They are different facts and the caller acts on them
+            # differently.
+            raise ValueError(
+                'nothing is advanceable against the selected proceeds: they '
+                'are already drawn to the cap, have reached settlement, or '
+                'are negative -- a sale that netted below zero has nothing '
+                'to advance, and 100% of it is still nothing')
+        wanted = total if amount is None else Decimal(amount)
+        if wanted > total:
+            raise ValueError(
+                f'cannot advance {wanted}: at most {total} is advanceable '
+                f'against the selected proceeds, at '
+                f'{self._advance_terms.max_advanceable_fraction} of net '
+                f'proceeds after fees and PIT less what is already drawn. '
+                f'That cap is an ASSUMPTION, not a sourced rule -- see '
+                f'AdvanceTerms.PROVENANCE')
+
+        drawn: List[SaleAdvance] = []
+        remaining = wanted
+        for row, room in zip(rows, headroom):
+            if remaining <= 0:
+                break
+            take = min(room, remaining)
+            if take <= 0:
+                continue
+            drawn.append(self._draw(row, take, ts))
+            remaining -= take
+        return tuple(drawn)
+
+    def _draw(self, row: _PendingRow, amount: Decimal,
+              ts: datetime) -> SaleAdvance:
+        """Record one drawdown. The single place an advance comes into being."""
+        # Zero-padded so the id sorts in issue order as a string, which is
+        # what :meth:`advances` breaks ties on when two draws share an instant.
+        advance = SaleAdvance(
+            advance_id=f'ADV-{self._next_advance:06d}',
+            amount=amount,
+            taken_at=ts,
+            settles_at=row.tranche.settles_at,
+            accrued_to=ts,
+            source_order_id=row.tranche.source_order_id,
         )
-        self._pending.append(tranche)
-        return tranche
+        self._next_advance += 1
+        row.advances.append(advance)
+        return advance
 
     def settle_due(self, now: datetime) -> Tuple[ProceedsTranche, ...]:
-        """Move matured proceeds into ``settled_balance``, clearing the advance.
+        """Move matured proceeds into ``settled_balance``, repaying the advance.
 
         Same ``<=`` comparison and the same instant as
         :meth:`HoldingsLedger.settle_due`, because it is the same allocation
         event. Where the tranche was advanced, the amount simply moves from
         ``advanced`` into ``settled_balance``: ``available`` is unchanged,
         which is the point -- the advance made the money spendable early, it
-        did not create any.
+        did not create any. Rulebook 8.3: the advance "is recovered
+        automatically from the sale proceeds at T+2 settlement".
+
+        **Interest is brought up to the settlement instant here, and stops.**
+        The accrual is done in this method rather than left to the caller's
+        next :meth:`accrue_interest` because after this call the advance is
+        gone from the ledger and the days between the last watermark and
+        settlement would be uncollectable. The consequence is the one that
+        matters: the total cost of an advance is the same whether the caller
+        accrues every day, once, or never.
+
+        Any :attr:`AdvanceTerms.minimum_charge` is applied once per advance at
+        this instant, as a floor on that advance's total interest -- rulebook
+        12.7 puts the charge "at recovery, from the T+2 settlement proceeds".
+        The floor is off by default because the published minima cannot be
+        read: 30,000 and 50,000 are quoted, but Vietnamese fee schedules often
+        quote thousand-dong, so the figure may be a thousandfold out.
         """
-        due = [t for t in self._pending if t.settles_at <= now]
+        due = [r for r in self._rows if r.tranche.settles_at <= now]
         if not due:
             return ()
-        self._pending = [t for t in self._pending if t.settles_at > now]
-        for tranche in due:
-            self._settled += tranche.amount
-        return tuple(sorted(due, key=lambda t: t.settles_at))
+        self._rows = [r for r in self._rows if r.tranche.settles_at > now]
+        settled: List[ProceedsTranche] = []
+        for row in due:
+            self._repay(row, now)
+            self._settled += row.tranche.amount
+            settled.append(self._view(row))
+        return tuple(sorted(settled, key=lambda t: t.settles_at))
+
+    def _repay(self, row: _PendingRow, now: datetime) -> None:
+        """Recover every advance on a settling tranche, interest first."""
+        minimum = self._advance_terms.minimum_charge
+        for index, advance in enumerate(row.advances):
+            if not advance.is_outstanding:  # pragma: no cover - defensive
+                continue
+            final = advance.interest_accrued + self._interest_on(
+                advance, row.tranche.settles_at)
+            if minimum is not None:
+                final = max(final, minimum)
+            self._interest_accrued += final - advance.interest_accrued
+            row.advances[index] = replace(
+                advance,
+                accrued_to=row.tranche.settles_at,
+                interest_accrued=final,
+                repaid_at=now,
+            )
+            self._repaid.append(row.advances[index])
+
+    def _interest_on(self, advance: SaleAdvance, until: datetime) -> Decimal:
+        """Interest on one advance for the whole days from its watermark to
+        ``until``, capped at its settlement instant. Never negative."""
+        rate = self._advance_terms.daily_rate
+        if rate <= 0:
+            return Decimal('0')
+        horizon = min(until, advance.settles_at)
+        days = (horizon - advance.accrued_to).days
+        if days <= 0:
+            return Decimal('0')
+        return advance.amount * rate * Decimal(days)
 
     def accrue_interest(self, now: datetime) -> Decimal:
         """Accrue interest on outstanding advances up to ``now``.
 
         The mechanism, modelled rather than hand-waved: interest is
-        ``amount_advanced x daily_rate x days_advanced`` (rulebook 12.7), run
-        from the instant the advance was taken to the instant the proceeds
-        settle and the broker recovers it. Calling this repeatedly is safe --
-        each tranche carries its own ``accrued_at`` watermark, which advances
-        by whole days only, so the same day is never charged twice and a
-        part-day is not lost, it is carried.
+        ``amount_advanced x daily_rate x days_advanced`` (rulebook 8.3 and
+        12.7 -- the *formula* is the sourced part, at high confidence; the
+        rate is a per-firm commercial number and is not), run from the instant
+        the advance was taken to the instant the proceeds settle and the
+        broker recovers it. Calling this repeatedly is safe -- each advance
+        carries its own ``accrued_to`` watermark, which moves by whole days
+        only, so the same day is never charged twice and a part-day is not
+        lost, it is carried.
+
+        **Day count and annualisation are two different things and only one
+        of them enters here.** This method counts actual calendar days between
+        two instants; no year length appears in the arithmetic. The year
+        length matters only when a *quoted annual* rate is turned into a daily
+        one, and rulebook 8.3 records that the sources disagree there: the
+        0.025-0.05%/day industry range is annualised x360 ("9-18% p.a.") while
+        DSC's "0.0356%/day = 13%/yr" is x365, a systematic ~1.4% difference.
+        **This module declares 365** (rulebook 12.1's recommendation) and
+        records the choice in :attr:`AdvanceTerms.annualisation_basis` rather
+        than baking it in, so a caller working from a 360-basis quote can say
+        so via :meth:`AdvanceTerms.from_annual_rate` and get that quote's own
+        arithmetic.
 
         Two declared assumptions, neither sourced:
 
@@ -719,28 +1366,37 @@ class CashLedger:
         netted against anything** -- the caller decides what to do with it
         (design section 7.2). Nothing here debits cash.
 
+        **It is also not in** :meth:`charges`, and that is a gap rather than a
+        decision. Rulebook 12.7 lists the advance in the charge table with a
+        base of ``amount_advanced x days_advanced``, and
+        :class:`~plutus.market.session.types.ChargeBase` has no such member --
+        its five bases are trade value, per contract, per trade, per open
+        contract per day, and monthly per security. Inventing a
+        ``TRADE_VALUE`` row for it would put a financing cost in the same
+        column as a transaction fee, and no member here can honestly hold it.
+        Until ``ChargeBase`` grows a financing base, the cost of an advance is
+        readable only through ``Cash.interest_accrued`` and
+        :meth:`advances`, and a caller itemising costs must add it there.
+
         Returns:
             The interest accrued by this call, zero if none was due.
         """
-        rate = self._terms.advance_on_sale_daily_rate
         accrued_now = Decimal('0')
-        for index, tranche in enumerate(self._pending):
-            if not tranche.advanced or rate <= 0:
-                continue
-            until = min(now, tranche.settles_at)
-            days = (until - tranche.accrued_at).days
-            if days <= 0:
-                continue
-            interest = tranche.amount * rate * Decimal(days)
-            self._pending[index] = ProceedsTranche(
-                amount=tranche.amount,
-                settles_at=tranche.settles_at,
-                accrued_at=tranche.accrued_at + timedelta(days=days),
-                source_order_id=tranche.source_order_id,
-                advanced=tranche.advanced,
-                interest_accrued=tranche.interest_accrued + interest,
-            )
-            accrued_now += interest
+        for row in self._rows:
+            for index, advance in enumerate(row.advances):
+                if not advance.is_outstanding:  # pragma: no cover - defensive
+                    continue
+                interest = self._interest_on(advance, now)
+                if interest <= 0:
+                    continue
+                days = (min(now, advance.settles_at)
+                        - advance.accrued_to).days
+                row.advances[index] = replace(
+                    advance,
+                    accrued_to=advance.accrued_to + timedelta(days=days),
+                    interest_accrued=advance.interest_accrued + interest,
+                )
+                accrued_now += interest
         self._interest_accrued += accrued_now
         return accrued_now
 
@@ -818,83 +1474,21 @@ class CashLedger:
 # Charges -- estimate for the encumbrance, assess at the fill
 # --------------------------------------------------------------------------
 
-#: Charge bases that a single fill can be priced against. The other two --
-#: ``PER_OPEN_CONTRACT_PER_DAY`` and ``MONTHLY_PER_SECURITY`` -- are holding
-#: charges: custody is billed monthly per security and the VSD position
-#: maintenance fee accrues per open contract per day, and no per-fill model can
-#: express either (rulebook 12.2). They are skipped here rather than
-#: approximated, and a Tier 2 daily/monthly pass owns them.
-_FILL_BASES: FrozenSet[ChargeBase] = frozenset({
-    ChargeBase.TRADE_VALUE,
-    ChargeBase.PER_CONTRACT,
-    ChargeBase.PER_TRADE,
-})
+#: What an estimate stamps its context with when nothing better is on offer.
+#: The estimate never keeps its charges -- it returns one total -- so the
+#: instant is inert there: the *date* axis of the charge table was already
+#: fixed when the caller chose which ``RuleSet`` to pass. A real ``RuleSet``
+#: carries ``ts`` and is used; anything standing in for one need not, which
+#: keeps this module asking a rulebook for exactly what it documents.
+_UNSTAMPED = datetime.min
 
-#: Bases whose ``amount`` is charged per unit of the base rather than flat.
-_COUNT_BASES: FrozenSet[ChargeBase] = frozenset({ChargeBase.PER_CONTRACT})
-
-
-def _base_value(rule: ChargeRule, venue: Venue, quantity: int,
-                price: Decimal) -> Optional[Decimal]:
-    """What this rule's rate or amount is applied to, or None if not per-fill."""
-    if rule.base is ChargeBase.TRADE_VALUE:
-        return trade_value(venue, quantity, price)
-    if rule.base is ChargeBase.PER_CONTRACT:
-        return Decimal(quantity)
-    if rule.base is ChargeBase.PER_TRADE:
-        return Decimal('1')
-    return None
-
-
-def _charge_amount(rule: ChargeRule, base_value: Decimal) -> Decimal:
-    """One charge's dong amount, clamped by ``minimum``/``maximum``.
-
-    ``rate`` multiplies the base value; ``amount`` is per unit for a counted
-    base (per contract) and flat otherwise. Rounding to whole dong is the
-    declared modelling choice of this module's docstring.
-    """
-    if rule.rate is not None:
-        raw = rule.rate * base_value
-    elif rule.amount is not None:
-        raw = rule.amount * (base_value if rule.base in _COUNT_BASES
-                             else Decimal('1'))
-    else:
-        raise ValueError(
-            f'charge rule {rule.charge_id!r} sets neither rate nor amount')
-    if rule.minimum is not None:
-        raw = max(raw, rule.minimum)
-    if rule.maximum is not None:
-        raw = min(raw, rule.maximum)
-    return _to_dong(raw)
-
-
-def _vat(rule: ChargeRule, amount: Decimal) -> Decimal:
-    """VAT on one charge, off unless the row says otherwise.
-
-    Per-charge rather than global because the source material conflicts:
-    state-set prices were VAT-exempt to 2025-04-28 and VAT-exclusive from
-    2025-04-29, yet brokers demonstrably billed VSDC derivatives charges
-    grossed up 10% during the exemption (rulebook 12.1). The conflict is
-    carried, not resolved.
-    """
-    if not rule.vat_applies:
-        return Decimal('0')
-    return _to_dong(amount * rule.vat_rate)
-
-
-def _rows(rules: 'RuleSet', profile: Optional[BrokerProfile], venue: Venue,
-          cls_: ChargeClass) -> Tuple[ChargeRule, ...]:
-    """The dated exchange/state/VSD rows, plus the broker's own commission.
-
-    Two sources because they are two kinds of fact: ``RuleSet.charges``
-    refuses to return a ``BROKER`` row and ``BrokerProfile`` holds nothing
-    else.
-    """
-    exchange_rows = tuple(rules.charges(venue, cls_))
-    broker_rows = tuple(profile.commission) if profile is not None else ()
-    return exchange_rows + broker_rows
-
-
+#: The engine both functions below run on. ``charges.py`` owns the table --
+#: which rows are in force at ``(venue, charge class, side, date)``, what each
+#: is levied on, the min/max clamp, the whole-dong rounding as a declared
+#: modelling choice, the per-row VAT flag -- and this module owns only the
+#: *account* half: what the estimate reserves and what the fill debits. The
+#: two functions here are the seam design section 6.1 promised, kept at their
+#: Tier 1 signatures so no caller has to move.
 def estimate_charges(
     rules: 'RuleSet',
     order: Order,
@@ -903,6 +1497,10 @@ def estimate_charges(
     price: Decimal,
     *,
     profile: Optional[BrokerProfile] = None,
+    commission: Sequence[CommissionSchedule] = (),
+    ticker: Optional[str] = None,
+    multiplier: Optional[Decimal] = None,
+    ts: Optional[datetime] = None,
 ) -> Decimal:
     """Worst-case charges on a hypothetical fill, for the buy encumbrance.
 
@@ -916,74 +1514,69 @@ def estimate_charges(
     is a worst case in the same sense the reservation is.
 
     Args:
-        profile: the broker's commission rows. Not in the interface contract's
-            signature, which passes only a ``RuleSet``; but ``RuleSet.charges``
-            refuses to return ``BROKER`` rows by design, so without this the
-            estimate omits the single largest charge on a retail equity trade
-            and under-funds every buy. Added as a trailing keyword so the
-            promised positional call still type-checks.
+        profile: the broker's flat commission rows. Not in the interface
+            contract's signature, which passes only a ``RuleSet``; but
+            ``RuleSet.charges`` refuses to return ``BROKER`` rows by design, so
+            without this the estimate omits the single largest charge on a
+            retail equity trade and under-funds every buy. Added as a trailing
+            keyword so the promised positional call still type-checks.
+        commission: tiered schedules
+            (:class:`plutus.market.session.charges.CommissionSchedule`). The
+            tier depends on a day that has not happened yet when an order is
+            accepted, so the reservation is taken at the **dearest** band.
+        ticker, multiplier: needed only on HNXDS, where the conversion is
+            points x contract multiplier rather than the cash venues'
+            thousands of dong.
 
-    Charges debited ``DAILY`` are included in the estimate although
-    :func:`assess_charges` does not levy them: a commission that tiers on the
-    day's total traded value is not knowable at fill time (rulebook 12.2), and
-    a reservation that ignored it would under-fund. Over-reserving is the
-    conservative direction and the reservation is released in full at the
-    terminal edge either way.
+    Charges debited ``DAILY`` are included although :func:`assess_charges`
+    does not levy them: a commission that tiers on the day's total traded
+    value is not knowable at fill time (rulebook 12.2), and a reservation that
+    ignored it would under-fund. Over-reserving is the conservative direction
+    and the reservation is released in full at the terminal edge either way.
     """
-    total = Decimal('0')
-    for rule in _rows(rules, profile, venue, cls_):
-        if rule.debited_at is DebitedAt.MONTHLY:
-            continue
-        if rule.base not in _FILL_BASES:
-            continue
-        if not rule.applies(venue, cls_, order.side):
-            continue
-        base_value = _base_value(rule, venue, order.quantity, price)
-        if base_value is None:
-            continue
-        amount = _charge_amount(rule, base_value)
-        total += amount + _vat(rule, amount)
-    return _to_dong(total)
+    return _estimate_charges(
+        rules, profile,
+        ChargeContext(venue=venue, charge_class=cls_, side=order.side,
+                      quantity=order.quantity, price=price,
+                      ts=ts or getattr(rules, 'ts', _UNSTAMPED),
+                      ticker=ticker or getattr(order, 'ticker', None),
+                      multiplier=multiplier),
+        commission=commission)
 
 
 def assess_charges(
     rules: 'RuleSet',
-    profile: BrokerProfile,
+    profile: Optional[BrokerProfile],
     fill: Fill,
     cls_: ChargeClass,
+    *,
+    commission: Sequence['CommissionSchedule'] = (),
+    multiplier: Optional[Decimal] = None,
 ) -> Tuple[Charge, ...]:
     """The charges actually levied on one fill.
 
-    ``debited_at == FILL`` rows only. ``DAILY`` rows (broker commission, whose
-    tier is only known at the daily close) and ``MONTHLY`` rows (custody, the
-    VSD collateral fee) are deliberately not levied here; accruing them is a
-    Tier 2 daily/monthly pass, and pricing them per fill would silently pick
-    the wrong commission tier.
+    ``debited_at == FILL`` rows only. ``DAILY`` rows (a tiered broker
+    commission, whose rate is only known at the daily close -- see
+    :func:`plutus.market.session.charges.assess_daily`) and ``MONTHLY`` rows
+    (custody, the VSDC collateral fee) are deliberately not levied here, and
+    pricing either per fill would pick a number the rules do not produce.
+
+    ``multiplier`` is what makes this callable on an HNXDS fill: the cash
+    conversion refuses that venue by design, so a futures fill must supply the
+    contract multiplier and the derivatives transfer tax is then levied on the
+    margined value from the same dated margin series ``deposit.py`` reads.
 
     Rounding each charge to whole dong is a **modelling choice** and must be
     reported as one -- no Vietnamese source states a rounding rule for any fee
     or tax.
     """
-    levied: List[Charge] = []
-    for rule in _rows(rules, profile, fill.venue, cls_):
-        if rule.debited_at is not DebitedAt.FILL:
-            continue
-        if rule.base not in _FILL_BASES:
-            continue
-        if not rule.applies(fill.venue, cls_, fill.side):
-            continue
-        base_value = _base_value(rule, fill.venue, fill.quantity, fill.price)
-        if base_value is None:
-            continue
-        amount = _charge_amount(rule, base_value)
-        levied.append(Charge(
-            kind=rule.charge_id, venue=fill.venue, base=rule.base,
-            base_value=base_value, amount=amount, levied_by=rule.levied_by,
-            pool=rule.pool, ts=fill.ts, ticker=fill.ticker,
-            order_id=fill.order_id, fill_id=fill.fill_id,
-            vat=_vat(rule, amount),
-        ))
-    return tuple(levied)
+    return tuple(lc.charge for lc in _assess_charges(
+        rules, profile,
+        ChargeContext(venue=fill.venue, charge_class=cls_, side=fill.side,
+                      quantity=fill.quantity, price=fill.price, ts=fill.ts,
+                      ticker=fill.ticker, multiplier=multiplier,
+                      order_id=fill.order_id, fill_id=fill.fill_id),
+        commission=commission))
 
 
 # --------------------------------------------------------------------------
@@ -1036,6 +1629,48 @@ class SecuritiesAccount:
     def holding(self, ticker: str) -> Holding:
         """``session.holdings(ticker)``."""
         return self.holdings_ledger.holding(ticker)
+
+    # -- the sale advance -----------------------------------------------
+
+    def advanceable(
+        self,
+        *,
+        tranche: Optional[ProceedsTranche] = None,
+        order_id: Optional[OrderId] = None,
+        now: Optional[datetime] = None,
+    ) -> Decimal:
+        """How much *ung truoc tien ban* is still available to draw.
+
+        Delegates to :meth:`CashLedger.advanceable`. It is on the account
+        because the account is the object ``exchange.py`` holds, and because
+        the advance is the one thing that makes ``Cash.available`` larger than
+        the settled balance -- a caller asking "why can I afford this?" should
+        not have to reach through to a sub-ledger to find out.
+        """
+        return self.cash_ledger.advanceable(
+            tranche=tranche, order_id=order_id, now=now)
+
+    def request_advance(
+        self,
+        ts: datetime,
+        amount: Optional[Decimal] = None,
+        *,
+        tranche: Optional[ProceedsTranche] = None,
+        order_id: Optional[OrderId] = None,
+    ) -> Tuple[SaleAdvance, ...]:
+        """Draw against unsettled sale proceeds. See
+        :meth:`CashLedger.request_advance` for the terms and the refusals.
+
+        Advanced cash is spendable the instant it is drawn: it enters
+        ``Cash.advanced``, hence ``Cash.available``, hence
+        :meth:`reserve_for_buy`. That is the entire point of the product --
+        rulebook 5.1 is blunt that without it sell-then-rebuy on the same day
+        is impossible, and rulebook 12.7 that it "is the only way to recycle
+        sale proceeds intraday, and it must be charged for -- otherwise the
+        backtest overstates achievable turnover".
+        """
+        return self.cash_ledger.request_advance(
+            ts, amount, tranche=tranche, order_id=order_id)
 
     # -- reservation ----------------------------------------------------
 

@@ -24,9 +24,10 @@ from plutus.market.protocol import (
     SessionPhase,
 )
 from plutus.market.session import (
-    Accepted, DataField, EventKind, ExchangeSession, FillDecision,
-    FillEvidence, LiquidationRule, MarginStatus, MarginMonitor, MarketInterval,
-    OrderState, Pool, Rejected, Session, StatefulRule, Venue, parse_config,
+    EXCHANGE_BY_VENUE, Accepted, ChargeBase, DataField, EventKind,
+    ExchangeSession, FillDecision, FillEvidence, LeviedBy, LiquidationRule,
+    MarginStatus, MarginMonitor, MarketInterval, OrderState, Pool, Rejected,
+    Session, SoftFillPolicy, StatefulRule, Venue, parse_config,
 )
 from plutus.market.session.calendar import (
     CalendarError, weekday_settlement_calendar, weekday_trading_calendar,
@@ -126,7 +127,45 @@ FUTURES_ROWS = {
     ('VN30F2406', D2): market('VN30F2406', D2, Decimal('1150')),
     ('VN30F2406', D3): market('VN30F2406', D3, Decimal('1150')),
 }
+
+#: The equity leg of a pair trade is a **basket**, not a ticker. Four VN30
+#: constituents at four different price bands, so the HSX tick grid, the
+#: ad-valorem HSX charge rows and the round lot all bind on more than one
+#: number -- and so "the equity leg was untouched" is a claim about four
+#: parcels rather than about one.
+BASKET_ROWS = {
+    ('VIC', D1): market('VIC', D1, Decimal('45.0')),
+    ('VIC', D2): market('VIC', D2, Decimal('45.5')),
+    ('VIC', D3): market('VIC', D3, Decimal('46.0')),
+    ('VNM', D1): market('VNM', D1, Decimal('70.0')),
+    ('VNM', D2): market('VNM', D2, Decimal('70.5')),
+    ('VNM', D3): market('VNM', D3, Decimal('71.0')),
+    ('HPG', D1): market('HPG', D1, Decimal('28.0')),
+    ('HPG', D2): market('HPG', D2, Decimal('28.5')),
+    ('HPG', D3): market('HPG', D3, Decimal('29.0')),
+}
+
+#: The hedge loses while the basket gains. That ordering is the whole point of
+#: the segregation tests below: the pair is *up* in aggregate on every day of
+#: the path and the short future is still margin-called, because the basket's
+#: gain sits in an account the deposit cannot reach.
+#:
+#: 1250 -> 1300 is +4.0% and 1300 -> 1385 is +6.5%, both inside the +-7%
+#: VN30F band, so no day of the path is a move the exchange would not have
+#: allowed.
+RISING_FUTURES_ROWS = {
+    ('VN30F2406', D1): market('VN30F2406', D1, Decimal('1250')),
+    ('VN30F2406', D2): market('VN30F2406', D2, Decimal('1300')),
+    ('VN30F2406', D3): market('VN30F2406', D3, Decimal('1385')),
+}
+
+#: The four names the basket is long. ``FPT`` is shared with the Tier 1 demo.
+VN30_BASKET = ('FPT', 'VIC', 'VNM', 'HPG')
+
 KINDS = {'FPT': ('HSX', InstrumentKind.STOCK),
+         'VIC': ('HSX', InstrumentKind.STOCK),
+         'VNM': ('HSX', InstrumentKind.STOCK),
+         'HPG': ('HSX', InstrumentKind.STOCK),
          'VN30F2406': ('HNXDS', InstrumentKind.FUTURE),
          'ABC': ('UPCOM', InstrumentKind.STOCK)}
 
@@ -612,6 +651,376 @@ def test_charges_are_itemised_per_pool_and_never_cross():
     pit = next(c for c in charges if c.kind == 'pit_derivatives_transfer')
     assert pit.base_value == Decimal('125000000')
     assert pit.amount == Decimal('10625')
+
+
+# --------------------------------------------------------------------------
+# The canonical Vietnamese pair trade, end to end
+#
+# A VN30 basket on HSX against VN30F on HNXDS, in one session. The hard part
+# is not routing -- routing is one lookup -- it is that the two legs live in
+# SEGREGATED accounts with independent purchasing power and no auto-transfer
+# between them (design section 7.3; rulebook 6.3, "Where margin is held;
+# segregation"). So the same pair that a single Western margin account would
+# have netted can be funded in aggregate here and still fail on one leg, and
+# the hedge can be margin-called on a day the pair is up.
+#
+# The path is deliberately the awkward one: the basket rises and the SHORT
+# hedge loses. Every day of it the pair is ahead, and every day of it the
+# deposit is the only account that can answer the call.
+# --------------------------------------------------------------------------
+
+#: 100 shares of each basket name at its D1 price, in dong. HSX quotes
+#: thousands of dong, hence the 1,000.
+BASKET_TRADE_VALUE = {
+    'FPT': Decimal('9550000'),      # 100 x 95.5 x 1000
+    'VIC': Decimal('4500000'),      # 100 x 45.0 x 1000
+    'VNM': Decimal('7000000'),      # 100 x 70.0 x 1000
+    'HPG': Decimal('2800000'),      # 100 x 28.0 x 1000
+}
+BASKET_PRICES = {'FPT': '95.5', 'VIC': '45.0', 'VNM': '70.0', 'HPG': '28.0'}
+
+
+def pair_session(*, cash=150000000, deposit=30000000, futures=None):
+    """One session over the basket, the hedge and nothing else."""
+    rows = {**EQUITY_ROWS, **BASKET_ROWS,
+            **(futures if futures is not None else RISING_FUTURES_ROWS)}
+    return build(rows=rows,
+                 accounts={'securities': {'initial_cash': cash},
+                           'derivatives': {'initial_deposit': deposit}})
+
+
+def open_basket(session, quantity=100):
+    """Buy ``quantity`` of each of the four names. Returns the acks."""
+    return {t: session.submit(buy(ticker=t, quantity=quantity,
+                                  price=BASKET_PRICES[t]))
+            for t in VN30_BASKET}
+
+
+def hedge(quantity=1, price='1250'):
+    """Short VN30F: the futures leg of the pair, and where shorts are legal."""
+    return sell(ticker='VN30F2406', quantity=quantity, price=price)
+
+
+def test_a_vn30_basket_against_vn30f_opens_in_one_session_across_two_pools():
+    """The canonical pair trade: five orders, two venues, two segregated pools.
+
+    Both legs route from ``(ticker, ts)`` on submission, both fill on the same
+    advance, and each lands in the ledger its own pool owns -- four parcels of
+    unsettled equity in ``HoldingsLedger``, one net-signed short in
+    ``ContractLedger``. The short leg is the one only HNXDS permits: a SELL on
+    an equity venue needs settled holdings, because Vietnamese cash equity
+    allows no short selling at any date in the window.
+    """
+    session = pair_session()
+    session.advance_to(datetime(2024, 6, 3, 9, 30))
+    equity = open_basket(session)
+    futures = session.submit(hedge())
+
+    assert all(isinstance(a, Accepted) for a in equity.values())
+    assert {a.venue for a in equity.values()} == {Venue.HSX}
+    assert isinstance(futures, Accepted) and futures.venue is Venue.HNXDS
+
+    session.advance_to(datetime(2024, 6, 3, 14, 0))
+    for ticker in VN30_BASKET:
+        assert session.holdings(ticker).unsettled_quantity == 100
+    position = session.positions()['VN30F2406']
+    assert position.net_quantity == -1              # short, and net-signed
+    assert position.multiplier == Decimal('100000')
+    assert {r.venue for r in session.orders()} == {Venue.HSX, Venue.HNXDS}
+
+
+def test_a_pair_funded_in_aggregate_still_fails_on_the_futures_leg():
+    """The refusal that makes a Vietnamese pair trade different.
+
+    The account holds 150m of securities cash and a 30m deposit. A two-lot
+    hedge needs 0.17 x 2 x 100,000 x 1250 = 42.5m of initial margin, so it is
+    short by 12.5m -- against 126m of untouched securities cash sitting one
+    ``transfer()`` away.
+
+    A bare ``INSUFFICIENT_DEPOSIT`` cannot tell that case apart from being
+    broke, and the two call for opposite responses: move cash, or drop a leg.
+    So the refusal says which pool was short, by how much, what the *other*
+    pool has, and that no auto-transfer will do it for you.
+    """
+    session = pair_session()
+    session.advance_to(datetime(2024, 6, 3, 9, 30))
+    open_basket(session)
+    available = session.cash().available
+
+    refusal = session.submit(hedge(quantity=2))
+    assert isinstance(refusal, Rejected)
+    assert refusal.rule is StatefulRule.INSUFFICIENT_DEPOSIT
+    assert refusal.verdict is Verdict.REJECTED
+    assert refusal.binding_constraint == Decimal('30000000')
+
+    detail = refusal.detail
+    assert detail['required'] == Decimal('42500000')
+    assert detail['shortfall'] == Decimal('12500000')
+    assert detail['short_pool'] is Pool.DERIVATIVES
+    assert detail['other_pool'] is Pool.SECURITIES
+    assert detail['other_pool_available'] == available
+    assert detail['funded_in_aggregate'] is True
+    assert detail['auto_transfer'] is False
+    assert 'segregated' in detail['segregation']
+
+
+def test_the_shortfall_the_refusal_names_is_exactly_what_makes_the_leg_fit():
+    """The number is actionable, not decorative: transfer it and resubmit.
+
+    Transferring exactly ``shortfall`` -- and not one dong more -- takes the
+    free deposit to precisely the requirement, which the reservation admits
+    because the test is ``required > free_deposit``. That is what makes the
+    reported figure a cure rather than a diagnosis, and it is why the pair
+    trade *works* once the caller is told which account to fund.
+    """
+    session = pair_session()
+    session.advance_to(datetime(2024, 6, 3, 9, 30))
+    open_basket(session)
+    refusal = session.submit(hedge(quantity=2))
+    shortfall = refusal.detail['shortfall']
+
+    session.transfer(Pool.SECURITIES, Pool.DERIVATIVES, shortfall)
+    assert session.margin().free_deposit == Decimal('42500000')
+
+    retry = session.submit(hedge(quantity=2))
+    assert isinstance(retry, Accepted)
+
+    session.advance_to(datetime(2024, 6, 3, 14, 0))
+    assert session.positions()['VN30F2406'].net_quantity == -2
+    for ticker in VN30_BASKET:
+        assert session.holdings(ticker).unsettled_quantity == 100
+
+
+def test_a_leg_short_in_both_pools_is_not_funded_in_aggregate():
+    """The other half of the distinction: no transfer can save this one.
+
+    Same 30m deposit, but the securities account starts at 30m and the basket
+    has committed most of it. The shortfall is unchanged at 12.5m and the
+    other pool cannot cover it, so ``funded_in_aggregate`` is False and the
+    message says so instead of pointing at a transfer that would be refused.
+    """
+    session = pair_session(cash=30000000)
+    session.advance_to(datetime(2024, 6, 3, 9, 30))
+    open_basket(session)
+
+    refusal = session.submit(hedge(quantity=2))
+    assert refusal.detail['shortfall'] == Decimal('12500000')
+    assert refusal.detail['other_pool_available'] < Decimal('12500000')
+    assert refusal.detail['funded_in_aggregate'] is False
+    assert 'no transfer can fund it' in refusal.detail['cure']
+
+
+def test_the_equity_leg_is_refused_the_same_way_and_names_the_deposit():
+    """Segregation is symmetric: the annotation runs on the cash leg too.
+
+    An equity buy the securities account cannot fund is refused with
+    ``INSUFFICIENT_CASH`` even though the deposit is flush -- derivatives
+    margin is not equity purchasing power, and the deposit cannot be spent on
+    shares any more than securities cash can answer a margin call.
+    """
+    session = pair_session(cash=5000000, deposit=100000000)
+    session.advance_to(datetime(2024, 6, 3, 9, 30))
+
+    refusal = session.submit(buy(ticker='FPT', quantity=100, price='95.5'))
+    assert isinstance(refusal, Rejected)
+    assert refusal.rule is StatefulRule.INSUFFICIENT_CASH
+    assert refusal.detail['short_pool'] is Pool.SECURITIES
+    assert refusal.detail['other_pool'] is Pool.DERIVATIVES
+    assert refusal.detail['other_pool_available'] == Decimal('100000000')
+    assert refusal.detail['funded_in_aggregate'] is True
+    assert refusal.detail['auto_transfer'] is False
+
+
+def test_an_indeterminate_funding_refusal_claims_no_aggregate_verdict():
+    """A data gap must not be dressed as a funding fact.
+
+    A market-family derivative order with no observed price is refused
+    ``INDETERMINATE`` and has no shortfall to report, so the segregation
+    annotation stays off it. Otherwise the log would carry a
+    ``funded_in_aggregate`` verdict computed from a number nobody had.
+    """
+    session = build(rows=EQUITY_ROWS)          # no VN30F rows at all
+    session.advance_to(datetime(2024, 6, 3, 9, 30))
+    refusal = session.submit(
+        Order(ticker='VN30F2406', side=Side.BUY, quantity=1,
+              order_type=OrderType.MARKET_WITH_LEFTOVER_AS_LIMIT))
+    assert isinstance(refusal, Rejected)
+    assert refusal.verdict is Verdict.INDETERMINATE
+    assert 'funded_in_aggregate' not in refusal.detail
+    assert 'shortfall' not in refusal.detail
+
+
+def test_the_equity_leg_is_untouched_when_the_hedge_is_margin_called():
+    """**The segregation property.** The pair is up and the hedge is called.
+
+    This is the whole reason a Vietnamese pair trade behaves differently from
+    a Western one. On D2 every basket name is higher than it was bought at and
+    the short future is 50 points against -- so a netted margin account would
+    see a profitable book and no call at all. Here the deposit is marked
+    alone: ``MR = IM + VM`` over the derivatives portfolio only, with ``VM``
+    counted because *that* account is in loss, tested as ``MR / deposit``.
+
+    IM on the short is 0.17 x 1 x 100,000 x 1300 = 22.1m, VM is
+    100,000 x (1300 - 1250) = 5m, so MR is 27.1m against a 30m deposit:
+    utilisation 0.903, over the 0.90 call level. Securities cash is not an
+    asset of that test and cannot be pulled into it.
+
+    "Untouched" is then checked as an identity, not as a vibe: the whole
+    ``Cash`` view, every basket parcel, and the securities half of the charge
+    log are all the same objects they were before the mark.
+    """
+    session = pair_session()
+    session.advance_to(datetime(2024, 6, 3, 9, 30))
+    open_basket(session)
+    session.submit(hedge())
+    session.advance_to(datetime(2024, 6, 3, 14, 0))
+
+    cash_before = session.cash()
+    holdings_before = {t: session.holdings(t) for t in VN30_BASKET}
+    securities_charges_before = tuple(c for c in session.charges()
+                                      if c.pool is Pool.SECURITIES)
+    assert session.margin().status is MarginStatus.OK
+
+    events = session.advance_to(datetime(2024, 6, 4, 14, 0))
+    calls = [e for e in events if e.kind is EventKind.MARGIN_CALL]
+    assert len(calls) == 1
+    assert calls[0].pool is Pool.DERIVATIVES
+
+    view = session.margin()
+    assert view.status is MarginStatus.CALL
+    assert view.posted_margin == Decimal('22100000')
+    assert view.variation_margin == Decimal('5000000')
+    assert view.required == Decimal('27100000')
+
+    # The pair is ahead on every leg of the basket, and none of it is reachable.
+    assert all(BASKET_ROWS[(t, D2)].last > Decimal(BASKET_PRICES[t])
+               for t in VN30_BASKET if t != 'FPT')
+    assert session.cash() == cash_before
+    assert {t: session.holdings(t) for t in VN30_BASKET} == holdings_before
+    assert tuple(c for c in session.charges()
+                 if c.pool is Pool.SECURITIES) == securities_charges_before
+    # No securities-side event was produced by the mark at all.
+    assert all(e.pool is not Pool.SECURITIES for e in events
+               if e.pool is not None)
+
+
+def test_a_forced_close_on_the_hedge_does_not_reach_the_basket():
+    """Escalation changes nothing on the other side of the wall.
+
+    D3 takes utilisation past the forced-close level, and the report names the
+    legs it would close: the futures contract, and only the futures contract.
+    Meanwhile the basket's T+2 settlement lands on the same advance and is
+    paid in full -- a suspended derivatives account does not divert, delay or
+    net against a securities settlement, because they are two accounts at two
+    institutions.
+    """
+    session = pair_session()
+    session.advance_to(datetime(2024, 6, 3, 9, 30))
+    open_basket(session)
+    session.submit(hedge())
+    session.advance_to(datetime(2024, 6, 3, 14, 0))
+    session.advance_to(datetime(2024, 6, 4, 14, 0))
+
+    events = session.advance_to(datetime(2024, 6, 5, 14, 0))
+    forced = [e for e in events if e.kind is EventKind.FORCED_LIQUIDATION]
+    assert len(forced) == 1
+    assert forced[0].pool is Pool.DERIVATIVES
+    assert forced[0].detail['legs'] == ('VN30F2406',)
+    assert forced[0].detail['executed'] is False
+
+    credits = [e for e in events if e.kind is EventKind.SETTLEMENT_CREDITED]
+    assert {e.ticker for e in credits} == set(VN30_BASKET)
+    assert all(e.pool is Pool.SECURITIES for e in credits)
+    for ticker in VN30_BASKET:
+        assert session.holdings(ticker).settled == 100
+
+
+def test_each_leg_is_charged_under_its_own_venues_schedule():
+    """Two venues, two schedules, and the fees are not even the same *shape*.
+
+    The HSX exchange service fee is **ad valorem** (0.027% of trade value) and
+    the HNXDS one is **flat per contract** (2,700), which is why the 125m
+    futures trade pays a smaller exchange fee than the 9.55m FPT trade. The
+    broker's own commission splits the same way: 0.15% of value on HSX,
+    2,700 per contract on HNXDS, from one ``broker_profile`` with one row per
+    venue.
+
+    The negative half is the one that matters: no charge kind appears on both
+    legs, and no charge crosses pools.
+    """
+    session = pair_session()
+    session.advance_to(datetime(2024, 6, 3, 9, 30))
+    open_basket(session)
+    session.submit(hedge())
+    session.advance_to(datetime(2024, 6, 3, 14, 0))
+
+    charges = session.charges()
+    equity_leg = [c for c in charges if c.venue is Venue.HSX]
+    futures_leg = [c for c in charges if c.venue is Venue.HNXDS]
+    assert len(equity_leg) + len(futures_leg) == len(charges)
+    assert all(c.pool is Pool.SECURITIES for c in equity_leg)
+    assert all(c.pool is Pool.DERIVATIVES for c in futures_leg)
+    assert ({c.kind for c in equity_leg} & {c.kind for c in futures_leg}
+            == set())
+
+    fpt_fee = next(c for c in equity_leg
+                   if c.ticker == 'FPT' and c.kind.startswith('exchange_'))
+    futures_fee = next(c for c in futures_leg
+                       if c.kind.startswith('exchange_'))
+    assert fpt_fee.base is ChargeBase.TRADE_VALUE
+    assert fpt_fee.base_value == BASKET_TRADE_VALUE['FPT']
+    assert fpt_fee.amount == Decimal('2579')            # 0.00027 x 9,550,000
+    assert futures_fee.base is ChargeBase.PER_CONTRACT
+    assert futures_fee.amount == Decimal('2700')        # flat, on 125m
+    assert futures_fee.amount > fpt_fee.amount
+
+    commissions = [c for c in charges if c.levied_by is LeviedBy.BROKER]
+    hsx_comm = next(c for c in commissions
+                    if c.venue is Venue.HSX and c.ticker == 'VNM')
+    ds_comm = next(c for c in commissions if c.venue is Venue.HNXDS)
+    assert hsx_comm.amount == Decimal('10500')          # 0.0015 x 7,000,000
+    assert ds_comm.amount == Decimal('2700')            # per contract
+
+
+def test_the_two_legs_pay_two_different_personal_income_taxes():
+    """0.1% sell-side on HSX against 0.0085% both-sides on HNXDS.
+
+    The clearest case of "its own venue's schedule": the same statute taxes a
+    securities transfer and a derivatives transfer at rates two orders of
+    magnitude apart, and only the equity one is sell-side. The basket's sale
+    on T+2 pays 0.1% of trade value; the hedge pays 0.0085% of *notional* --
+    contracts x multiplier x price, which the cash-venue conversion refuses to
+    compute -- on the opening leg, before it has closed anything.
+    """
+    session = pair_session()
+    session.advance_to(datetime(2024, 6, 3, 9, 30))
+    open_basket(session)
+    session.submit(hedge())
+    session.advance_to(datetime(2024, 6, 3, 14, 0))
+
+    opening = session.charges()
+    assert not [c for c in opening if c.kind == 'pit_securities_transfer']
+    ds_pit = next(c for c in opening if c.kind == 'pit_derivatives_transfer')
+    assert ds_pit.venue is Venue.HNXDS
+    assert ds_pit.base_value == Decimal('125000000')    # 1 x 100,000 x 1250
+    assert ds_pit.amount == Decimal('10625')            # 0.0085%
+
+    session.advance_to(datetime(2024, 6, 5, 13, 0))
+    assert isinstance(session.submit(sell(ticker='VNM', quantity=100,
+                                          price='71.0')), Accepted)
+    session.advance_to(datetime(2024, 6, 5, 14, 0))
+
+    eq_pit = next(c for c in session.charges()
+                  if c.kind == 'pit_securities_transfer')
+    assert eq_pit.venue is Venue.HSX
+    assert eq_pit.ticker == 'VNM'
+    assert eq_pit.base_value == Decimal('7100000')      # 100 x 71.0 x 1000
+    assert eq_pit.amount == Decimal('7100')             # 0.1%
+    # And neither venue's row reached the other leg.
+    assert all(c.venue is Venue.HSX for c in session.charges()
+               if c.kind == 'pit_securities_transfer')
+    assert all(c.venue is Venue.HNXDS for c in session.charges()
+               if c.kind == 'pit_derivatives_transfer')
 
 
 # --------------------------------------------------------------------------
@@ -1517,6 +1926,57 @@ def test_an_unsourced_cap_refuses_nothing_and_says_so():
                                order_type=OrderType.LIMIT,
                                limit_price=Decimal('98')))
     assert isinstance(ack, Accepted), getattr(ack, 'detail', ack)
+
+
+class _JudgeSpy(SoftFillPolicy):
+    """Records the ``Exchange`` the session hands the fill seam."""
+
+    def __init__(self):
+        super().__init__()
+        self.seen = []
+
+    def evaluate(self, order, interval, rules, *, already_filled=0,
+                 instrument=None):
+        self.seen.append(rules)
+        return super().evaluate(order, interval, rules,
+                                already_filled=already_filled,
+                                instrument=instrument)
+
+
+def test_the_fill_seam_is_handed_a_dated_judge_not_the_singleton():
+    """``FillPolicy`` is an extension point, so what it is handed is API.
+
+    The contract says a policy "may consult it and the venue spec". Passing
+    ``EXCHANGE_BY_VENUE[venue]`` straight through therefore publishes the
+    import-time ``ExchangeSpec`` -- one flat 0.1 tick per venue, at every
+    date, for every instrument -- as the fill seam's view of the rules, which
+    is the same singleton ``submit()`` stopped judging on. Admission being
+    dated while the fill path is not would be worse than either alone: the
+    two halves of one run would disagree about what the grid is.
+
+    Here the resting order is an HNX ETF, whose real tick is 0.001 from
+    2022-03-31 and whose singleton tick is 0.1 -- a hundredfold gap, so the
+    two are not confusable.
+    """
+    spy = _JudgeSpy()
+    source = StubSource({**EQUITY_ROWS, **TICK_ROWS}, TICK_KINDS)
+    session = ExchangeSession.build(
+        parse_config(config(exchange_rules={'venues': ['HSX', 'HNX', 'HNXDS'],
+                                            'rulebook': 'vn-2020-2026'})),
+        source=source, fill_policy=spy)
+    session.advance_to(datetime(2024, 6, 3, 9, 30))
+    assert isinstance(session.submit(Order(
+        ticker='FUEHNX01', side=Side.BUY, quantity=100,
+        order_type=OrderType.LIMIT, limit_price=Decimal('15.501'))), Accepted)
+
+    session.advance_to(datetime(2024, 6, 3, 14, 0))
+
+    assert spy.seen, 'the resting order was never evaluated'
+    judge = spy.seen[0]
+    assert judge.code == 'HNX'
+    assert judge.spec.get_tick_size(
+        'FUEHNX01', Decimal('15.501')) == Decimal('0.001')
+    assert judge is not EXCHANGE_BY_VENUE[Venue.HNX]
 
 
 # --------------------------------------------------------------------------
