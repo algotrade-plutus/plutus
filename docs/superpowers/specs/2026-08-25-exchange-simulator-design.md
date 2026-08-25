@@ -59,7 +59,8 @@ in the existing code is that `vsd_initial` is `0.175`, which matches no VSD publ
 and `maintenance_rate` is set equal to it — see §7.4 and the rulebook research.)
 
 **Fill determination is a pluggable policy, not a fixed rule** (§8). This is the
-product's most useful feature, not a workaround for missing depth.
+useful, but it is standard practice applied to Vietnamese rules -- not a
+novel contribution. See the retraction in section 8 before describing it.
 
 ## 3. Non-goals
 
@@ -502,12 +503,25 @@ and a drifting convention would contaminate the comparison:
 Ship `Soft` in Tier 1 (it is trivial, and it is the comparison arm). `Hard` in
 Tier 2. `Probabilistic` when sizes are available.
 
-### Why this is the selling point
+### Why this matters, stated at the width prior art leaves standing
 
 Run one strategy against all three policies and report the spread. *"Sharpe 1.8
-under soft fills, 0.4 under hard fills"* is a pre-live warning no existing tool
-produces, and the share of results resting on `INDETERMINATE` fills is a direct
-measure of how much of a backtest is unknowable.
+under soft fills, 0.4 under hard fills"* is a useful pre-live warning.
+
+**It is not novel, and no document in this repository may say that it is.**
+Prior-art verification refuted the claim five times over. NautilusTrader ships
+`prob_fill_on_limit` in {0.0, p, 1.0} by default -- that is already a
+hard/soft/probabilistic axis. LEAN, Zipline, RQAlpha, hftbacktest and
+PyAlgoTrade all expose swappable fill determination. Forex Strategy Builder
+shipped `enum BacktestEval {Error, None, Ambiguous, Unknown, Correct}` with a
+reported `AmbiguousBars` statistic and a Method Comparator **in 2011**. And
+Claeys (SSRN 6240638, 2026) already reports the best-case/worst-case spread as
+a headline result, with 18.47% of bars ambiguous over 2,064,460 NQ bars.
+
+What survives is narrower and is the only form to use: our spread is bounded by
+**admissibility** -- the exchange's own dated rules decide which orders could
+have existed at all -- rather than by OHLC geometry alone. See
+`docs/reference/literature-review.md` for the full concession.
 
 The boundary holds: the caller runs their strategy three times against three
 configured sessions. Plutus still never executes strategy code.

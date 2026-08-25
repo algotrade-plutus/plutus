@@ -928,7 +928,8 @@ class MarginMonitor:
 
 ## 8. `session/fills.py` — the fill policy extension point
 
-**Owns:** fill determination. This is the product's most useful feature, not
+**Owns:** fill determination. Standard practice applied to Vietnamese rules --
+refuted as a novelty claim, see the design spec section 8. It is useful, not
 a workaround for missing depth.
 
 Three conventions are fixed here because §8's whole value is a *spread across
