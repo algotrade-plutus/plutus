@@ -310,9 +310,14 @@ already uses.
 `sellable_from` is therefore **not stored**. It is computed as the earliest instant at
 which the *requested* quantity becomes sellable, and attached to the rejection.
 
-**Settlement instants are counted in sessions the data source actually yields**, not in
-calendar days (see §9). Instants come from real session dates, so T+N is holiday-correct
-through Tết by construction, with no separate trading calendar.
+**Settlement instants require a VSDC settlement-business-day calendar — this is a Tier 1
+data input.** An earlier draft claimed T+N is "holiday-correct by construction" from
+counting session dates. That is **wrong** (rulebook §9.5): T+2 is counted in VSDC
+*settlement* business days, which diverge from exchange *trading* days around Tết —
+VSDC closed settlement 2026-02-16 to 02-20, so T+2 of a 2026-02-12 trade settled on
+02-23. So `settles_at` is a datetime computed by a pluggable `SettlementCalendar`
+resolved via `rulebook.at(ts)`, not by counting bars. The tranche/datetime *shape* is
+unchanged; only the source of `settles_at` changes.
 
 **On daily bars, `T+2 @ 13:00` behaves as T+3.** A daily bar is stamped midnight
 ([protocol.py:32](../../../src/plutus/market/protocol.py)), so a 13:00 threshold is not
@@ -401,19 +406,39 @@ day T+1 re-mark
         restored     ->  call cleared
 ```
 
-**The test is account-level, and it is a utilisation test.** Valid margin assets are
-the whole ký quỹ deposit including free cash — not one position's equity. So:
+**The test is account-level, net-risk, and a utilisation test.** Confirmed by the
+author: the Vietnamese exchange margins the **whole deposit account on a net-risk
+basis**, not each position summed. The requirement is an absolute amount and there is
+**no maintenance ratio** in Vietnamese rules (rulebook §6.3, §9.1):
 
 ```
-required   = Σ initial_rate × notional(position)   +  margin on resting derivative orders
-assets     = deposit_balance + Σ mark-to-market gain/loss
-utilisation = required / assets      ->  a call fires when utilisation ≥ 1
+MR          = IM + VM        computed over the whole account portfolio
+              IM = initial requirement recomputed on the CURRENT price (last match
+                   in-session, DSP end of day) — not on entry notional
+              VM = variation margin, counted ONLY when the account is in loss;
+                   a favourable move contributes zero
+assets      = deposit_balance          (cash-settled: daily P&L leaves/enters as cash
+                                        on T+1, so the deposit does NOT accumulate MTM)
+utilisation = MR / assets    ->  warning ≥ 0.80, call ≥ 0.90, forced ≥ 1.00
 ```
 
-Marking per position and comparing that position's own equity would **over-call**
-whenever the deposit holds spare cash — which is the normal case under §7.3's explicit
-transfer model. Resting derivative orders must contribute to `required`, or a caller can
-rest futures orders it cannot fund.
+Three things a naive build gets wrong, all forced by the above:
+
+- **Net-risk, not per-position.** Offsetting positions (long one contract month, short
+  another) net down the requirement. So the margin entry point takes the **whole
+  `DerivativesAccount`**, never a lone `Position`. The per-position `margin.py`
+  primitive is the untouched batch research path (§10), *not* the session input. The
+  spread-credit values are Tier 2 and marked UNVERIFIED; building strict
+  per-position-and-sum first is the conservative fallback (it over-charges, never
+  under-charges) **provided the entry point already takes the account** so the netting
+  engine slots in without re-plumbing.
+- **VM is loss-only, marked against the previous daily settlement price** — not
+  symmetric around entry the way `margin.py:106` currently computes it.
+- **The 80/90/100 ladder is three states**, not one call boolean: warning → call →
+  forced liquidation, with the cure window between call and forced.
+
+Resting derivative orders must contribute to `MR`, or a caller can rest futures orders
+it cannot fund.
 
 > **The trigger's *semantics* must be fixed before its *numbers* are sourced.** The
 > existing code sets `maintenance_rate == vsd_initial`
@@ -531,10 +556,35 @@ This is **additive**. Nothing is thrown away and the suite stays green.
 
 ## 11. Build order
 
+### The five shapes to lock before writing code
+
+A policy audit (2026-08-25) separated policies whose *shape* must be right up front from
+values a dated lookup swaps in later. These five, if built the obvious way, force
+rework. Lock them; forbid the naive alternative. None is an unresolved unknown, so Tier
+1 can start.
+
+| # | Lock this shape | The naive build that must be forbidden |
+|---|---|---|
+| 1 | **Per-instant resolution, venue = `(ticker, ts)`** (Tier 1 item 1) | Config-at-load singletons / a ticker-keyed venue cache — bakes one regime and one venue per ticker |
+| 2 | **Encumbrance ledger** — reserve on accept, release on *every* terminal edge, test net of live orders (§7.0) | A stateless affordability check inside `admits()`, or scalar balances mutated only at fill |
+| 3 | **Tranche-list holdings/proceeds**, `settles_at` a datetime, `sellable_from` computed (§7.1) | A scalar `(qty, sellable_from)` pair, or date-granularity settlement |
+| 4 | **Order-type-is-time-in-force** state machine, per-type terminal edges sharing the encumbrance-release hook (§12) | One `RESTING` state with a single "expire at every phase boundary" rule |
+| 5 | **ContractLedger net-signed; margin/reservation entry point takes the whole account** (§7.3, §7.4) | Per-position rows; a margin function taking a lone `Position` |
+
+The single most important is **#1** — every other lookup reads it, so it is the one
+mistake that propagates everywhere. Build order below follows this ranking.
+
 ### Tier 1 — the walking skeleton
 
 1. `Session`: config load, clock, exchange registry, symbol routing. The rulebook
-   resolves **per event instant** (§6), not once at load.
+   resolves **per event instant** — `rulebook.at(ts)` — not once at load. **Symbol
+   routing is a per-event `instrument(ticker, ts)` call**, and `InstrumentSpec` is an
+   "as-of `ts`" snapshot: `exchange_code` stays scalar but is the venue *as of `ts`*.
+   The `datahub.py:225` ticker-keyed "one venue forever" cache must **not** be the
+   authoritative router. Within the 2021–22 window nothing varies and no ticker changes
+   venue (the HNX→HOSE transfer is 2025-07), so the seam is thin — but it must exist
+   from this component, or every band/tick/lot/fee lookup inherits a frozen venue and a
+   `ts` axis has to be threaded through every call site later.
 2. Order lifecycle: ids and the state machine (§12), including release of encumbrance
    on every terminal transition.
 3. `submit` / `cancel` / `poll`
@@ -643,21 +693,34 @@ a silent one is.
    DuckDB SQL that parallels the rules rather than calling them. §10 makes `admits()`
    the gate inside `submit()`, but the parallel SQL remains the source of those figures
    until it is replaced by real calls.
-3. **Foreign room changes no result on this corpus.** `quote_foreignroom` has 12.79M
-   intraday rows, but the constraint never binds in sample — minimum remaining room is
-   1 and no row reaches 0. Tier 2 item 12 is a **coverage** claim (an unconditional
-   `INDETERMINATE` becomes a decision), not evidence that the cap bit. No paper text may
-   imply otherwise.
-4. **The final-settlement chain is approximate.** `expiry.py`'s `TWAP_30M` tier averages
-   the *expiring contract's own* matched price, while the regulation is index-referenced.
-   Its error was calibrated against published rows confined to 2022-06→2022-12, roughly
-   7 of the 24 in-corpus expiries, and extrapolated backwards.
+3. **This iteration assumes a domestic investor; foreign-ownership limits are not
+   enforced.** The account is never classified as foreign, so every foreign-room check
+   is vacuous and all trades are valid on that axis. This is a deliberate scope cut
+   (author's decision): it removes an entire date-switched control flow (pre-KRX
+   fill-to-room-then-cancel vs post-KRX reject-at-entry). The `is_foreign` flag stays on
+   the order, defaults false, and the rule short-circuits. Enforcement is future work.
+   *(For that future work: `quote_foreignroom` is the REMAINING room, not the cap —
+   verified, HPG on 2022-11-15 decrements tick-by-tick within the session. Our
+   `README.md` calls it the cap and is wrong.)*
+4. **Final settlement uses the data source's close price, by design.** Rather than
+   compute the index-referenced trimmed mean, the simulator reads the expiring
+   contract's `close` on its expiry day as the settlement price (author's decision — the
+   exchange publishes essentially this). Verified: the data source carries a close on
+   expiry day (VN30F2206, 2022-06-16 = 1286.0). It approximates the true index-based
+   final settlement to ~0.4% (that day's index-window mean was 1281.4). This collapses
+   the settlement-price computation to a data read; `expiry.py`'s `TWAP_30M` tier is
+   retained only as the batch research path.
 5. **No corporate-action engine in Tier 1.** Dividends, splits, bonus and rights issues
    change both the reference price and the holdings quantity. Until §6's rulebook
    carries the adjustment formulas, a run spanning an ex-date is wrong for that
-   instrument. Tier 2 at the latest; the rulebook research is sourcing the formulas.
-6. **No trading calendar object**, by design — T+N counts instants the data source
-   yields (§7.1), which is holiday-correct by construction.
+   instrument. Tier 2 at the latest; the rulebook research is sourcing the formulas. The
+   holdings ledger exposes an additive `apply_corporate_action(factor, cash_per_share)`
+   hook over the tranche list so this is not retrofitted. **Open:** whether a resting
+   order survives the ex-date (quantity scaled) or is cancelled — decides whether the CA
+   engine mutates live orders or cancels them.
+6. **A VSDC settlement-business-day calendar is a required Tier 1 data input** (§7.1).
+   The earlier "holiday-correct by construction" claim was wrong; settlement days
+   diverge from trading days around Tết.
 7. **Continuous-session fills are not empirically validated.** Report the
    `INDETERMINATE` rate as a bound on ignorance rather than a fill rate (§13).
 
