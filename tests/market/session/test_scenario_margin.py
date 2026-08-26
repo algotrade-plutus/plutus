@@ -162,13 +162,29 @@ def test_the_engine_contains_no_float_literal():
     )
 
 
+#: The only module-level ``Decimal`` names the purity guard admits.
+#:
+#: Exactly one, and it is admitted because **it is zero**. S-4 established
+#: that *Ky quy FSP* -- the fourth term of TCBS's published five-term
+#: requirement -- has no VSDC counterpart and is zero for index futures, and
+#: a named zero is what stops a reader mistaking "we do not model it" for
+#: "the firm does not charge it". Zero is not a calibrated quantity, so
+#: nothing about the guard's purpose is weakened.
+#:
+#: ``MF = 5,000d`` deliberately does **not** appear here. It is reachable as
+#: ``minimum_margin_factor_from_tick(tick, M)``, a function of the contract
+#: spec, which keeps the derivation visible instead of freezing its output.
+_PERMITTED_DECIMAL_CONSTANTS = frozenset({'FSP_MARGIN_INDEX_FUTURES'})
+
+
 def test_the_engine_defines_no_market_data():
     """No embedded prices, ratios or contract tables.
 
     The only module-level numeric constants permitted are the ones the
     *source text* states: the scenario range, the two observation-window
-    minima, and the small arithmetic helpers. Nothing that could be mistaken
-    for a calibrated market quantity lives here.
+    minima, the small arithmetic helpers, and the single zero in
+    :data:`_PERMITTED_DECIMAL_CONSTANTS`. Nothing that could be mistaken for
+    a calibrated market quantity lives here.
     """
     assert SCENARIO_STEPS == tuple(range(-10, 11))
     assert SCENARIO_COUNT == 21
@@ -178,9 +194,14 @@ def test_the_engine_defines_no_market_data():
         name for name, value in vars(sm).items()
         if isinstance(value, Decimal) and not name.startswith('_')
     }
-    assert numeric_names == set(), (
-        f'module-level Decimal constants {sorted(numeric_names)} look like '
+    assert numeric_names <= _PERMITTED_DECIMAL_CONSTANTS, (
+        f'module-level Decimal constants '
+        f'{sorted(numeric_names - _PERMITTED_DECIMAL_CONSTANTS)} look like '
         'embedded market data'
+    )
+    assert sm.FSP_MARGIN_INDEX_FUTURES == D(0), (
+        'the one permitted constant is permitted BECAUSE it is zero; a '
+        'non-zero value here is a rate, and a rate is market data'
     )
 
 
@@ -418,6 +439,87 @@ def test_risk_margin_keeps_all_twenty_one_scenarios_for_audit():
     assert result.is_reconstructed_grid is True
 
 
+def test_a_denser_grid_cannot_change_rm_so_21_versus_42_is_immaterial():
+    """**S-15.** The scenario-count dispute is settled as a consequence.
+
+    The signed appendix says *"VSDC xac dinh **21** kich ban"* with
+    ``-10 <= k <= 10``. TCBS publishes *"42 kich ban"* in a paragraph that
+    then says its parameters run *"tu -10 den 10"*, which is 21 values. The
+    fact is unresolved; the **consequence** is not.
+
+    ``Lk = (Pm - Pb) x (Sk - S) x M`` is affine in ``Sk``, and ``Sk`` is
+    affine in ``k``, so the worst value over any finite grid is attained at
+    an endpoint. Here: refine the published grid to half-steps -- 41 points
+    over the same range, and the same argument covers 42 -- and confirm the
+    minimum is unchanged. Only a grid extending **beyond** ``+-rate`` or a
+    non-linear payoff (options) could move it.
+
+    **By hand**, ``S = 1000``, ``rate = 10%``, 3 long / 1 short::
+
+        worst at k = -10: (3 - 1) x (900 - 1000) x 100,000 = -20,000,000
+        so Rm = 20,000,000, and no interior point beats it.
+    """
+    params = vn30_parameters(ratio=D('0.10'))
+    coarse = risk_margin('VN30', [vn30(3, 1)], params)
+    assert coarse.gross == D(20000000)
+    assert coarse.worst.k == -10
+
+    refined = []
+    for half_step in range(-20, 21):
+        price = D(1000) * (D(1) + D(half_step) * D('0.10') / D(20))
+        refined.append(
+            scenario_loss(
+                scenario_price_=price,
+                close_price=D(1000),
+                long_quantity=3,
+                short_quantity=1,
+                multiplier=D(100000),
+            )
+        )
+    assert len(refined) == 41
+    assert -min(refined) == coarse.gross
+
+
+def test_the_grid_reduces_to_the_flat_initial_margin_for_a_directional_book():
+    """**S-12**, asserted against the full grid rather than replacing it.
+
+    For a one-underlying book the whole 21-scenario apparatus collapses::
+
+        Rm = |Pm - Pb| x rate x S x M
+
+    which is structurally the pre-KRX flat initial margin. The two layers
+    differ in one input only: VSDC applies ``rate`` to the underlying's
+    close ``S``, a broker applies it to the futures price ``F``, so they
+    diverge by the basis and by nothing else.
+
+    Cross-checked against TCBS's published worked example -- 30 long
+    VN30F2404 against 20 short VN30F2405, ``S = 1005.9``, ``rate = 3%``,
+    ``M = 100,000`` -- for which TCBS prints ``30,177,000``:
+
+        ``|30 - 20| x 0.03 x 1005.9 x 100,000 = 30,177,000``
+
+    The closed form is **not** used to compute anything; the module still
+    evaluates the grid, because the grid is the auditable artefact and is
+    what would remain correct if a non-linear instrument were listed.
+    """
+    legs = [
+        ContractLeg('VN30F2404', 'VN30', 30, 0, D(100000), D(0)),
+        ContractLeg('VN30F2405', 'VN30', 0, 20, D(100000), D(0)),
+    ]
+    params = vn30_parameters(close=D('1005.9'), ratio=D('0.03'))
+    assert risk_margin('VN30', legs, params).gross == D(30177000)
+
+    for long_q, short_q, ratio, close in (
+        (3, 1, D('0.17'), D(1000)),
+        (0, 7, D('0.10'), D('1234.5')),
+        (5, 5, D('0.17'), D(1000)),
+    ):
+        params = vn30_parameters(close=close, ratio=ratio)
+        grid = risk_margin('VN30', [vn30(long_q, short_q)], params).gross
+        closed = abs(D(long_q - short_q)) * ratio * close * D(100000)
+        assert grid == closed
+
+
 def test_risk_margin_sums_legs_with_different_multipliers():
     """Register id ``I18``. Two legs, ``M = 100,000`` and ``M = 10,000``.
 
@@ -506,14 +608,18 @@ def test_the_var_asymmetry_is_the_source_s_and_is_not_fixed():
     assert estimate.value_at_risk < D(3) * estimate.stdev
 
 
-def test_the_observation_window_defaults_to_the_conservative_reading():
-    """Section 1.3.a says >=120 days, section 1.3.b says >=250. Both stated.
+def test_the_observation_window_defaults_to_the_index_scoped_clause():
+    """**S-14.** 120 against 250 is not a contradiction, and 250 binds.
 
-    They are both minima, so any window at or above 250 satisfies both -- but
-    they cannot both be *the* stated minimum, and an implementer choosing 120
-    complies with (a) and breaches (b). The default is 250, the binding
-    constraint; 120 is reachable only by passing it deliberately. Neither
-    reading is resolved. ``SOURCE_DEFECTS['D14']``.
+    Section 1.3.a says *"toi thieu 120 ngay giao dich"*; section 1.3.b says
+    *"ky quan sat toi thieu la 250 ngay giao dich"*. Both were read from the
+    signed ``.docx`` and **both are minima**, so ``max(120, 250) = 250``
+    satisfies both and there is nothing to reconcile.
+
+    What settles the default is scope, not size: clause (b) is the one that
+    names *"HDTL chi so"*, index futures -- the only product this project
+    computes -- so 250 is its operative floor. 120 stays reachable
+    deliberately, for a product clause (b) does not reach.
     """
     returns = [D('0.001')] * 200
     with pytest.raises(MarginInputError, match='below the required minimum'):
@@ -522,25 +628,131 @@ def test_the_observation_window_defaults_to_the_conservative_reading():
         returns, minimum_observations=MIN_OBSERVATIONS_1_3_A
     )
     assert estimate.minimum_observations == 120
+    assert max(MIN_OBSERVATIONS_1_3_A, MIN_OBSERVATIONS_1_3_B) == (
+        MIN_OBSERVATIONS_1_3_B
+    )
     assert 'D14' in SOURCE_DEFECTS
+    assert 'DOWNGRADED' in SOURCE_DEFECTS['D14'], (
+        'S-14 dissolves the conflict; the register must stop calling two '
+        'minima a contradiction'
+    )
+    assert 'HDTL chi so' in SOURCE_DEFECTS['D14']
 
 
 def test_the_var_result_never_presents_itself_as_the_published_ratio():
-    """``SOURCE_DEFECTS['D2']``: the VaR-to-ratio formula is missing.
+    """The result record carries ``VaR``, never a ratio -- S-1 keeps this.
 
-    Section 1.3.c defines ``n``, announces the conversion and then omits the
-    expression, so ``n`` is defined and never used. ``rate = VaR`` at
-    ``n = 2`` is the only self-consistent reading available and it is still a
-    guess (register id ``I13``) -- which is why it is a **property** with a
-    warning rather than a field on the result, so no record can be mistaken
-    for a published ratio.
+    ``Ty le IM = VaR x sqrt(n)`` is now recovered, but the ratio is still not
+    a **field**: a field would be lifted out of a notebook and quoted as
+    VSDC's published number. It is reachable only by asking for it and naming
+    ``n``, which puts the assumption on the caller.
     """
     returns = [D('0.012'), D('-0.008'), D('0.012'), D('-0.008'), D('0.002')]
     estimate = parametric_var(returns, minimum_observations=5)
     fields = {f for f in vars(estimate)}
     assert 'initial_margin_ratio' not in fields
-    assert estimate.inferred_initial_margin_ratio == estimate.value_at_risk
+    assert 'inferred_initial_margin_ratio' not in fields
     assert 'I13' in INFERENCES and 'D2' in SOURCE_DEFECTS
+
+
+def test_the_var_to_ratio_formula_is_recovered_and_scales_by_sqrt_n():
+    """**S-1.** ``Ty le IM = VaR x sqrt(n)``, read from the equation XML.
+
+    **By hand.** With ``VaR = 0.05``:
+
+    * ``n = 1`` -> ``0.05 x 1 = 0.05``
+    * ``n = 4`` -> ``0.05 x 2 = 0.10``
+    * ``n = 9`` -> ``0.05 x 3 = 0.15``
+
+    Perfect squares are chosen so the expected values are exact and a reader
+    can check them without a calculator. The scaling is **flat ``sqrt(n)``**:
+    the appendix's ``<m:rad>`` carries ``<m:degHide m:val="1"/>`` over an
+    empty ``<m:deg/>`` with a bare ``n`` as the radicand, which is a square
+    root of ``n`` and excludes both an ``n``-th root and the ``sqrt(n/2)``
+    alternative this module used to offer.
+
+    This test fails against the module as it stood: there was no conversion
+    to call at all, only a property asserting ``rate == VaR``.
+    """
+    assert sm.initial_margin_ratio_from_var(
+        D('0.05'), liquidation_days=1
+    ) == D('0.05')
+    assert sm.initial_margin_ratio_from_var(
+        D('0.05'), liquidation_days=4
+    ) == D('0.10')
+    assert sm.initial_margin_ratio_from_var(
+        D('0.05'), liquidation_days=9
+    ) == D('0.15')
+
+
+def test_the_old_n_equals_two_reading_is_disproven_not_merely_doubted():
+    """**S-1**, and it is the sharpest consequence of the recovery.
+
+    The retired property returned ``VaR`` itself and defended that as *"the
+    ratio at n = 2"*. Under the recovered formula ``n = 2`` gives
+    ``VaR x sqrt(2)``, so the property was in fact asserting ``n = 1``: the
+    stated justification and the returned number disagreed. It is removed
+    rather than re-documented, because a number that is wrong is not fixed by
+    a better docstring.
+    """
+    returns = [D('0.012'), D('-0.008'), D('0.012'), D('-0.008'), D('0.002')]
+    estimate = parametric_var(returns, minimum_observations=5)
+    assert not hasattr(estimate, 'inferred_initial_margin_ratio')
+    at_two = estimate.initial_margin_ratio(liquidation_days=2)
+    assert at_two != estimate.value_at_risk
+    assert at_two == estimate.value_at_risk * D(2).sqrt()
+    assert estimate.initial_margin_ratio(
+        liquidation_days=1
+    ) == estimate.value_at_risk
+
+
+def test_n_is_required_because_the_source_never_publishes_it():
+    """**S-1 / ``SOURCE_DEFECTS['D2']``.** No default may be manufactured.
+
+    Section 1.3.c defines ``n`` -- *"so ngay can thiet de thanh ly mot vi
+    the"* -- and publishes no value for it anywhere in QD 26 or its nine
+    appendices. Recovering the formula therefore does **not** make the ratio
+    reproducible; it moves the gap from the formula to its one parameter,
+    which is what ``D2`` now records. The argument is keyword-only so a bare
+    positional integer cannot drift into it.
+    """
+    with pytest.raises(TypeError):
+        sm.initial_margin_ratio_from_var(D('0.05'), 2)
+    with pytest.raises(MarginInputError, match='at least 1'):
+        sm.initial_margin_ratio_from_var(D('0.05'), liquidation_days=0)
+    with pytest.raises(MarginInputError, match='must be an int'):
+        sm.initial_margin_ratio_from_var(D('0.05'), liquidation_days=D(2))
+    assert 'unpublished' in SOURCE_DEFECTS['D2'].lower() or 'published' in (
+        SOURCE_DEFECTS['D2'].lower()
+    )
+    assert 'absent from the extraction' not in SOURCE_DEFECTS['D2']
+
+
+def test_the_three_absent_formula_claims_are_recorded_as_withdrawn():
+    """The methodological lesson, made a property rather than a paragraph.
+
+    A ``.docx`` holds equations as ``OMML`` objects and formulas as embedded
+    images, and **every** text extractor drops both silently. This module
+    asserted "the formula is absent" three times -- the VaR conversion
+    (``D2``), the collateral valuation (``D3``), and the CTD method being
+    unreachable without a Phu luc 8 we supposedly did not have (``D11``) --
+    and all three were wrong.
+
+    The withdrawals are kept rather than deleted. A retracted claim that
+    simply disappears takes the reason for the retraction with it, and the
+    reason is the transferable part.
+    """
+    assert set(sm.WITHDRAWN_DEFECTS) == {'D2', 'D3', 'D11'}
+    for key, entry in sm.WITHDRAWN_DEFECTS.items():
+        assert entry.startswith('WAS'), (
+            f'{key} must quote the claim it is withdrawing, so a reader can '
+            'see what was believed and why it was believed'
+        )
+        assert 'WRONG' in entry
+    assert 'sqrt(n)' in sm.WITHDRAWN_DEFECTS['D2']
+    assert 'Phu luc 2 section 4.2' in sm.WITHDRAWN_DEFECTS['D11']
+    lesson = sm.__doc__
+    assert 'the formula is absent' in lesson and 'OMML' in lesson
 
 
 def test_the_engine_takes_the_published_ratio_and_never_calls_the_helper():
@@ -900,6 +1112,115 @@ def test_the_offset_floor_at_zero_is_ours():
     assert apply_offsetting_amount(D(100), D(250)) == D(0)
 
 
+def test_tcbs_places_oa_outside_the_sum_and_that_is_the_same_expression():
+    """**S-3, first half.** The placement question does not need a case.
+
+    Phu luc 2 section 6.2 prints ``Pgm = Max((Rm + Sm + Dm), MM)`` with no
+    ``OA``, because Dieu 5.1.1.a has already absorbed it into ``Rm``. TCBS
+    publishes ``Max(Rm + Sm + Dm + FSP - OA, MM)``, with ``OA`` outside the
+    group sum. Written out, ``(Rm - OA) + Sm + Dm`` against
+    ``Rm + Sm + Dm - OA``: associativity, and no case split -- **including**
+    the case the brief singled out, ``OA > Rm``. The equivalence claim holds
+    against both texts.
+
+    ``FSP`` is the fourth term and it is zero for index futures (S-4), so
+    TCBS's five-term formula and VSDC's three-term one describe the same
+    number for a VN30F book.
+    """
+    for rm, oa, basis, delivery in (
+        (D(100), D(30), D(20), D(5)),      # the ordinary case
+        (D(100), D(250), D(20), D(5)),     # OA exceeds Rm
+        (D(100), D(0), D(0), D(0)),        # no offset at all
+    ):
+        assert (rm - oa) + basis + delivery == (
+            rm + basis + delivery + sm.FSP_MARGIN_INDEX_FUTURES - oa
+        )
+
+
+def test_our_zero_floor_is_the_one_place_the_two_forms_diverge():
+    """**S-3, second half, and why ``I4`` stays open.**
+
+    Our implementation is neither published form: it floors ``Rm - OA`` at
+    zero *before* adding ``Sm + Dm``. With ``Rm_gross = 100``, ``OA = 250``,
+    ``Sm = 20``:
+
+    * ours      -> ``max(0, 100 - 250) + 20 = 20``
+    * published -> ``100 + 20 - 250 = -130``
+
+    The floor, not the placement, is the entire difference -- and it moves
+    the requirement **upward**, which is the safe direction but is still not
+    what the source says. So the inference is narrowed to the floor and left
+    registered rather than closed.
+    """
+    rm_gross, offset, basis = D(100), D(250), D(20)
+    ours = apply_offsetting_amount(rm_gross, offset) + basis
+    published = rm_gross + basis - offset
+    assert ours == D(20) and published == D(-130)
+    assert ours > published
+    assert 'floor' in INFERENCES['I4'].lower()
+
+
+def test_psr_from_the_published_formula_always_lands_in_the_unit_interval():
+    """**S-3**, the premise of the unreachability proof.
+
+    Section 2.2.e's ``Psr = 1 - Max99|rx - ry| / (Max|rx| + Max|ry|)`` cannot
+    leave ``[0, 1]``: the numerator is a percentile of ``|rx - ry|``, which
+    is bounded above by ``Max|rx| + Max|ry|`` term by term, and is bounded
+    below by zero. Checked here on series chosen to push both ends --
+    identical series (``Psr = 1``) and maximally opposed ones.
+    """
+    identical = [D('0.01'), D('-0.02'), D('0.03')]
+    assert price_relation_rate(identical, identical) == D(1)
+    opposed_x = [D('0.05'), D('-0.05'), D('0.05')]
+    opposed_y = [D('-0.05'), D('0.05'), D('-0.05')]
+    psr = price_relation_rate(opposed_x, opposed_y)
+    assert D(0) <= psr <= D(1)
+
+
+def test_the_floor_is_unreachable_for_every_psr_the_rule_can_produce():
+    """**S-3.** ``OA <= Rm_gross x Psr``, so the floor never binds.
+
+    Swept over ``Psr`` in ``[0, 1]`` on the synthetic VN30/VN100 book. The
+    bound is structural, not numerical: ``C = min(n_pos, |n_neg|)`` while
+    ``B = Rm_pos / n_pos`` and ``S = Rm_neg / |n_neg|``, so ``C x B <=
+    Rm_pos`` and ``C x S <= Rm_neg`` (``I17``). This is what lets the module
+    claim that our form and the published form agree on every input the
+    regulation can generate.
+    """
+    legs, parameters, _ = _synthetic_two_underlying_book()
+    for psr in (D(0), D('0.25'), D('0.9'), D(1)):
+        group = UnderlyingGroup('G1', ('VN30', 'VN100'), psr)
+        requirement = required_margin(
+            legs, parameters.values(), groups=[group]
+        )
+        computed = requirement.group('G1')
+        assert computed.offsetting_amount.amount <= (
+            computed.risk_margin_gross * psr
+        )
+        assert computed.offset_floor_binds is False
+
+
+def test_a_psr_above_one_is_the_only_route_to_the_floor_and_it_is_reported():
+    """**S-3.** The divergence is a property of our input surface.
+
+    ``UnderlyingGroup`` accepts a supplied ``Psr`` without a range check --
+    a caller may be mirroring a broker's number rather than computing section
+    2.2.e -- and ``Psr = 2`` drives ``OA = 340,000,000`` against
+    ``Rm_gross = 255,000,000``. The result must **say so** rather than
+    silently returning the clipped number, which is what
+    ``offset_floor_binds`` is for. This test fails without that property.
+    """
+    legs, parameters, _ = _synthetic_two_underlying_book()
+    group = UnderlyingGroup('G1', ('VN30', 'VN100'), D(2))
+    computed = required_margin(
+        legs, parameters.values(), groups=[group]
+    ).group('G1')
+    assert computed.risk_margin_gross == D(255000000)
+    assert computed.offsetting_amount.amount == D(340000000)
+    assert computed.risk_margin == D(0)
+    assert computed.offset_floor_binds is True
+
+
 def test_the_offsetting_amount_is_refused_for_a_singleton_group():
     """QD 26 Dieu 5.1.1.a: *"tu hai tai san co so tro len"*.
 
@@ -1047,6 +1368,63 @@ def test_the_minimum_margin_factor_is_a_half_spread_times_notional():
     assert minimum_margin_factor(D('0.0005'), D(100000), D(1000)) == D(50000)
 
 
+def test_mf_for_a_one_tick_book_is_5000_dong_and_the_index_cancels():
+    """**S-11.** The external anchor ``MM`` did not have.
+
+    For a book one tick wide, ``ask - bid = tick`` and ``ask + bid = 2S``, so
+    section 5.2's ``R`` becomes ``tick / 2S`` and::
+
+        MF = R x M x St = (tick / 2S) x M x S = tick x M / 2
+
+    ``S`` cancels. For VN30F -- ``tick = 0.1`` index points,
+    ``M = 100,000`` VND/point -- that is ``0.1 x 100,000 / 2 = 5,000`` VND
+    per contract, which is exactly what TCBS publishes
+    (*"Ky quy toi thieu VN30 = 5,000 d"*, and the worked example
+    ``30 x 5,000 + 20 x 5,000 = 250,000``). Two independent routes, one
+    algebraic and one published, to the same number.
+
+    **Index-independence is the load-bearing part** and is asserted across
+    three index levels a decade apart in magnitude: the constancy is a
+    property of the formula, not of today's index.
+    """
+    assert sm.minimum_margin_factor_from_tick(D('0.1'), D(100000)) == D(5000)
+    for level in (D(500), D('1005.9'), D(1931), D(5000)):
+        implied_r = D('0.1') / (D(2) * level)
+        assert minimum_margin_factor(implied_r, D(100000), level) == D(5000)
+    assert minimum_margin_factor(
+        sm.minimum_margin_factor_from_tick(D('0.1'), D(100000))
+        / (D(100000) * D(1000)),
+        D(100000),
+        D(1000),
+    ) == D(5000)
+
+
+def test_the_tick_derived_factor_composes_with_the_published_mm_formula():
+    """**S-11**, carried through to ``MM = P x MF``.
+
+    TCBS's own example: 30 contracts of one expiry and 20 of another, all
+    VN30F, gives ``MM = 50 x 5,000 = 250,000``. ``P`` is gross (``I9``), so
+    the two legs add rather than netting.
+    """
+    factor = sm.minimum_margin_factor_from_tick(D('0.1'), D(100000))
+    rate = factor / (D(100000) * D(1000))
+    legs = [
+        ContractLeg('VN30F2404', 'VN30', 30, 0, D(100000), rate),
+        ContractLeg('VN30F2405', 'VN30', 0, 20, D(100000), rate),
+    ]
+    result = minimum_margin('VN30', legs, vn30_parameters())
+    assert result.gross_quantity == 50
+    assert result.amount == D(250000)
+
+
+def test_the_tick_derived_factor_refuses_a_nonsense_contract_spec():
+    """A zero tick or a zero multiplier is a spec error, not a zero cost."""
+    with pytest.raises(MarginInputError, match='tick_size must be positive'):
+        sm.minimum_margin_factor_from_tick(D(0), D(100000))
+    with pytest.raises(MarginInputError, match='multiplier must be positive'):
+        sm.minimum_margin_factor_from_tick(D('0.1'), D(0))
+
+
 def test_minimum_margin_multiplies_the_gross_position():
     """**By hand.** 3 long / 1 short, ``MF = 50,000``.
 
@@ -1181,6 +1559,75 @@ def test_the_delivery_price_bounds_inherit_the_scenario_defect():
             highest_price=literal, lowest_price=literal,
         )
     ).delivery_risk != result.delivery_risk
+
+
+def test_ky_quy_fsp_is_a_named_zero_for_index_futures_not_an_unknown():
+    """**S-4.** The fourth term of TCBS's formula, accounted for.
+
+    TCBS publishes ``Max(Rm + Sm + Dm + FSP - OA, MM)``. VSDC publishes a
+    three-term ``Pgm``. Until now this module had nowhere to record the
+    difference, which left a reader unable to tell "we do not model it" from
+    "it does not exist".
+
+    **VERIFIED by exhaustive absence.** The token ``FSP`` was counted across
+    the rulebook body and all nine appendices of the signed package; it
+    occurs only as *"gia thanh toan cuoi cung (FSP)"*, the final settlement
+    **price**, as an input to ``SMrate`` (section 3.3), to ``Dm``
+    (section 4.1), and to Dieu 23/26. The phrase *"Ky quy FSP"* occurs zero
+    times, in every file, and section 6.2 has no fifth component.
+
+    So it is recorded as a **named zero**, with its citation, and the model's
+    three-term sum equals TCBS's five-term one for a VN30F book.
+    """
+    assert sm.FSP_MARGIN_INDEX_FUTURES == D(0)
+    source = inspect.getsource(sm)
+    citation = source.split(
+        'FSP_MARGIN_INDEX_FUTURES: Decimal', 1
+    )[0].rsplit('#: *Ky quy FSP*', 1)
+    assert len(citation) == 2, (
+        'the constant must carry the exhaustive-absence citation that '
+        'justifies it, immediately above its definition'
+    )
+    assert 'Ky quy FSP' in citation[1] and 'S-4' in citation[1]
+    identifiers = _defined_identifiers()
+    assert 'FSP_MARGIN_INDEX_FUTURES' in identifiers
+    assert {'fsp', 'final_settlement_price'} <= identifiers, (
+        'the only FSP in the model is the final settlement PRICE, an input '
+        'to Dm -- that is the homonym S-4 exists to keep apart'
+    )
+    assert not [
+        n for n in identifiers
+        if 'fsp' in n.lower() and 'margin' in n.lower()
+        and n != 'FSP_MARGIN_INDEX_FUTURES'
+    ], 'FSP margin must be a documented zero, never a computed component'
+
+
+def test_the_ctd_method_is_obtained_and_the_wrong_pointer_is_the_defect():
+    """**S-10 / S-16.** ``D15``, and the third withdrawn "absent" claim.
+
+    Phu luc 2 section 4.2 sends a reader to **Phu luc 8** for the
+    cheapest-to-deliver method. Phu luc 8 is, in full, a seven-row table of
+    ``Mau 01..10/PLPS-TTBT`` electronic settlement forms. The method is in
+    **Phu luc 6 section 3**, ``CTD = min(bond market price / CF)`` -- and the
+    corrected pointer is itself ambiguous, because Phu luc 6 contains two
+    sections numbered 3.
+
+    This module previously blamed QD 26 Dieu 24.1 for the mismatch. Dieu
+    24.1 is correct: it cites Phu luc 8 for electronic documents, which is
+    what Phu luc 8 is. The wrong citation is the appendix's.
+    """
+    assert 'D15' in SOURCE_DEFECTS
+    entry = SOURCE_DEFECTS['D15']
+    assert 'Phu luc 6 section 3' in entry
+    assert 'CTD = min' in entry
+    assert 'TWO sections numbered 3' in entry
+    assert 'Dieu 24.1s citation of Phu luc 8' in entry
+    doc = delivery_margin.__doc__
+    assert 'which we do not have' not in doc, (
+        'the CTD method is obtained; the docstring must stop claiming a '
+        'missing appendix as the reason GB futures are deferred'
+    )
+    assert "SOURCE_DEFECTS['D15']" in doc
 
 
 def test_delivery_margin_has_no_calendar_and_refuses_to_date_itself():
@@ -1766,20 +2213,32 @@ def test_the_monitor_holds_no_calendar_and_says_so():
 
 
 def test_the_margin_asset_side_is_supplied_and_never_valued_here():
-    """``SOURCE_DEFECTS['D3']`` -- Dieu 8.1's valuation formula is missing.
+    """Margin assets arrive as a scalar -- but **no longer because D3**.
 
-    All seven variables are glossed (``VKQ``, ``C``, ``MR``, ``x = 80%``,
-    ``QKQ``, ``P``, ``H``) and the expression combining them is absent from
-    the extraction. The haircuts are known -- 5% / 30% / 40% at Dieu 9.1 --
-    and the arithmetic is not. Guessing it would put an invented number on
-    the other side of the only test that matters, so margin assets arrive as
-    a scalar and this module values no collateral.
+    S-16 withdraws ``D3``. QD 26 Dieu 8.1's valuation formula is present in
+    the signed ``.docx`` as an OMML object,
+    ``VKQ = C + min((1 - x) x MR ; SUM QKQ x P x (100% - H))``, and the
+    haircuts were always known (5% / 30% / 40%, Dieu 9.1). So the module can
+    no longer cite the source as its reason for not valuing collateral: the
+    boundary is now a **scope decision**, and this test pins the boundary
+    while refusing the retired excuse.
+
+    The distinction matters to a reader deciding whether to build ``V_KQ``.
+    Under the old claim it was blocked. It is not blocked; it is unbuilt.
     """
     identifiers = _defined_identifiers()
     for banned in ('haircut', 'collateral', 'vkq', 'discount_rate'):
         assert not [n for n in identifiers if banned in n.lower()], (
-            f'{banned} appears as an identifier: the engine is valuing '
-            'collateral, which Dieu 8.1 does not give us the formula for'
+            f'{banned} appears as an identifier: valuing collateral is a '
+            'separate component, not this pure engine'
         )
     assert 'margin_assets' in identifiers
-    assert 'D3' in SOURCE_DEFECTS
+    assert 'D3' not in SOURCE_DEFECTS, (
+        'D3 was withdrawn by S-16 -- Dieu 8.1s formula is in the signed '
+        '.docx and this module must stop calling it missing'
+    )
+    assert 'D3' in sm.WITHDRAWN_DEFECTS
+    assert 'VKQ' in sm.WITHDRAWN_DEFECTS['D3'], (
+        'the withdrawal must carry the formula that disproved the claim, '
+        'not merely announce that a claim was dropped'
+    )

@@ -52,9 +52,42 @@ remedy. It is deliberately **not** implemented here.
 **Government-bond futures are deferred by author decision.** Section 4's
 arithmetic is implemented so the model is complete and so nobody re-derives
 it later, and :func:`delivery_margin` says so in its own docstring. It has
-never been checked against a real VSDC number, no GB future exists in any
-corpus this project holds, and the CTD-bond method it depends on lives in
-**Phu luc 8, which we do not have.**
+never been checked against a real VSDC number and no GB future exists in any
+corpus this project holds. The CTD-bond method it depends on is **obtained**
+-- it is ``Phu luc 6`` section 3, ``CTD = min(bond market price / CF)`` --
+and the appendix that Phu luc 2 section 4.2 *points* at for it, ``Phu luc
+8``, is a seven-row list of electronic settlement forms. See
+``SOURCE_DEFECTS['D15']``.
+
+.. rubric:: The methodological lesson, and it cost us three wrong claims
+
+**A defect of the form "the formula is absent" is not credible unless the
+.docx XML has been inspected.** Word ``OMML`` equation objects
+(``<m:oMath>``) and embedded ``<w:drawing>`` images are silently dropped by
+*every* text extractor this project has used -- thuvienphapluat's HTML,
+``pdftotext``, ``docx2txt``, the ``r.jina.ai`` proxy. What survives is a
+paragraph reading *"...duoc xac dinh theo cong thuc sau:"* followed
+immediately by *"Trong do:"*, which reads exactly like a drafting failure and
+is not one.
+
+This module asserted "the formula is absent" three times and was wrong all
+three times:
+
+1. ``D2`` -- Phu luc 2 section 1.3.c's VaR-to-ratio formula. It is one
+   ``<m:oMath>`` element, and it says ``Ty le IM = VaR x sqrt(n)``.
+2. ``D3`` -- QD 26 Dieu 8.1's collateral valuation formula. Also an
+   ``<m:oMath>``: ``VKQ = C + min((1 - x) x MR ; SUM QKQ x P x (100% - H))``.
+3. **Phu luc 8 "which we do not have"** -- we had it all along; it is simply
+   not what Phu luc 2 section 4.2 says it is.
+
+Counted directly in the signed package this session: ``Phu luc 2`` holds
+**one** ``<m:oMath>`` and **zero** drawings; ``Phu luc 6`` holds **two**
+``<m:oMath>`` and **one** drawing, and the drawing *is* the index-futures
+theoretical price formula. Both withdrawn claims are kept, with their
+disproof, in :data:`WITHDRAWN_DEFECTS` -- deleting a retracted claim hides
+the lesson. The converse also holds and is why :data:`SOURCE_DEFECTS` is
+still worth having: a defect that **survives** ``.docx`` inspection is a
+defect in the *signed instrument*, not in somebody's extraction.
 
 Confidence vocabulary, matching ``docs/reference/post-krx-margin-spec.md``:
 **VERIFIED** read verbatim in the primary text; **INFERRED** our reading,
@@ -74,6 +107,9 @@ Primary sources, both read end to end before this module was written:
   ``phuluc2 L<n>``.
 * ``docs/reference/post-krx-margin-spec.md`` -- the specification written
   from those two, whose section numbers this module tracks.
+* ``docs/reference/krx-margin-research.md`` section 1 -- the seventeen
+  SETTLED corrections, each read back against the signed ``.docx`` package
+  before it was applied here. Cited below as ``S-<n>``.
 """
 
 from __future__ import annotations
@@ -90,13 +126,13 @@ __all__ = [
     # -- errors -----------------------------------------------------------
     'ScenarioMarginError', 'MarginInputError', 'MarginTimelineError',
     # -- registers --------------------------------------------------------
-    'INFERENCES', 'SOURCE_DEFECTS',
+    'INFERENCES', 'SOURCE_DEFECTS', 'WITHDRAWN_DEFECTS',
     # -- the scenario grid (Phu luc 2 section 1) --------------------------
     'SCENARIO_STEPS', 'SCENARIO_COUNT', 'Scenario', 'scenario_price',
     'scenario_prices', 'scenario_loss', 'risk_margin', 'RiskMargin',
     # -- the initial margin ratio (Phu luc 2 section 1.3) -----------------
     'MIN_OBSERVATIONS_1_3_A', 'MIN_OBSERVATIONS_1_3_B', 'VarEstimate',
-    'two_day_returns', 'parametric_var',
+    'two_day_returns', 'parametric_var', 'initial_margin_ratio_from_var',
     # -- the offsetting amount (Phu luc 2 section 2) ----------------------
     'PercentileMethod', 'percentile', 'price_relation_rate',
     'group_price_relation_rate', 'delta_coefficient', 'StandardisedPosition',
@@ -105,8 +141,10 @@ __all__ = [
     'BasisMargin', 'basis_margin',
     # -- delivery margin (Phu luc 2 section 4) ----------------------------
     'DeliveryPosition', 'DeliveryMargin', 'delivery_margin',
+    'FSP_MARGIN_INDEX_FUTURES',
     # -- minimum margin (Phu luc 2 section 5) -----------------------------
     'MinimumMargin', 'minimum_margin_factor', 'minimum_margin',
+    'minimum_margin_factor_from_tick',
     # -- the inputs -------------------------------------------------------
     'ContractLeg', 'UnderlyingParameters', 'UnderlyingGroup',
     # -- assembly (Phu luc 2 section 6) -----------------------------------
@@ -182,11 +220,15 @@ INFERENCES: Mapping[str, str] = {
         'underlying must still produce a Pgm or its risk vanishes from MR.'
     ),
     'I4': (
-        'Rm = max(0, Rm_gross - OA), applied at the group level. QD 26 Dieu '
-        '5.1.1.a fixes the DIRECTION verbatim ("so tien dieu chinh giam gia '
-        'tri ky quy rui ro") and that much is VERIFIED. That the arithmetic '
-        'is subtraction, that it lands at the group level, and that the '
-        'result is floored at zero are all ours. See apply_offsetting_amount.'
+        'Rm = max(0, Rm_gross - OA), applied at the group level. NARROWED '
+        'per S-3: QD 26 Dieu 5.1.1.a fixes the DIRECTION verbatim ("so tien '
+        'dieu chinh giam gia tri ky quy rui ro"), read this session in the '
+        'signed .docx, so the direction is VERIFIED and no longer ours. '
+        'Still ours: that the arithmetic is subtraction, that it lands at '
+        'the group level, and THE ZERO FLOOR -- which is the one place our '
+        'form and TCBS\'s published form can disagree. See '
+        'apply_offsetting_amount for the algebra and for the proof that the '
+        'floor is unreachable while Psr stays in [0, 1].'
     ),
     'I5': (
         'C compares the ABSOLUTE values of the positive-delta and '
@@ -234,11 +276,18 @@ INFERENCES: Mapping[str, str] = {
         'and a group may hold several underlyings; the roll-up is not stated.'
     ),
     'I13': (
-        'rate = VaR at n = 2. Phu luc 2 section 1.3.c announces the formula '
-        'converting VaR and n into the published ratio and then omits it '
-        '(SOURCE_DEFECTS["D2"]), so this is a guess and a sqrt(n/2) scaling '
-        'is equally consistent with the fragment. Use VSDCs published ratio; '
-        'parametric_var exists to CHECK a series, not to replace the ratio.'
+        'n, the liquidation horizon in Ty le IM = VaR x sqrt(n), is a '
+        'REQUIRED EXPLICIT PARAMETER. REWRITTEN per S-1: the conversion is '
+        'no longer inferred -- it was recovered verbatim from the equation '
+        'XML of the signed Phu luc 2 and is implemented in '
+        'initial_margin_ratio_from_var. What remains ours is only the '
+        'refusal to default n: section 1.3.c defines n ("so ngay can thiet '
+        'de thanh ly mot vi the") and never publishes its value, anywhere in '
+        'QD 26 or its nine appendices. The former reading "rate = VaR at '
+        'n = 2" is now DISPROVEN, not merely doubted -- VaR x sqrt(2) is not '
+        'VaR -- and the sqrt(n/2) alternative it offered is excluded by the '
+        'XML, which is <m:rad> with <m:degHide m:val="1"/> around a bare n. '
+        'Use VSDCs published ratio; parametric_var CHECKS a series.'
     ),
     'I14': (
         'r_t = (S_T - S_T-2) / S_T-2, sampled once per trading day '
@@ -284,31 +333,35 @@ INFERENCES: Mapping[str, str] = {
 
 #: Properties of the gazetted text, not of our reading of it.
 #:
-#: Recorded because the next person to fetch these documents will meet them
-#: again. Ids match ``post-krx-margin-spec.md`` section 12.
+#: **Every entry here has survived inspection of the signed ``.docx`` XML**,
+#: which is what makes it a defect in the *instrument* rather than in an
+#: extractor -- see the module docstring and :data:`WITHDRAWN_DEFECTS` for
+#: the three claims that did not survive. Recorded because the next person to
+#: fetch these documents will meet them again. Ids match
+#: ``post-krx-margin-spec.md`` section 12.
 SOURCE_DEFECTS: Mapping[str, str] = {
     'D1': (
-        'CRITICAL. Phu luc 2 section 1.2s scenario table prints '
-        '"Sk = S0 x (1 + ty le ky quy ban dau/10)" -- WITH NO k -- '
-        'identically in all 21 rows, while the same cell declares '
-        '-10 <= k <= 10 and the rows are labelled S-10 ... S+10. Read '
-        'literally the 21 scenarios are one point, Lk takes one value, and '
-        'section 4.3s Hp and Lp are equal. See scenario_price for the '
-        'reading we adopt and why.'
+        'CRITICAL, AND IT IS IN THE SIGNED INSTRUMENT. Phu luc 2 section '
+        '1.2s scenario table prints "Sk = S0 x (1 + ty le ky quy ban dau/10)" '
+        '-- WITH NO k -- while the same cell declares -10 <= k <= 10 and the '
+        'rows are labelled S-10 ... S+10. Re-tagged per S-16 from "in the '
+        'extraction" to "in the signed instrument": the appendix .docx '
+        'contains exactly ONE equation object and it is the VaR one, so this '
+        'formula is plain text as typeset and no OMML object is hiding a k. '
+        'Read literally the 21 scenarios are one point, Lk takes one value, '
+        'and section 4.3s Hp and Lp are equal. See scenario_price.'
     ),
     'D2': (
-        'CRITICAL. Phu luc 2 section 1.3.c announces the formula that turns '
-        'VaR and n into the published initial margin ratio and is followed '
-        'immediately by "Trong do:". The expression is absent from the '
-        'extraction. Consequence: n is defined and then never used.'
-    ),
-    'D3': (
-        'HIGH. QD 26 Dieu 8.1s margin-ASSET valuation formula is missing the '
-        'same way -- all seven variables (VKQ, C, MR, x = 80%, QKQ, P, H) '
-        'are glossed and the expression is absent. This module therefore '
-        'takes margin assets as a supplied scalar and does NOT value '
-        'collateral; that is the other half of the assets < MR test and it '
-        'is not ours to guess.'
+        'REWRITTEN per S-1, and its former claim is WITHDRAWN -- see '
+        'WITHDRAWN_DEFECTS["D2"]. The conversion formula is NOT absent: the '
+        'signed Phu luc 2 carries it as an OMML object reading '
+        '"Ty le IM = VaR x sqrt(n)". The surviving defect is narrower and '
+        'still real: n is defined in section 1.3.c ("so ngay can thiet de '
+        'thanh ly mot vi the khi xay ra truong hop mat kha nang thanh toan") '
+        'and its VALUE is published nowhere in QD 26 or its nine appendices, '
+        'so a reader given the formula still cannot reproduce a single '
+        'published ratio. initial_margin_ratio_from_var therefore requires n '
+        'explicitly and defaults nothing.'
     ),
     'D8': (
         'HIGH. "Bien dong gia" must mean a RETURN in section 2.2.e and an '
@@ -329,25 +382,91 @@ SOURCE_DEFECTS: Mapping[str, str] = {
         'bond work; not silently patched.'
     ),
     'D12': (
-        'MEDIUM. MF is "cho mot thang dao han HDTL" in section 5.1 and "tren '
-        'mot hop dong" in section 5.2. Only the per-contract reading balances '
-        'MM = P x MF dimensionally, so that is the one implemented.'
+        'MEDIUM, and it survives .docx inspection (S-16). MF is "xac dinh '
+        'cho mot thang dao han HDTL" in section 5.1 while section 5.2s own '
+        'formula line reads "Gia tri ky quy toi thieu tren mot hop dong = '
+        'R x M x St". Only the per-contract reading balances MM = P x MF '
+        'dimensionally, so that is the one implemented.'
     ),
     'D13': (
-        'MEDIUM. QD 26 Dieu 13 has TWO khoan numbered 3, and khoan 3.b '
-        'cross-refers to "diem a khoan 1 Dieu nay" -- but khoan 1 has no '
-        'lettered points. The intended target is almost certainly diem a '
-        'khoan 2, the 09h30 checkpoint. MarginViolationMonitor reads it that '
-        'way and says so.'
+        'MEDIUM, and VERIFIED in the signed .docx (S-16 items 2 and 3). '
+        'QD 26 Dieu 13 has TWO khoan numbered 3 -- "3. Thanh vien bu tru bat '
+        'buoc thuc hien cac bien phap..." then "3. Quy trinh trao doi thong '
+        'tin giua VSDC va SGDCK Ha Noi..." -- and khoan 3.b cross-refers to '
+        '"diem a khoan 1 Dieu nay", but khoan 1 is a single unlettered '
+        'paragraph, so the 03-working-day close-out clock is anchored to '
+        'nothing. The intended target is almost certainly diem a khoan 2, '
+        'the 09h30 checkpoint. MarginViolationMonitor reads it that way and '
+        'says so.'
     ),
     'D14': (
-        'The two stated observation windows for the initial margin ratio. '
-        'Section 1.3.a says "toi thieu 120 ngay giao dich"; section 1.3.b '
-        'says "ky quan sat toi thieu la 250 ngay giao dich". Both are '
-        'minima, so they are not strictly contradictory -- but they cannot '
-        'both be THE stated minimum, and an implementer choosing 120 '
-        'complies with (a) and breaches (b). Surfaced as an explicit '
-        'parameter, defaulted to the conservative 250.'
+        'DOWNGRADED, and RESOLVED as to which window binds -- S-14. Section '
+        '1.3.a says "toi thieu 120 ngay giao dich"; section 1.3.b says "ky '
+        'quan sat toi thieu la 250 ngay giao dich". Both are stated as '
+        'MINIMA, so any window at or above 250 satisfies both and there is '
+        'no contradiction to resolve. What settles the default is scope, not '
+        'arithmetic: clause (b) is the one that names "HDTL chi so" -- index '
+        'futures, our only product -- so 250 is the operative floor for '
+        'anything this project computes, and 120 is the floor of the generic '
+        'clause. The residual defect is only that two floors are printed for '
+        'one quantity. The window ACTUALLY used by VSDC is unpublished, and '
+        'so is n (D2), so the window is not the binding gap.'
+    ),
+    'D15': (
+        'MEDIUM, NEW per S-10/S-16, and it is two defects in one sentence. '
+        'Phu luc 2 section 4.2 says the cheapest-to-deliver method is "theo '
+        'huong dan tai Phu luc 8 Quy che nay". Phu luc 8 is, in full, '
+        '"Danh muc chung tu thanh toan, thong bao duoc ap dung duoi dang '
+        'chung tu dien tu" -- a seven-row table of Mau 01..10/PLPS-TTBT '
+        'forms. The CTD method is in Phu luc 6 section 3 '
+        '("CTD = min (Gia thi truong cua trai phieu chuyen giao / CF)"). And '
+        'the corrected pointer is itself ambiguous: Phu luc 6 contains TWO '
+        'sections numbered 3 -- "3. DSP doi voi HDTL TPCP" and "3. Xac dinh '
+        'trai phieu re nhat de giao (CTD)". Note QD 26 Dieu 24.1s citation '
+        'of Phu luc 8 for electronic documents is CORRECT; the wrong pointer '
+        'is Phu luc 2s, which this module previously mis-attributed.'
+    ),
+}
+
+#: Claims this module made about the source that inspection DISPROVED.
+#:
+#: Kept, not deleted. A retracted defect that vanishes takes the reason for
+#: the retraction with it, and the reason is the most transferable thing this
+#: module has learned -- see the module docstring. Each entry names what was
+#: claimed, what the signed ``.docx`` actually contains, and what (if
+#: anything) survives as a narrower defect.
+WITHDRAWN_DEFECTS: Mapping[str, str] = {
+    'D2': (
+        'WAS: "Phu luc 2 section 1.3.c announces the formula that turns VaR '
+        'and n into the published initial margin ratio ... The expression is '
+        'absent from the extraction." WRONG. The expression is present in '
+        'the signed .docx as the appendixs single OMML object and reads '
+        'Ty le IM = VaR x sqrt(n). The radical is unambiguous: <m:rad> with '
+        '<m:degHide m:val="1"/> and an empty <m:deg/> around a bare n -- a '
+        'square root of n, not an n-th root and not sqrt(n/2). A NARROWER '
+        'defect survives and keeps the id: see SOURCE_DEFECTS["D2"].'
+    ),
+    'D3': (
+        'WAS: "QD 26 Dieu 8.1s margin-ASSET valuation formula is missing the '
+        'same way ... it is not ours to guess." WRONG, and RETIRED with no '
+        'successor. The rulebook .docx carries it as an OMML object: '
+        'VKQ = C + min((1 - x) x MR ; SUM QKQ x P x (100% - H)), with x the '
+        'minimum cash share (80%) and H the Dieu 9 haircut. Collateral '
+        'valuation is still NOT implemented in this module -- but that is '
+        'now a scope decision, not a gap in the source, and this module '
+        'must stop citing the source as its excuse. It belongs with the '
+        'V_KQ work, next to the assets < MR test.'
+    ),
+    'D11': (
+        'WAS, in delivery_margins docstring: "Phu luc 8, which we do not '
+        'have ... QD 26 Dieu 24.1 cites Phu luc 8 for a completely '
+        'different subject (electronic documents) while Dieu 30.4 cites Phu '
+        'luc 9, so one of the two references is wrong". WRONG TWICE. We have '
+        'Phu luc 8. And both rulebook citations are correct -- Dieu 24.1 '
+        'wants the electronic-document list and Phu luc 8 IS the '
+        'electronic-document list; Dieu 30.4 wants position transfer and Phu '
+        'luc 9 IS position transfer. The wrong citation is in the APPENDIX, '
+        'Phu luc 2 section 4.2, and is now SOURCE_DEFECTS["D15"].'
     ),
 }
 
@@ -358,6 +477,7 @@ SOURCE_DEFECTS: Mapping[str, str] = {
 
 _ZERO = Decimal(0)
 _ONE = Decimal(1)
+_TWO = Decimal(2)
 _TEN = Decimal(10)
 _THREE = Decimal(3)
 _HUNDRED = Decimal(100)
@@ -452,6 +572,25 @@ def percentile(
 SCENARIO_STEPS: Tuple[int, ...] = tuple(range(-10, 11))
 
 #: The count the appendix states in words: *"21 kich ban bien dong gia"*.
+#:
+#: **21, and the 42 you may have read elsewhere cannot change ``Rm`` -- S-15.**
+#: TCBS publishes *"He thong xac dinh 42 kich ban bien dong gia"* while the
+#: same paragraph says the parameters run *"tu -10 den 10 theo bang VSD cung
+#: cap"*, which is 21 values, and its own worked table shows only
+#: ``k = +-10``. The signed appendix says 21 (VERIFIED, read this session).
+#:
+#: **The disagreement is immaterial for any futures-only book, and that is
+#: provable rather than probable (DERIVED).** By :func:`scenario_loss`,
+#: ``Lk = (Pm - Pb) x (Sk - S) x M``, which is **affine in** ``Sk``; and
+#: ``Sk`` is affine in ``k``. A maximum of an affine function over a finite
+#: set is attained at an extreme point of that set, so ``Rm`` depends only on
+#: ``k = -10`` and ``k = +10``. Adding scenarios *between* the endpoints --
+#: 21 of them, 42, or 4,200 -- cannot move it. A denser grid could only
+#: matter if it extended **beyond** ``+-10 x rate/10``, or if the payoff were
+#: non-linear, i.e. if options were listed. Neither is true today.
+#:
+#: So this is recorded as unresolved-as-a-fact and settled-as-a-consequence.
+#: A test pins the property rather than the anecdote.
 SCENARIO_COUNT: int = len(SCENARIO_STEPS)
 
 
@@ -512,11 +651,15 @@ def scenario_price(s0: Decimal, rate: Decimal, k: int) -> Decimal:
     is also, numerically, the superseded pre-KRX initial-margin formula, so
     the reform generalises the old closed form rather than replacing it.
 
-    **Flag this at every use.** The corrected formula is not in the gazetted
-    appendix as extracted. It is very well supported and it is still a
-    reconstruction. If a published claim turns on the scenario spacing,
-    obtain the cong bao PDF and read the table cell as typeset.
-    Recorded as ``SOURCE_DEFECTS['D1']``.
+    **Flag this at every use, and the flag is now stronger, not weaker.**
+    The defect used to be recorded as "absent from the extraction", which
+    left open the hope that a better copy would contain the ``k``. It does
+    not. The **signed ``.docx`` was opened and its equation XML counted** --
+    ``Phu luc 2`` contains exactly one ``<m:oMath>`` object and it is the VaR
+    formula of section 1.3.c, plus zero drawings -- so the scenario formula
+    is plain text as typeset and nothing is hiding a ``k``. **This is a
+    defect in the signed instrument** (S-16), and the reconstruction below is
+    permanent, not provisional. Recorded as ``SOURCE_DEFECTS['D1']``.
 
     **SILENT -- rounding.** The appendix does not say whether ``Sk`` is
     rounded to the underlying's quotation precision before ``Lk`` is
@@ -698,7 +841,11 @@ class UnderlyingParameters:
         one quantity under three names (a cosmetic defect in the appendix).
         The **underlying's** close on the calculation date, not the futures
         price. For government-bond futures it is the CTD bond's price, whose
-        selection method is in **Phu luc 8, which we do not have**.
+        selection method is in **Phu luc 6 section 3** --
+        ``CTD = min(bond market price / CF)`` -- and *not* in Phu luc 8,
+        where Phu luc 2 section 4.2 wrongly points
+        (``SOURCE_DEFECTS['D15']``; the older claim that we did not hold the
+        method at all is ``WITHDRAWN_DEFECTS['D11']``).
     ``initial_margin_ratio``
         *ty le ky quy ban dau*. VSDC computes it by parametric VaR and
         publishes it on its website at least 02 working days before it
@@ -894,6 +1041,28 @@ def risk_margin(
     Where an underlying carries contracts of different multipliers the losses
     are summed leg by leg (register id ``I18``); with one multiplier -- every
     VN30F contract -- this is identical to the printed scalar formula.
+
+    **DERIVED -- what the grid reduces to, and why the grid is kept anyway.**
+    ``Lk`` is affine in ``Sk`` and ``Sk`` is affine in ``k``, so the worst
+    scenario is always an endpoint and, for a one-underlying book::
+
+        Rm_gross = |Pm - Pb| x rate x S x M
+
+    -- structurally the same number as the flat initial margin a broker
+    charges, differing only in that VSDC applies ``rate`` to the
+    **underlying's close** ``S`` while a broker applies it to the **futures
+    traded price** ``F``. The two layers diverge by the basis and by nothing
+    else until the account holds a spread or a second underlying. Cross-check
+    against TCBS's published example -- 30 long / 20 short, ``S = 1005.9``,
+    ``rate = 3%``, ``M = 100,000`` -- gives ``30,177,000``, which is the
+    number TCBS prints.
+
+    The closed form is **not** used to compute anything here. The full grid
+    is evaluated and returned because it is the auditable artefact: it is
+    what lets a reader check the reconstruction of ``Sk`` by eye, and it is
+    what would still be correct if a non-linear instrument were ever added.
+    A test asserts the closed form against the grid instead, which is the
+    right place for a shortcut nobody should depend on.
     """
     if parameters.underlying != underlying:
         raise MarginInputError(
@@ -937,8 +1106,14 @@ MIN_OBSERVATIONS_1_3_A: int = 120
 
 #: Section 1.3.b: *"trong ky quan sat toi thieu la 250 ngay giao dich"*.
 #:
-#: The default, because it is the binding constraint if both clauses are
-#: operative. See :func:`parametric_var` and ``SOURCE_DEFECTS['D14']``.
+#: **The default, and S-14 upgrades the reason.** It is not merely the
+#: larger of two numbers. Clause (b) is the one that names the product --
+#: *"VSDC xac dinh ty le ky quy ban dau cho **HDTL chi so** va HDTL TPCP ...
+#: trong ky quan sat toi thieu la 250 ngay giao dich"* -- so for index
+#: futures, the only product this project computes, 250 is the operative
+#: floor and 120 is the floor of the generic clause (a). Both are minima;
+#: there is no contradiction to resolve. See :func:`parametric_var` and
+#: ``SOURCE_DEFECTS['D14']``.
 MIN_OBSERVATIONS_1_3_B: int = 250
 
 
@@ -953,26 +1128,29 @@ class VarEstimate:
     value_at_risk: Decimal
     sample_stdev: bool
 
-    @property
-    def inferred_initial_margin_ratio(self) -> Decimal:
-        """``VaR`` itself, read as the ratio at ``n = 2`` -- **a guess**.
+    def initial_margin_ratio(self, *, liquidation_days: int) -> Decimal:
+        """``Ty le IM = VaR x sqrt(n)`` on this estimate -- ``n`` required.
 
-        Register id ``I13``, and it is the weakest inference in the model.
-        Section 1.3.c defines ``n`` -- *"so ngay can thiet de thanh ly mot vi
-        the"* -- announces the formula that turns ``VaR`` and ``n`` into the
-        published ratio, and then **omits the expression**
-        (``SOURCE_DEFECTS['D2']``), so ``n`` is defined and never used. The
-        only self-consistent reading available is ``rate = VaR`` with
-        ``n = 2``, since the returns are already 2-day returns and a further
-        horizon scaling would double-count -- but a ``sqrt(n/2)`` scaling is
-        the textbook move and is equally consistent with the fragment.
+        **This replaces the former ``inferred_initial_margin_ratio``
+        property, which returned ``VaR`` itself and is now disproven.** That
+        property justified itself as *"the ratio at n = 2"*; under the
+        recovered formula ``n = 2`` gives ``VaR x sqrt(2)``, so the old
+        property was silently asserting ``n = 1``. See ``I13`` and
+        :data:`WITHDRAWN_DEFECTS`.
 
-        **Use VSDC's published ratio.** This property exists so a caller can
-        see how far their series lands from it, which is a diagnostic, not a
-        substitute. It is a property rather than a field so that no result
-        record can be mistaken for a published ratio.
+        It is a **method taking a keyword-only argument**, not a property,
+        because ``n`` is unpublished and there is no defensible default. A
+        caller must state the liquidation horizon they are assuming; the
+        number then belongs to them, which is the honest allocation.
+
+        **Use VSDC's published ratio for margin.** This exists so a caller
+        can see how far their own series lands from the published number --
+        a diagnostic, not a substitute. See
+        :func:`initial_margin_ratio_from_var`.
         """
-        return self.value_at_risk
+        return initial_margin_ratio_from_var(
+            self.value_at_risk, liquidation_days=liquidation_days
+        )
 
 
 def two_day_returns(prices: Sequence[Decimal]) -> Tuple[Decimal, ...]:
@@ -1023,19 +1201,26 @@ def parametric_var(
     input (:class:`UnderlyingParameters`). This exists so a caller can feed
     their own 2-day return series and see whether it reproduces the published
     number -- which is a useful thing to be able to do and a dangerous thing
-    to do silently, hence :attr:`VarEstimate.inferred_initial_margin_ratio`
-    being a property with a warning rather than a field.
+    to do silently, hence :meth:`VarEstimate.initial_margin_ratio` being a
+    method that demands the unpublished ``n`` rather than a field anyone
+    could quote as VSDC's.
 
-    **The window is an explicit parameter because the source states two.**
-    Section 1.3.a says *"toi thieu 120 ngay giao dich"*; section 1.3.b says
-    *"ky quan sat toi thieu la 250 ngay giao dich"*. Both are minima, so they
-    are not strictly contradictory -- any window at or above 250 satisfies
-    both -- but they cannot both be **the** stated minimum, and an
-    implementer choosing 120 complies with (a) and breaches (b). Neither
-    reading is resolved here. The default is
-    :data:`MIN_OBSERVATIONS_1_3_B` = 250, the conservative one; pass
-    :data:`MIN_OBSERVATIONS_1_3_A` = 120 deliberately to take the other.
-    Recorded as ``SOURCE_DEFECTS['D14']``.
+    **The window is an explicit parameter because the source states two --
+    and S-14 settles which one binds.** Section 1.3.a says *"toi thieu 120
+    ngay giao dich"*; section 1.3.b says *"ky quan sat toi thieu la 250 ngay
+    giao dich"*. Both were read from the signed ``.docx`` this session, and
+    both are stated as **minima**, so any window at or above 250 satisfies
+    both: **there is no contradiction here and this module no longer claims
+    one.** What decides the default is scope, not size -- clause (b) is the
+    clause that names *"HDTL chi so"*, index futures, so 250 is the operative
+    floor for every product this project computes. :data:`MIN_OBSERVATIONS_1_3_A`
+    = 120 remains reachable deliberately, for a product clause (b) does not
+    reach. Recorded, downgraded, as ``SOURCE_DEFECTS['D14']``.
+
+    **The window VSDC actually uses is still unpublished**, and so is ``n``
+    (see :func:`initial_margin_ratio_from_var`). Between the two, ``n`` is
+    the binding gap: a window is bounded below by the rule, ``n`` is not
+    bounded at all.
 
     **``mean + 3 x delta`` is asymmetric and the source means it that way.**
     Three sigma one-sided is 99.865%; the **two-sided** 3-sigma interval is
@@ -1066,9 +1251,10 @@ def parametric_var(
         raise MarginInputError(
             f'{n} observations is below the required minimum of '
             f'{minimum_observations}. Phu luc 2 section 1.3.a says at least '
-            f'{MIN_OBSERVATIONS_1_3_A} trading days and section 1.3.b says '
-            f'at least {MIN_OBSERVATIONS_1_3_B}; the two are not reconciled '
-            'in the source, so the window is yours to state explicitly.'
+            f'{MIN_OBSERVATIONS_1_3_A} trading days generally and section '
+            f'1.3.b says at least {MIN_OBSERVATIONS_1_3_B} for index '
+            'futures; both are minima and the larger one binds, so the '
+            'window is yours to state explicitly.'
         )
     count = Decimal(n)
     mean = sum(values, _ZERO) / count
@@ -1085,6 +1271,69 @@ def parametric_var(
         value_at_risk=mean + _THREE * stdev,
         sample_stdev=sample_stdev,
     )
+
+
+def initial_margin_ratio_from_var(
+    value_at_risk: Decimal, *, liquidation_days: int
+) -> Decimal:
+    """``Ty le IM = VaR x sqrt(n)`` -- Phu luc 2 section 1.3.c, **VERIFIED**.
+
+    **RECOVERED, not inferred -- S-1.** This module previously recorded the
+    conversion as *absent from the gazetted text*. It is not absent. It is a
+    Word ``OMML`` equation object, which every text extractor silently drops,
+    and it was read this session directly out of
+    ``Phu luc 2_PP xac dinh gia tri KQ yeu cau.docx``::
+
+        <m:oMath>
+          <m:sSub>… Ty le IM …</m:sSub>
+          <m:r>… =VaR × …</m:r>
+          <m:rad>
+            <m:radPr><m:degHide m:val="1"/></m:radPr>
+            <m:deg/><m:e>… n …</m:e>
+          </m:rad>
+        </m:oMath>
+
+    ``<m:degHide m:val="1"/>`` over an empty ``<m:deg/>`` is a **square
+    root**. It is not an ``n``-th root, and the ``sqrt(n/2)`` alternative
+    this module used to offer is excluded by the markup: the radicand is a
+    bare ``n``. See ``SOURCE_DEFECTS['D2']`` for the narrower defect that
+    survives, and :data:`WITHDRAWN_DEFECTS` for what was withdrawn.
+
+    **``n`` is a required keyword argument and is deliberately not
+    defaulted.** Section 1.3.c defines it -- *"n: so ngay can thiet de thanh
+    ly mot vi the khi xay ra truong hop mat kha nang thanh toan"* -- and then
+    publishes no value for it, anywhere in QD 26 or its nine appendices. A
+    default would manufacture the one number the regulator withheld. Register
+    id ``I13`` now records only that refusal.
+
+    **What this is for, and what it is not for.** It is not for producing a
+    margin ratio: :class:`UnderlyingParameters` takes VSDC's *published*
+    ratio, and this module never calls this function. It is for the inverse
+    question -- given a return series and the published ratio, what ``n`` is
+    VSDC implicitly using? -- which a caller can answer by sweeping
+    ``liquidation_days`` against a published series. That is a research
+    question, and answering it needs data this module refuses to hold.
+
+    ``sqrt`` runs in the ambient decimal context. ``n = 1`` is admitted (it
+    means "no horizon scaling") and ``n = 0`` is not: a zero-day liquidation
+    horizon would set every margin ratio to zero.
+    """
+    var = _as_decimal(value_at_risk, 'value_at_risk')
+    if not isinstance(liquidation_days, int) or isinstance(
+        liquidation_days, bool
+    ):
+        raise MarginInputError(
+            'liquidation_days (n, Phu luc 2 section 1.3.c) must be an int '
+            f'number of days, got {type(liquidation_days).__name__}'
+        )
+    if liquidation_days < 1:
+        raise MarginInputError(
+            f'liquidation_days must be at least 1, got {liquidation_days}. '
+            'n is the number of days needed to liquidate a position; VSDC '
+            'never publishes its value, which is why this argument is '
+            'required, but zero days is not a reading of it.'
+        )
+    return var * Decimal(liquidation_days).sqrt()
 
 
 # ---------------------------------------------------------------------------
@@ -1418,6 +1667,42 @@ def apply_offsetting_amount(
     The result is **floored at zero**                    **INFERRED**
     ==================================================  ==============
 
+    .. rubric:: S-3 -- TCBS's placement, checked rather than accepted
+
+    TCBS publishes ``MR = Max(Rm + Sm + Dm + FSP - OA, MM)``, with ``OA``
+    **outside** the group sum; Phu luc 2 section 6.2 prints
+    ``Pgm = Max((Rm + Sm + Dm), MM)`` with no ``OA`` at all, because Dieu
+    5.1.1.a has already absorbed it into ``Rm``. The research document
+    concludes the two are equivalent. **Checked here against both texts, and
+    the conclusion needs one qualification the code has to carry:**
+
+    * As **algebra on real numbers the equivalence is unconditional.**
+      ``(Rm - OA) + Sm + Dm`` and ``Rm + Sm + Dm - OA`` are the same
+      expression by associativity, for every value of ``OA`` including
+      ``OA > Rm``. There is no case split, so the "OA exceeds Rm" case does
+      **not** break the equivalence of the two published forms.
+    * **Our implementation is not either published form.** It computes
+      ``max(0, Rm_gross - OA)`` and only then adds ``Sm + Dm``. Under that
+      floor the two forms diverge exactly when ``OA > Rm_gross`` **and**
+      ``Sm + Dm > 0`` and ``MM`` does not mask it, and our number is the
+      **higher** one. So the floor -- not the placement -- is the whole
+      difference, and ``I4`` stays registered rather than being closed.
+    * **DERIVED -- the floor cannot bind on any input the rule can produce.**
+      Section 2.2 gives ``OA = (B + S) x C x Psr`` with
+      ``C = min(n_pos, |n_neg|)``, ``B = Rm_pos / n_pos`` and
+      ``S = Rm_neg / |n_neg|`` (``I17``). Then ``C x B <= Rm_pos`` and
+      ``C x S <= Rm_neg``, so ``OA <= Rm_gross x Psr``; and section 2.2.e's
+      ``Psr = 1 - Max99|rx - ry| / (Max|rx| + Max|ry|)`` lies in ``[0, 1]``
+      because the numerator is a percentile of ``|rx - ry|`` and therefore
+      never exceeds ``Max|rx| + Max|ry|``. Hence ``OA <= Rm_gross`` and the
+      floor is unreachable. It becomes reachable only via a **supplied**
+      ``Psr`` outside ``[0, 1]``, which :class:`UnderlyingGroup` accepts
+      without complaint -- so the divergence is a property of our input
+      surface, not of the regulation. :attr:`GroupMargin.offset_floor_binds`
+      reports it when it happens instead of letting it pass silently.
+
+    ``FSP`` is not a fifth component; see :data:`FSP_MARGIN_INDEX_FUTURES`.
+
     *"Dieu chinh giam"* means "adjusts downward", not "subtract" -- a
     multiplicative reduction would satisfy the words equally. Two pieces of
     internal corroboration, both DERIVED and neither dispositive: section
@@ -1532,6 +1817,36 @@ def basis_margin(
 # Phu luc 2 section 4 -- ky quy chuyen giao (Dm), delivery margin. DEFERRED.
 # ---------------------------------------------------------------------------
 
+#: *Ky quy FSP* on an index future. **Zero, by name, not by ignorance.**
+#:
+#: TCBS publishes a five-term requirement,
+#: ``Max(Rm + Sm + Dm + FSP - OA, MM)``, whose fourth term has no VSDC
+#: counterpart. This module previously had nowhere to put that, which left a
+#: reader unable to tell an unmodelled component from an absent one.
+#:
+#: **VERIFIED by exhaustive absence -- S-4.** The token ``FSP`` was counted
+#: across the whole signed package this session: the rulebook body and all
+#: nine appendices. It occurs only as *"gia thanh toan cuoi cung (FSP)"* --
+#: the final settlement **price** -- in Phu luc 2 section 3.3 (an input to
+#: ``SMrate``), Phu luc 2 section 4 (an input to ``Dm``), Phu luc 7, and QD
+#: 26 Dieu 23 and Dieu 26. The phrase *"Ky quy FSP"* occurs **zero** times in
+#: every one of those files, and section 6.2 has no fifth component. The same
+#: is true of QD 96, QD 61 and QD 12.
+#:
+#: TCBS scopes it out itself: *"Ky quy FSP danh cho san pham FSP"*.
+#: **OURS, and stated as ours:** *"san pham FSP"* most plausibly means
+#: products whose final settlement price is fixed **after** the last trading
+#: day -- the class TCBS's own ``MM`` note calls *"san pham co FSP duoc xac
+#: dinh sau"*. VN30F is not one: its FSP is set on the last trading day
+#: itself. So the term is zero for index futures because the product is
+#: outside its scope, not because we failed to find a rate.
+#:
+#: It is a **named zero rather than an unknown**, which is the whole point of
+#: S-4: a reader reconciling our ``MR`` against TCBS's five-term formula can
+#: see the fourth term accounted for. Nothing in this module adds it, because
+#: adding zero is not a computation.
+FSP_MARGIN_INDEX_FUTURES: Decimal = _ZERO
+
 
 @dataclass(frozen=True)
 class DeliveryPosition:
@@ -1608,16 +1923,19 @@ def delivery_margin(
        no HNX government-bond yield curve -- so every test of this function
        is a test of its arithmetic against a hand computation, and nothing
        more. It is untested against a real VSDC delivery margin.
-    2. **Its underlying is undefined without Phu luc 8, which we do not
-       have.** Section 4.2 says the underlying for ``Rm``, ``Sm`` **and**
-       ``Dm`` on a GB future is the **cheapest-to-deliver** bond of the spot
-       month, *"theo huong dan tai Phu luc 8 Quy che nay"*. Without it the
-       price series ``S`` itself is undefined, so no GB-futures margin number
-       can be produced at all. Worse, QD 26 Dieu 24.1 cites Phu luc 8 for a
-       completely different subject (electronic documents) while Dieu 30.4
-       cites Phu luc 9, so one of the two references is wrong -- anyone
-       retrieving "Phu luc 8" must check what they actually got
-       (``SOURCE_DEFECTS['D11']`` in the spec).
+    2. **Its underlying is the CTD bond, and the CTD method is NOT missing
+       -- this module used to say it was.** Section 4.2 says the underlying
+       for ``Rm``, ``Sm`` **and** ``Dm`` on a GB future is the
+       **cheapest-to-deliver** bond of the spot month, *"theo huong dan tai
+       Phu luc 8 Quy che nay"* -- and that pointer is wrong. Phu luc 8 is a
+       seven-row list of electronic settlement forms. The method is in **Phu
+       luc 6 section 3**: ``CTD = min(bond market price / CF)``, with ``CF``
+       the conversion factor. Both were read this session. The correction is
+       ``SOURCE_DEFECTS['D15']``; the withdrawn claim, including this
+       module's mis-attribution of the error to QD 26 Dieu 24.1, is
+       ``WITHDRAWN_DEFECTS['D11']``. What still blocks a GB-futures number is
+       **data** -- a deliverable-bond list, market prices and conversion
+       factors -- not the rulebook.
     3. **``Dm = MTM + DRM`` is INFERRED** (register id ``I11``). Section 4.1
        says only that delivery margin *"gom hai gia tri thanh phan"* and
        never writes the combination. Addition is the obvious reading and the
@@ -1716,11 +2034,64 @@ def minimum_margin_factor(
     real fork -- the median is materially lower on a right-skewed spread
     distribution -- and the criterion is not given anywhere in either
     document. That is one more reason ``R`` is an input.
+
+    ``R`` no longer has to be guessed for a tick-wide book: see
+    :func:`minimum_margin_factor_from_tick`, which is S-11's anchor.
     """
     r = _as_decimal(minimum_margin_rate, 'minimum_margin_rate')
     m = _as_decimal(multiplier, 'multiplier')
     st = _as_decimal(close_price, 'close_price')
     return r * m * st
+
+
+def minimum_margin_factor_from_tick(
+    tick_size: Decimal, multiplier: Decimal
+) -> Decimal:
+    """``MF = tick x M / 2`` for a one-tick-wide book -- **DERIVED**, S-11.
+
+    **This is the external reference point ``MM`` did not have.** Every other
+    input to this module is a VSDC statistic we can only be handed. ``MF`` is
+    not: for a market whose best bid and best ask are one tick apart, section
+    5.2's ``R`` collapses to a closed form and the index level cancels.
+
+    The algebra, and it is exact::
+
+        R  = (ask - bid) / (ask + bid)      section 5.2, VERIFIED verbatim
+           = tick / 2S                      when ask - bid = tick,
+                                            ask + bid = 2S to first order
+        MF = R x M x St = (tick / 2S) x M x S = tick x M / 2
+
+    ``S`` cancels. **``MF`` is index-independent**, and that is a property of
+    the formula rather than a coincidence of today's index level -- which is
+    the part worth keeping, because it means a backtest does not have to
+    re-derive ``MF`` as the index drifts.
+
+    For VN30F -- ``tick = 0.1`` index points, ``M = 100,000`` VND per point
+    -- this gives ``MF = 5,000`` VND per contract. **Corroborated
+    independently** (REPORTED, TCBS
+    <https://help.tcbs.com.vn/chinh-sach-ck-phai-sinh-voi-hdtl-chi-so-co-phieu/>):
+    *"Ky quy toi thieu VN30 = 5,000 d"*, with the worked example
+    *"30 x 5,000 + 20 x 5,000 = 250,000"*. Two independent routes to the same
+    number, one algebraic and one published, is as anchored as anything in
+    this model gets.
+
+    **What is still ours.** The first-order step ``ask + bid = 2S``: the two
+    quotes straddle ``S`` only approximately, and section 5.2 averages ``R``
+    over at least 252 days of *matched trades*, not over a synthetic
+    one-tick book. So this is the ``MF`` of an idealised perfectly liquid
+    market, and it is a **lower bound** on a real one -- a wider book raises
+    ``R`` and raises ``MF``. Use it as a default and a cross-check, not as a
+    substitute for a measured ``R`` where one exists; :func:`minimum_margin`
+    still takes ``R`` per leg and this function is never called from inside
+    the model.
+    """
+    tick = _as_decimal(tick_size, 'tick_size')
+    m = _as_decimal(multiplier, 'multiplier')
+    if tick <= _ZERO:
+        raise MarginInputError(f'tick_size must be positive, got {tick}')
+    if m <= _ZERO:
+        raise MarginInputError(f'multiplier must be positive, got {m}')
+    return tick * m / _TWO
 
 
 @dataclass(frozen=True)
@@ -1823,6 +2194,30 @@ class GroupMargin:
     minimum_margin: Decimal
     risk_sum: Decimal
     amount: Decimal
+
+    @property
+    def offset_floor_binds(self) -> bool:
+        """Whether ``max(0, Rm_gross - OA)`` clipped a negative -- **S-3**.
+
+        ``False`` on every input the regulation can produce: section 2.2's
+        own construction bounds ``OA`` by ``Rm_gross x Psr`` with
+        ``Psr`` in ``[0, 1]``, so ``Rm_gross - OA >= 0``. See
+        :func:`apply_offsetting_amount` for the derivation.
+
+        It is surfaced anyway because when it *is* ``True`` -- reachable only
+        through a supplied ``Psr`` outside ``[0, 1]``, which
+        :class:`UnderlyingGroup` does not currently reject -- our ``Pgm``
+        stops matching the published form ``Max(Rm + Sm + Dm - OA, MM)``
+        that TCBS and others write, and stops matching it *upward*. That
+        divergence is the entire remaining content of ``I4`` and it should
+        not be discoverable only by re-deriving the algebra.
+        """
+        credit = (
+            self.offsetting_amount.amount
+            if self.offsetting_amount is not None
+            else _ZERO
+        )
+        return self.risk_margin_gross - credit < _ZERO
 
     @property
     def minimum_margin_binds(self) -> bool:
@@ -2189,11 +2584,19 @@ class MarginObservation:
 
     ``margin_assets`` is *gia tri tai san ky quy hop le* -- the valid margin
     asset value. It is a supplied scalar and this module does **not** value
-    collateral: QD 26 Dieu 8.1 announces the valuation formula and the
-    expression is missing from the source (``SOURCE_DEFECTS['D3']``), so the
-    haircuts (5% / 30% / 40%, Dieu 9.1) and the 80% minimum cash ratio are
-    known while the expression combining them is not. Guessing it here would
-    put an invented number on the other side of the only test that matters.
+    collateral -- **but the reason has changed and the old one was wrong.**
+    This docstring used to say QD 26 Dieu 8.1's valuation formula was missing
+    from the source. It is not missing; it is an OMML equation object in the
+    signed rulebook and reads
+    ``VKQ = C + min((1 - x) x MR ; SUM QKQ x P x (100% - H))``, with the
+    haircuts at Dieu 9.1 (5% / 30% / 40%) and ``x = 80%`` the minimum cash
+    share. See ``WITHDRAWN_DEFECTS['D3']``.
+
+    So ``V_KQ`` is now **buildable and simply unbuilt**: valuing collateral
+    needs a securities position and a haircut table, neither of which belongs
+    in a pure scenario-margin engine, and it is the other half of the
+    ``V_KQ < MR`` test. A caller supplying this scalar is asserting they have
+    valued it correctly -- which is a real obligation, no longer an excuse.
     """
 
     checkpoint: Checkpoint
