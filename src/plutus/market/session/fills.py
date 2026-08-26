@@ -60,9 +60,13 @@ every shipped policy obeys them:
    price by rule. Where our order would have been the *aggressor* the true
    price is the resting side's and is better than our limit, so filling at the
    limit is the conservative direction.
-2. **Fill quantity.** A participation-capped quantity is floored to the
-   instrument's trading unit. An unfloored cap leaves the ledger holding an odd
-   lot that ``ROUND_LOT`` (``exchanges/equity.py``) will later refuse to sell.
+2. **Fill quantity.** A participation-capped quantity is floored to the trading
+   unit **in force at the instant being filled** -- HOSE's was 10 shares until
+   2021-01-03 and 100 from 2021-01-04 -- resolved through the same dated lookup
+   the ``ROUND_LOT`` admission rule uses, and ``INDETERMINATE`` where it cannot
+   be resolved at all (:meth:`BaseFillPolicy._lot`). An unfloored cap leaves the
+   ledger holding an odd lot that ``ROUND_LOT`` (``exchanges/equity.py``) will
+   later refuse to sell; a cap floored to the *wrong* lot silently under-fills.
 3. **max_participation** is a fraction of the volume observed in the evaluated
    interval and it **aggregates across all of the caller's own live orders in
    that instrument** -- passed in as ``already_filled``. Per-order would let a
@@ -128,6 +132,7 @@ from enum import Enum
 from typing import (ClassVar, Dict, FrozenSet, Iterable, List, Mapping,
                     Optional, Protocol, Sequence, Tuple, runtime_checkable)
 
+from plutus.core.constant import get_trading_unit
 from plutus.market.exchanges.base import Exchange
 from plutus.market.protocol import (InstrumentSpec, OrderType, Resolution,
                                     SessionPhase, Side)
@@ -263,8 +268,11 @@ class FillPolicy(Protocol):
                 into ten does not evade the cap.
             instrument: the ``InstrumentSpec`` **as of this instant**, from
                 ``SymbolRouter.instrument(ticker, ts)``. Supplies the dated
-                trading unit for convention 2. Optional, and its absence is
-                handled conservatively -- see :meth:`BaseFillPolicy._lot`.
+                trading unit for convention 2. Optional: without it the lot is
+                resolved from the venue and the interval's own date, by the
+                same dated lookup ``equity.py``'s ``ROUND_LOT`` rule makes, and
+                where even that cannot answer the decision is ``INDETERMINATE``
+                rather than a default -- see :meth:`BaseFillPolicy._lot`.
 
         Returns:
             A :class:`FillDecision`: ``FILL``, ``NO_FILL``, or
@@ -457,25 +465,59 @@ class BaseFillPolicy(ABC):
     def _lot(
         self,
         rules: Exchange,
+        interval: MarketInterval,
         instrument: Optional[InstrumentSpec],
-    ) -> int:
-        """The round lot to floor a capped quantity to (convention 2).
+    ) -> Optional[int]:
+        """The round lot in force **at the instant being filled** (convention 2).
 
-        Prefers the ``InstrumentSpec`` the session resolved **as of this
-        instant**, which is the only date-correct source: ``SymbolRouter``
-        overwrites ``trading_unit`` from the dated ``RuleSet`` precisely so
-        that passing the spec is safe.
+        ``None`` means *the lot cannot be established here*, and the caller
+        turns that into ``INDETERMINATE``. It is deliberately not a licence to
+        substitute a default: locked shape 1 forbids a value fixed at load
+        standing in for a dated one, and a silent present-day lot is exactly
+        that shape wearing a plausible number.
 
-        Falls back to ``Exchange.spec.trading_unit``, which is the *present-day*
-        table and is wrong for HOSE before 2021-01-04, when the lot was 10
-        rather than 100. The error is one-directional: flooring to 100 when the
-        true lot is 10 fills **less** than reality permits, never more, so the
-        conservative policy stays conservative under the fallback. It is still
-        a fallback, and the session should always pass ``instrument``.
+        Two sources, in this order:
+
+        1. the ``InstrumentSpec`` the session resolved **as of this instant**.
+           ``SymbolRouter.instrument`` overwrites ``trading_unit`` from the
+           dated ``RuleSet`` precisely so that passing the spec is safe, and it
+           is the only source that can be *per instrument* rather than per
+           venue -- ``get_trading_unit`` is keyed by venue and date alone and
+           has nowhere to put an odd-lot board. That is why it wins where it
+           exists rather than being merely preferred.
+        2. otherwise, the same dated lookup ``equity.py``'s ``ROUND_LOT``
+           admission rule makes: ``get_trading_unit(spec.code, <this
+           interval's date>)``. Not a second resolution path -- the same
+           function, so admission and fill cannot drift apart on the lot.
+
+        This second branch is reached in ordinary running, not only in tests:
+        ``ExchangeSession._evaluate_fills`` passes ``instrument=None`` wherever
+        ``SymbolRouter.instrument`` raised ``UnresolvedRule``, which a covered
+        warrant does on every call (it has no percentage band, so its
+        ``InstrumentSpec`` cannot be built at all). Reading the undated
+        ``Exchange.spec.trading_unit`` there -- as this method used to -- sized
+        every pre-2021-01-04 HOSE fill on today's 100 when the lot in force was
+        10 (``VietnamMarketConstant.HSX_ROUND_LOT_RAISED``). The error was
+        one-directional, flooring to 100 fills **less** than reality permitted
+        and never more, but 82.2% of the HSX equity sample sits before that
+        date (``measurements/dated_rules.py``), so it was not a corner case.
+
+        **The instant is ``interval.start``.** The interval is half-open
+        ``[start, end)`` and is evaluated whole under one set of rules, so the
+        rule in force when it opens is the rule that judges it. ``equity.py``
+        reads ``state.ts`` for the same lookup because ``admits()`` is handed a
+        snapshot and has no interval; inside a session the two are the same
+        instant, since ``_interval_for`` builds ``[ts, ts + one bar)`` around
+        the state observed at ``ts``. *Assumption, not verified here*: that an
+        interval does not straddle a lot change. No shipped resolution can --
+        a daily bar is one trading day and a tick bar one second -- but a
+        caller supplying a longer interval through ``IntervalSource`` would get
+        the lot in force at its start and no warning.
         """
         if instrument is not None and instrument.trading_unit:
             return int(instrument.trading_unit)
-        return int(rules.spec.trading_unit)
+        unit = get_trading_unit(rules.spec.code, interval.start.date())
+        return None if unit is None else int(unit)
 
 
 # --------------------------------------------------------------------------
@@ -831,7 +873,16 @@ class _CappedFillPolicy(BaseFillPolicy):
         With ``max_participation`` of ``None`` the whole size question is
         skipped: the caller has declared that they are taking ``soft``'s
         assumption that their own size was available, and there is then no cap
-        to compute, no volume to miss and no auction attribution to refuse.
+        to compute, no volume to miss, no auction attribution to refuse and no
+        round lot to resolve.
+
+        **The round lot is resolved at the instant being filled**, from the
+        instrument or from the venue and the interval's date, and a lot that
+        cannot be established is a third ``INDETERMINATE`` here -- see
+        :meth:`BaseFillPolicy._lot`. The order of the three is deliberate and
+        unchanged: the cap is computed first, so a run on today's corpus (where
+        both adapters leave ``volume`` unsupplied) reports the missing volume,
+        which is the absence a data fix could actually close.
         """
         if self.max_participation is None:
             return FillDecision.fill(order.remaining_quantity, price, evidence,
@@ -865,7 +916,19 @@ class _CappedFillPolicy(BaseFillPolicy):
                 'exhausted by this caller\'s own fills in this interval'
             )
 
-        lot = self._lot(rules, instrument)
+        lot = self._lot(rules, interval, instrument)
+        if lot is None:
+            # Nothing silently defaults (design section 9.2). A quantity is a
+            # claim, and one floored to a lot nobody has established would be a
+            # definite fill sized by a guess -- worse than admitting ignorance,
+            # because it is not visible in the result. See :meth:`_lot`.
+            return FillDecision.indeterminate(
+                f'no round lot is known for {rules.spec.code!r} at '
+                f'{interval.start.date()}, so a capped quantity cannot be '
+                f'floored to a whole lot and how much would have filled '
+                f'cannot be established',
+                (),
+            )
         quantity = floor_to_lot(min(order.remaining_quantity, cap), lot)
         if quantity <= 0:
             return FillDecision.no_fill(
@@ -914,11 +977,14 @@ class HardFillPolicy(_CappedFillPolicy):
     states the rule -- so that too is ``INDETERMINATE``.
 
     **Size.** Capped at ``max_participation`` of the volume observed in the
-    interval. Where ``interval.volume`` is absent the cap cannot be computed
-    and the decision degrades to ``INDETERMINATE`` naming ``DataField.VOLUME``.
-    On both shipped adapters volume is unsupplied, so on today's corpus this
-    policy is undecidable wherever it would otherwise fill -- which is the
-    honest reading of the data, and the number the paper should print.
+    interval, then floored to the round lot in force at the instant. Where
+    ``interval.volume`` is absent the cap cannot be computed and the decision
+    degrades to ``INDETERMINATE`` naming ``DataField.VOLUME``; where the lot
+    cannot be resolved it degrades likewise, with no field named because a lot
+    is a rulebook fact rather than a bar (:meth:`BaseFillPolicy._lot`). On both
+    shipped adapters volume is unsupplied, so on today's corpus this policy is
+    undecidable wherever it would otherwise fill -- which is the honest reading
+    of the data, and the number the paper should print.
 
     The order of those two tests is deliberate and is a modelling choice worth
     naming: **price is tested before size**. An order the market never reached
@@ -1258,7 +1324,7 @@ class ProbabilisticFillPolicy(_CappedFillPolicy):
     probabilistic is not a licence to decide everything, and the distinction
     the ignorance rate depends on is between *"eligible, and the draw said no"*
     (a ``NO_FILL``) and *"the data cannot say whether it was even eligible"*
-    (an ``INDETERMINATE``). This policy keeps six of the latter:
+    (an ``INDETERMINATE``). This policy keeps seven of the latter:
 
     1. the session phase is unknown, so no mechanic applies (base class);
     2. the interval carries no traded price at all;
@@ -1268,7 +1334,10 @@ class ProbabilisticFillPolicy(_CappedFillPolicy):
     4. a market-family order, whose depth walk is not observable;
     5. an established fill whose size cannot be bounded, when a cap is in
        force and ``interval.volume`` is absent;
-    6. the auction marginal price, unless the caller explicitly opts in --
+    6. an established fill whose round lot cannot be resolved at the instant,
+       likewise only when a cap is in force -- see
+       :meth:`BaseFillPolicy._lot`;
+    7. the auction marginal price, unless the caller explicitly opts in --
        see ``p_auction_margin``.
     """
 
@@ -1616,9 +1685,10 @@ class FillQuestion:
 
     A named bundle rather than a tuple because ``already_filled`` and
     ``instrument`` are exactly the two arguments a caller forgets, and
-    forgetting either changes the answer: no ``instrument`` silently uses the
-    present-day round lot (wrong for HOSE before 2021-01-04), and no
-    ``already_filled`` evades the participation cap.
+    forgetting either changes the answer: no ``already_filled`` evades the
+    participation cap, and no ``instrument`` falls back to the venue-and-date
+    lot, which is date-correct but cannot express a *per-instrument* one (see
+    :meth:`BaseFillPolicy._lot`).
     """
 
     order: OrderRecord

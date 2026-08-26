@@ -32,6 +32,7 @@ from plutus.market.session import (
 from plutus.market.session.calendar import (
     CalendarError, weekday_settlement_calendar, weekday_trading_calendar,
 )
+from plutus.market.session.deposit import UnknownContractMultiplier
 from plutus.market.verdicts import AdmissionRule, Verdict
 
 # --------------------------------------------------------------------------
@@ -74,11 +75,18 @@ class StubSource:
         # comes back UNKNOWN with no exchange, which is what makes it
         # unroutable rather than silently HSX.
         code, kind = self._kinds.get(ticker, ('', InstrumentKind.UNKNOWN))
+        # 10,000 for a government-bond future and 100,000 for an index one.
+        # A stub that answered 100,000 for every FUTURE would be asserting the
+        # very thing the deposit's dated multiplier table exists to refuse --
+        # HNXDS carries two families whose multipliers differ by 10x.
+        multiplier = Decimal('1')
+        if kind is InstrumentKind.FUTURE:
+            multiplier = (Decimal('10000')
+                          if ticker.startswith(('GB05', 'GB10'))
+                          else Decimal('100000'))
         return InstrumentSpec(
             ticker=ticker, exchange_code=code, kind=kind, trading_unit=100,
-            daily_trading_limit=Decimal('0.07'),
-            multiplier=(Decimal('100000') if kind is InstrumentKind.FUTURE
-                        else Decimal('1')))
+            daily_trading_limit=Decimal('0.07'), multiplier=multiplier)
 
 
 class BarSource(StubSource):
@@ -1302,6 +1310,72 @@ def test_an_unroutable_ticker_is_refused_rather_than_defaulted():
     assert session.indeterminate_report().by_rule
     # No row on the book: writing one would mean inventing a venue for it.
     assert not session.orders(ticker='ZZZZ')
+
+
+def test_build_wires_a_dated_per_contract_multiplier_not_vn30fs():
+    """`build()` is the only place the deposit is assembled -- and it never
+    passed a multiplier, so every HNXDS contract fell back to VN30F's 100,000.
+
+    Government-bond futures take 10,000 (rulebook 4.1, HIGH), so a GB order
+    reserved ten times its initial margin and the account was refused a
+    position it could afford -- with ``free_deposit`` named as the constraint,
+    so the log blamed the balance for what was a unit error.
+
+    White-box on ``_derivatives`` deliberately: what is under test is the
+    *wiring* ``build()`` performs, there is no public accessor for a contract
+    multiplier, and the end-to-end path is closed for a second reason --
+    ``build()`` hardwires ``InvestorClass.INDIVIDUAL`` and rulebook 6.4 bars
+    individuals from government-bond futures outright, so a GB order is
+    refused on ``POSITION_LIMIT`` before its margin is computed. Reaching the
+    margin needs an investor class in ``AccountsConfig``, which is a config
+    change and not one this test can make.
+    """
+    session = build()
+    ts = datetime(2024, 6, 3, 9, 30)
+    deposit = session._derivatives
+
+    assert deposit.multiplier_for('VN30F2406', ts) == Decimal('100000')
+    assert deposit.multiplier_for('GB05F2406', ts) == Decimal('10000')
+    with pytest.raises(UnknownContractMultiplier):
+        deposit.multiplier_for('FPT', ts)
+
+
+def test_an_unresolvable_multiplier_is_indeterminate_not_a_funding_refusal():
+    """The submit boundary reports a unit gap as a gap, not as no money.
+
+    ``IM = ratio x contracts x price x multiplier`` is linear in the
+    multiplier, so a guessed one scales the requirement rather than blurring
+    it, and the resulting ``INSUFFICIENT_DEPOSIT`` would be a data gap
+    reported as a market rule. The order is refused ``INDETERMINATE`` and the
+    detail names the rule that could not be resolved.
+
+    The contract is a **VN100 future in June 2024**, sixteen months before
+    HNX listed the product on 2025-10-10. Every other dated table waves it
+    through: the rulebook keys band, tick and position limit on the product
+    *family*, and VN100F has been in the ``INDEX`` family since that family
+    existed, so it draws VN30F's +-7% band, 0.1-point tick and 5,000-contract
+    cap on a date when no such contract traded. The multiplier table is the
+    one place that knows the template had not been listed, which is precisely
+    why the multiplier is dated rather than keyed on family alone.
+    """
+    rows = {**FUTURES_ROWS,
+            ('VN100F2409', D1): market('VN100F2409', D1, Decimal('1250'))}
+    kinds = {**KINDS, 'VN100F2409': ('HNXDS', InstrumentKind.FUTURE)}
+    source = StubSource(rows, kinds)
+    session = ExchangeSession.from_mapping(config(), source=source)
+    session.advance_to(datetime(2024, 6, 3, 9, 30))
+
+    refusal = session.submit(sell(ticker='VN100F2409', quantity=1,
+                                  price='1250'))
+    assert isinstance(refusal, Rejected)
+    assert refusal.verdict is Verdict.INDETERMINATE
+    assert refusal.detail['unresolved_rule'] == 'contract_multiplier'
+    assert refusal.detail['contract_code'] == 'VN100F2409'
+    assert '2025-10-10' in refusal.detail['reason']
+    # And the deposit is untouched: nothing was reserved on a guess.
+    view = session.margin()
+    assert view.required == Decimal('0')
+    assert view.deposit_balance == Decimal('30000000')
 
 
 # --------------------------------------------------------------------------

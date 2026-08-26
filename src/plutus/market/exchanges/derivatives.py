@@ -121,9 +121,12 @@ class HNXDSExchange(Exchange):
            a reason that is about evidence rather than inertia. It is the path
            the published margin-incidence figures were computed on, and
            ``measurements/margin_incidence_account.py`` measured whether the
-           account-level model reproduces them: it does not, at any funding
-           level, and the disagreement is structural -- the utilisation test
-           divides by a deposit balance this signature has no way to receive.
+           account-level model reproduces them. **An earlier revision said it
+           does not at any funding level. That is false**: with the VSD ratio
+           frozen at entry, a funding multiple in [1.4110, 1.4136] reproduces
+           all three counts exactly. What remains true is that the utilisation
+           test divides by a deposit balance this signature has no way to
+           receive.
            Rewiring it would restate a published number without saying so,
            which is the one thing that must not happen quietly.
 

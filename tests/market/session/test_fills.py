@@ -24,12 +24,13 @@ that the standard idea is implemented in a way a researcher can actually use:
 Prices are in thousands of dong, the corpus convention.
 """
 
-from datetime import datetime
+from dataclasses import replace
+from datetime import datetime, timedelta
 from decimal import Decimal
 
 import pytest
 
-from plutus.market.exchanges.equity import HSX_EXCHANGE
+from plutus.market.exchanges.equity import HSX_EXCHANGE, EquityExchange
 from plutus.market.protocol import (BandSource, InstrumentKind, InstrumentSpec,
                                     MarketState, Order, OrderBook, OrderType,
                                     Resolution, SessionPhase, Side)
@@ -51,6 +52,14 @@ from plutus.market.session.types import (DataField, Fill, FillDecision,
 DAY = datetime(2022, 3, 29)
 LIMIT = Decimal('95.5')
 
+#: The session HOSE's minimum round lot went from 10 shares to 100
+#: (`VietnamMarketConstant.HSX_ROUND_LOT_RAISED`), and the last session before
+#: it. 82.2% of the HSX equity sample sits on the 10-lot side, so a fill path
+#: that sizes on today's 100 under-fills four fifths of the corpus by a factor
+#: of ten in the lot.
+LOT_CUTOVER = datetime(2021, 1, 4)
+BEFORE_LOT_CUTOVER = datetime(2020, 12, 31)
+
 #: One seed for every probabilistic test, so that a draw quoted in one test's
 #: comment is the draw another test gets. Reproducibility is the property under
 #: test; a per-test seed would make these tests the one place it does not hold.
@@ -64,9 +73,9 @@ HSX_LOT = InstrumentSpec(
 )
 
 
-def _state(**kw):
+def _state(ts=DAY, **kw):
     base = dict(
-        ticker='FPT', ts=DAY, session=SessionPhase.CONTINUOUS,
+        ticker='FPT', ts=ts, session=SessionPhase.CONTINUOUS,
         reference=Decimal('95.0'), ceiling=Decimal('101.6'),
         floor=Decimal('88.4'), band_source=BandSource.PUBLISHED,
         last=Decimal('95.0'),
@@ -77,13 +86,19 @@ def _state(**kw):
 
 def _interval(*, low=None, high=None, close=None, volume=100_000,
               session=SessionPhase.CONTINUOUS, resolution=Resolution.TICK,
-              open_=None, ticker='FPT', missing=(), book=None, last=None):
+              open_=None, ticker='FPT', missing=(), book=None, last=None,
+              day=DAY):
     """One evaluated interval. Volume is supplied by default because the
-    absence of volume is a separate, explicitly-tested condition."""
-    state = _state(ticker=ticker, session=session,
+    absence of volume is a separate, explicitly-tested condition.
+
+    `day` moves the whole interval -- its half-open span *and* the snapshot
+    instant inside it -- so that a test can ask the same question on two sides
+    of a dated rule change. Nothing that does not pass it changes at all.
+    """
+    state = _state(ticker=ticker, ts=day, session=session,
                    last=last if last is not None else close, book=book)
     return MarketInterval(
-        ticker=ticker, start=DAY, end=datetime(2022, 3, 30),
+        ticker=ticker, start=day, end=day + timedelta(days=1),
         resolution=resolution, state=state, open=open_, high=high, low=low,
         close=close, volume=volume, book=book, missing=frozenset(missing),
     )
@@ -91,10 +106,10 @@ def _interval(*, low=None, high=None, close=None, volume=100_000,
 
 def _order(*, side=Side.BUY, quantity=1000, order_type=OrderType.LIMIT,
            limit=LIMIT, ticker='FPT', state=OrderState.RESTING, fills=(),
-           order_id='O-1'):
+           order_id='O-1', day=DAY):
     return OrderRecord(
         order_id=order_id, venue=Venue.HSX, state=state,
-        time_in_force=TimeInForce.DAY, submitted_at=DAY, updated_at=DAY,
+        time_in_force=TimeInForce.DAY, submitted_at=day, updated_at=day,
         fills=tuple(fills),
         order=Order(ticker=ticker, side=side, quantity=quantity,
                     order_type=order_type, limit_price=limit),
@@ -804,15 +819,19 @@ def test_a_seeded_probabilistic_config_builds_and_records_both_parameters():
     assert 'max_participation=0.25' in policy.signature
 
 
-def test_the_dated_instrument_lot_beats_the_frozen_exchange_spec():
-    """HOSE's round lot was 10 until 2021-01-04 and `ExchangeSpec.trading_unit`
-    only carries today's 100. The session passes the spec `SymbolRouter`
-    resolved as of the instant, and that must win.
+# ==========================================================================
+# The round lot: convention 2, resolved per instant
+# ==========================================================================
 
-    The fallback's error is one-directional -- flooring to 100 when the true
-    lot is 10 fills less than reality permitted, never more -- so the
-    conservative policy stays conservative when the session forgets. It is
-    still a fallback.
+def test_the_instrument_lot_wins_because_it_is_the_per_instrument_one():
+    """`SymbolRouter.instrument` already resolved the lot as of the instant,
+    and it is the only source that can be *per instrument* rather than per
+    venue -- `get_trading_unit` is keyed by venue and date alone and has
+    nowhere to put an odd-lot board. So an explicit spec wins.
+
+    The interval here sits after the 2021 cutover, where the venue-and-date
+    answer is 100 and the spec says 10, so the two sources genuinely disagree
+    and the assertion pins which one was read.
     """
     old_lot = InstrumentSpec(
         ticker='FPT', exchange_code='HSX', kind=InstrumentKind.STOCK,
@@ -824,6 +843,74 @@ def test_the_dated_instrument_lot_beats_the_frozen_exchange_spec():
     assert policy.evaluate(_order(), interval, HSX_EXCHANGE,
                            instrument=old_lot).quantity == 110
     assert policy.evaluate(_order(), interval, HSX_EXCHANGE).quantity == 100
+
+
+def test_the_round_lot_is_resolved_per_instant_across_the_2021_cutover():
+    """One policy, one venue object, one run -- and the lot changes underneath.
+
+    HOSE's minimum lot was 10 shares until 2021-01-03 and 100 from 2021-01-04.
+    This is locked shape 1's straddle and it is the only arrangement that tests
+    per-instant resolution: two separate runs at two dates pass just as happily
+    against a lot frozen at import, which is exactly the build that shipped here
+    before -- `_lot` returned `Exchange.spec.trading_unit`, the undated 100, at
+    every date.
+
+    An allowance of 119 shares sizes 110 under the 10-lot and 100 under the
+    100-lot, so the boundary is legible in the filled quantity itself. The
+    error was one-directional -- 100 where 110 was legal fills *less* than
+    reality permitted, never more -- but 82.2% of the HSX equity sample sits on
+    the 10-lot side, so it was not a corner case.
+
+    `instrument=None` throughout on purpose: that is the argument
+    `ExchangeSession._evaluate_fills` passes wherever `SymbolRouter.instrument`
+    raised `UnresolvedRule`, and it was the path that returned today's lot at
+    every date.
+
+    The pre-cutover question is asked again *after* the post-cutover one, so a
+    lot memoised on first use fails here too.
+    """
+    policy = HardFillPolicy(Decimal('0.10'))
+    flow = [
+        FillQuestion(
+            order=_order(day=day),
+            interval=_interval(day=day, low=Decimal('95.0'), volume=1190),
+            rules=HSX_EXCHANGE, instrument=None, label=str(day.date()),
+        )
+        for day in (BEFORE_LOT_CUTOVER, LOT_CUTOVER, BEFORE_LOT_CUTOVER)
+    ]
+    sized = [policy.evaluate(q.order, q.interval, q.rules,
+                             instrument=q.instrument)
+             for q in flow]
+
+    assert [d.outcome for d in sized] == [FillOutcome.FILL] * 3
+    assert [d.quantity for d in sized] == [110, 100, 110]
+
+
+def test_a_lot_that_cannot_be_resolved_is_indeterminate_not_a_default():
+    """Where no lot can be established, the honest outcome is INDETERMINATE.
+
+    `core.constant.get_trading_unit` carries HSX, HNX, UPCOM and HNXDS and
+    returns None for any other code. Handed such a venue, this module used to
+    floor on `Exchange.spec.trading_unit` -- the venue object's own undated
+    field -- and report a *definite* fill sized by a rule nobody had checked
+    applied at this instant. A quantity is a claim; sizing one on a guess is
+    the substitution locked shape 1 forbids.
+
+    `missing` is empty, and that is not an oversight: `DataField` names fields
+    of the **data-source** contract, and an unresolved round lot is a rulebook
+    absence rather than a missing bar. The auction marginal price returns an
+    empty `missing` for the same reason.
+    """
+    unknown_venue = EquityExchange(replace(HSX_EXCHANGE.spec, code='SGX'))
+    interval = _interval(low=Decimal('95.0'), volume=1190)   # allowance 119
+    decision = HardFillPolicy(Decimal('0.10')).evaluate(
+        _order(), interval, unknown_venue)
+
+    assert decision.outcome is FillOutcome.INDETERMINATE
+    assert decision.quantity == 0
+    assert 'round lot' in decision.reason
+    assert 'SGX' in decision.reason
+    assert decision.missing == frozenset()
 
 
 # ==========================================================================

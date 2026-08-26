@@ -35,6 +35,12 @@ portfolio margining without re-plumbing every call site.
           2017-08-10, 13% from 2018-07-18, 17% from 2022-12-15) and ``price``
           is the latest matched price in-session or the daily settlement price
           at end of day -- **the current price, never the entry notional**.
+          ``multiplier`` is the CONTRACT's, resolved from
+          :data:`CONTRACT_MULTIPLIERS` per ``(contract code, date)`` -- 100,000
+          VND per index point for VN30F/VN100F, 10,000 for the government-bond
+          futures, on the same venue on the same day. It is neither a venue
+          constant nor an account default; see
+          :func:`resolve_contract_multiplier` for why a missing one raises.
           Offsetting trades on the same trading account attract no new IM
           ("giao dich doi ung cua cung mot tai khoan giao dich"), which is why
           :class:`ContractLedger` is net-signed and why
@@ -81,8 +87,8 @@ structurally and not one line here changes.
 from dataclasses import dataclass, replace
 from datetime import date, datetime
 from decimal import Decimal
-from typing import (Any, Dict, Mapping, Optional, Protocol, Sequence, Tuple,
-                    Union)
+from typing import (Any, Callable, Dict, Mapping, Optional, Protocol, Sequence,
+                    Tuple, Union)
 
 from plutus.market.broker import BrokerTerms
 from plutus.market.margin import vsd_initial_margin
@@ -106,25 +112,45 @@ __all__ = [
     'ContractLedger', 'DerivativesAccount',
     # the margin test
     'account_margin_requirement', 'margin_status', 'resolve_initial_margin_rate',
+    # the contract multiplier, resolved
+    'MultiplierRule', 'UnknownContractMultiplier', 'resolve_contract_multiplier',
     # the call state machine
     'MarginMonitor', 'liquidation_sequence',
     # constants
-    'DEPOSIT_REJECTIONS', 'VN30F_MULTIPLIER',
+    'CONTRACT_MULTIPLIERS', 'DEPOSIT_REJECTIONS', 'GB_FUTURES_MULTIPLIER',
+    'VN30F_MULTIPLIER',
 ]
 
 
 #: VN30 (and, from 2025-10-10, VN100) index futures: 100,000 VND per index
-#: point. Rulebook 9.3, "VN30F contract size and multiplier", confidence high,
-#: sourced to HNX's published contract template in both editions.
+#: point. Rulebook 6.1, rows "VN30F contract size and multiplier" ("Size =
+#: 100,000 VND x index points; multiplier 100,000 VND per index point",
+#: 2017-08-10 -> current, exchange, confidence HIGH, sourced to the HNX
+#: contract template in both editions) and "VN100 index futures" ("size
+#: 100,000d x index points, multiplier 100,000d", 2025-10-10 -> current, same
+#: confidence and source).
 #:
-#: This is a **default, not a universal**. Government-bond futures on the same
-#: venue carry multiplier 10,000 on a 100,000d face and are quoted in dong
-#: rather than index points, so a per-venue multiplier is wrong by construction
-#: -- the rulebook flags exactly this as a unit hazard (9.2, "unit hazard"), and
-#: ``CURRENCY_UNIT['HNXDS'] = 1`` must never be applied as a multiplier here.
-#: Anything that is not a VN30/VN100 index future must be given its multiplier
-#: explicitly through ``DerivativesAccount(multipliers=...)``.
+#: **This is one row of :data:`CONTRACT_MULTIPLIERS`, not a default.** It is
+#: kept as a name because tests and docstrings quote the index multiplier, and
+#: because a bare ``Decimal('100000')`` literal is precisely how it became a
+#: silent account-wide default that over-reserved every government-bond future
+#: by 10x.
 VN30F_MULTIPLIER = Decimal('100000')
+
+#: Government-bond futures (GB05, GB10): 10,000 VND per quoted dong. Rulebook
+#: 4.1, row "Tick -- government bond futures": "1 VND, quoted in VND (not index
+#: points), on a 100,000d notional face. **Multiplier 10,000**; contract size
+#: 1 ty dong; physically delivered", 2019-07-04 (GB05) / 2021-06-28 (GB10) ->
+#: current, exchange, confidence HIGH, sourced to HNX's published Mau HDTL
+#: TPCP 05 nam / 10 nam.
+#:
+#: The row corroborates itself: a 1 ty dong contract quoted per 100,000d of
+#: face is 1,000,000,000 / 100,000 = 10,000 faces per contract, which is the
+#: multiplier. The value is therefore **sourced, not assumed** -- but note that
+#: rulebook 6.1 ("Contract terms") carries a contract-size-and-multiplier row
+#: for VN30F and VN100F and **none for GB05/GB10**, so this single row in 4.1
+#: is the only place the rulebook states it.
+GB_FUTURES_MULTIPLIER = Decimal('10000')
 
 _ZERO = Decimal('0')
 
@@ -386,6 +412,181 @@ def resolve_initial_margin_rate(rules: Optional[RuleSetLike],
     return vsd_initial_margin(ts.date())
 
 
+# --------------------------------------------------------------------------
+# The contract multiplier -- resolved per (contract, date), never defaulted
+# --------------------------------------------------------------------------
+
+class UnknownContractMultiplier(LookupError):
+    """No dated row of :data:`CONTRACT_MULTIPLIERS` covers this contract-date.
+
+    The deposit-side twin of ``rulebook.UnresolvedRule``, and raised for the
+    same reason: ``IM = ratio x contracts x price x multiplier`` is **linear**
+    in the multiplier, and so is the derivatives PIT base (rulebook 12.3,
+    ``settlement price x multiplier x contracts x IM ratio / 2``). A guessed
+    multiplier does not degrade a number, it scales it -- borrowing VN30F's
+    100,000 for a government-bond future over-reserves by exactly 10x and
+    over-taxes by exactly 10x, with nothing in the output saying so.
+
+    ``exchange.py`` catches this at the ``submit()`` boundary and turns it into
+    ``Rejected(verdict=INDETERMINATE)``, which keeps "the data could not
+    decide" countable apart from "a rule said no" (contract section 2.3).
+
+    **Orchestrator action:** this should be ``UnresolvedRule`` with a
+    ``RuleName.CONTRACT_MULTIPLIER`` member, resolved by ``RuleSet`` exactly as
+    ``RuleName.INITIAL_MARGIN_RATE`` is, so the multiplier joins the rest of
+    the dated, cited, pinnable rulebook and ``IndeterminateReport.by_rule``
+    counts it. ``RuleName`` is a closed vocabulary in ``rulebook.py`` and this
+    task may not modify that file, and inventing a ``RuleResolution`` under
+    some *other* rule's name would file a multiplier gap as a margin-rate gap.
+    So the shape below is the rulebook's -- dated intervals, a document, a
+    confidence and a note -- and only its home is temporary.
+    """
+
+    def __init__(self, contract_code: str, on_date: date, reason: str):
+        self.contract_code = contract_code
+        self.on_date = on_date
+        self.reason = reason
+        super().__init__(
+            f'no contract multiplier for {contract_code!r} on '
+            f'{on_date.isoformat()}: {reason}')
+
+
+@dataclass(frozen=True)
+class MultiplierRule:
+    """One dated row of the contract-multiplier table, with its provenance.
+
+    Deliberately the same shape as a ``rulebook.RuleInterval``: a value, the
+    date it took effect, the document it came from, a confidence and a note.
+    A bare ``{prefix: Decimal}`` mapping would be the scalar this defect was
+    made of -- it cannot say *when* a contract template started existing, and
+    it cannot be audited back to a source.
+
+    ``effective`` is the **listing date of the contract template**, so a
+    resolution before it is a refusal rather than an extrapolation: on
+    2021-01-04 there was no GB10 contract to have a multiplier.
+    """
+
+    contract_prefix: str
+    multiplier: Decimal
+    effective: date
+    document: str
+    confidence: str
+    note: str
+
+
+#: ``(contract_code, effective_date) -> multiplier``, which is the published
+#: data structure and not a scalar.
+#:
+#: Rulebook 6.3 makes the point about the *margin ratio*: VSDC publishes it
+#: "PER CONTRACT and names time-to-maturity as an input, so the correct key is
+#: (contract_code, date) and not a scalar". Exactly the same is true of the
+#: multiplier, and for a sharper reason -- the ratio has in fact been one
+#: number across every listed contract since 2022-12-15, whereas the multiplier
+#: differs by a factor of ten *between two families trading on the same venue
+#: on the same day*. A per-venue field cannot express it; ``CURRENCY_UNIT
+#: ['HNXDS'] = 1`` is not a multiplier and must never be used as one (rulebook
+#: 9.2 and 12.1, both HIGH).
+#:
+#: Keyed on the contract-code **prefix** because that is what identifies the
+#: contract template, which is the object HNX publishes a multiplier for:
+#: every GB05 expiry shares one template. Longest prefix wins, and the latest
+#: row whose ``effective`` date has arrived wins within a prefix, so a future
+#: template revision ships as an extra row rather than as an edit.
+CONTRACT_MULTIPLIERS: Tuple[MultiplierRule, ...] = (
+    MultiplierRule(
+        contract_prefix='VN30F', multiplier=VN30F_MULTIPLIER,
+        effective=date(2017, 8, 10),
+        document='Rulebook 6.1, "VN30F contract size and multiplier"; HNX '
+                 'Mau HDTL Chi so VN30, both template editions',
+        confidence='high',
+        note='Size = 100,000 VND x index points. The quote is in INDEX '
+             'POINTS, so dong appear only through this multiplier.'),
+    MultiplierRule(
+        contract_prefix='VN100F', multiplier=VN30F_MULTIPLIER,
+        effective=date(2025, 10, 10),
+        document='Rulebook 6.1, "VN100 index futures"; HNX Mau HDTL Chi so '
+                 'VN100',
+        confidence='high',
+        note='Listed 2025-10-10 on the same terms as VN30F. Before that date '
+             'there was no VN100 future to margin, which is why this is a '
+             'dated row and not an alias of the VN30F one.'),
+    MultiplierRule(
+        contract_prefix='GB05', multiplier=GB_FUTURES_MULTIPLIER,
+        effective=date(2019, 7, 4),
+        document='Rulebook 4.1, "Tick -- government bond futures"; HNX Mau '
+                 'HDTL TPCP 05 nam',
+        confidence='high',
+        note='Quoted in VND on a 100,000d face, contract size 1 ty dong: '
+             '1,000,000,000 / 100,000 = 10,000 faces per contract, which is '
+             'the multiplier. Note rulebook 6.1 carries no contract-size row '
+             'for GB05/GB10 -- 4.1 is the only place the rulebook states it.'),
+    MultiplierRule(
+        contract_prefix='GB10', multiplier=GB_FUTURES_MULTIPLIER,
+        effective=date(2021, 6, 28),
+        document='Rulebook 4.1, "Tick -- government bond futures"; HNX Mau '
+                 'HDTL TPCP 10 nam',
+        confidence='high',
+        note='Same template arithmetic as GB05; listed 2021-06-28.'),
+)
+
+#: What ``DerivativesAccount`` resolves a multiplier through. A callable and
+#: not a mapping, because locked shape 1 forbids a ticker-keyed cache of
+#: instrument facts: the answer is a function of ``(contract_code, date)``
+#: evaluated at the instant it is needed.
+MultiplierResolver = Callable[[str, date], Decimal]
+
+
+def resolve_contract_multiplier(contract_code: str,
+                                on_date: date) -> Decimal:
+    """VND per quoted unit for one contract on one date. Never a default.
+
+    Resolution is by contract template -- longest matching prefix, then the
+    latest row already in force -- and a miss **raises**. The alternative,
+    which is what this module used to do, is to answer 100,000 for everything
+    and be silently wrong by 10x on every government-bond future: rulebook 4.1
+    puts GB05/GB10 on multiplier 10,000, and rulebook 6.1 puts VN30F/VN100F on
+    100,000, on the same venue on the same day.
+
+    Two distinguishable refusals, both of them refusals:
+
+    * **no template matches** -- an equity ticker, or the 9-character coded
+      contract format (``41I1F6000``). The rulebook records that convention at
+      LOW confidence, from broker reproductions, and warns "do not trust the
+      VSDC code column" after finding three codes in the 2026-08-21 appendix
+      that contradict it. Decoding a multiplier out of a code the rulebook
+      itself will not vouch for is exactly the guess this function refuses;
+    * **the template was not listed yet** -- GB10 before 2021-06-28, VN100F
+      before 2025-10-10. There was no contract, so there is no multiplier, and
+      extrapolating one backwards would invent a contract that did not trade.
+
+    Raises:
+        UnknownContractMultiplier: in both cases above.
+    """
+    code = (contract_code or '').strip().upper()
+    matched = [row for row in CONTRACT_MULTIPLIERS
+               if code.startswith(row.contract_prefix)]
+    if not matched:
+        raise UnknownContractMultiplier(
+            contract_code, on_date,
+            f'no contract template matches this code. The table carries '
+            f'{sorted({r.contract_prefix for r in CONTRACT_MULTIPLIERS})} and '
+            f'a multiplier is not derivable from the venue -- HNXDS carries '
+            f'two families whose multipliers differ by 10x, so there is no '
+            f'venue-wide answer to fall back to')
+
+    longest = max(len(row.contract_prefix) for row in matched)
+    template = [row for row in matched if len(row.contract_prefix) == longest]
+    in_force = [row for row in template if row.effective <= on_date]
+    if not in_force:
+        listed = min(row.effective for row in template)
+        raise UnknownContractMultiplier(
+            contract_code, on_date,
+            f'the {template[0].contract_prefix} template was not listed until '
+            f'{listed.isoformat()}, so no contract of that family existed on '
+            f'this date')
+    return max(in_force, key=lambda row: row.effective).multiplier
+
+
 def margin_status(required: Decimal, assets: Decimal,
                   terms: BrokerTerms) -> MarginStatus:
     """Where ``MR / assets`` sits on the broker's utilisation ladder.
@@ -597,7 +798,8 @@ class DerivativesAccount:
                  margin_buffer: Decimal = _ZERO,
                  multipliers: Optional[Mapping[str, Decimal]] = None,
                  expiries: Optional[Mapping[str, date]] = None,
-                 default_multiplier: Decimal = VN30F_MULTIPLIER,
+                 multiplier_resolver: MultiplierResolver
+                 = resolve_contract_multiplier,
                  opened_at: Optional[datetime] = None) -> None:
         """
         Args:
@@ -616,9 +818,20 @@ class DerivativesAccount:
                 VSDC's ratio. A plausible *shape* only -- rulebook 6.3 records
                 that "the broker's actual lever in Vietnam is its UTILISATION
                 thresholds", which are the three ``BrokerTerms`` fields.
-            multipliers: contract code -> multiplier. Required for anything
-                that is not a VN30/VN100 index future; see
-                :data:`VN30F_MULTIPLIER`.
+            multipliers: contract code -> multiplier, as an **override** of
+                the dated table for a contract the rulebook does not carry --
+                a counterfactual, or a template listed after the rulebook's
+                2026-08-25 coverage end. It is not where the ordinary answer
+                comes from: a caller who has to remember to supply GB05's
+                10,000 is a caller who silently margins it at VN30F's 100,000
+                on the run where they forget, which is the defect this
+                argument used to cause.
+            multiplier_resolver: how ``(contract_code, date)`` becomes a
+                multiplier. Defaults to :func:`resolve_contract_multiplier`,
+                which is dated and cited and **raises** rather than defaulting.
+                Injectable so a test or a counterfactual can supply its own
+                table without a module-level monkeypatch; note that any
+                resolver that answers a constant re-creates the defect.
             expiries: contract code -> last trading day, carried onto
                 :class:`ContractPosition` so an expiring contract is
                 identifiable without a second lookup.
@@ -644,7 +857,7 @@ class DerivativesAccount:
         self._encumbrances = encumbrances
         self._multipliers: Dict[str, Decimal] = dict(multipliers or {})
         self._expiries: Dict[str, date] = dict(expiries or {})
-        self._default_multiplier = default_multiplier
+        self._multiplier_resolver = multiplier_resolver
 
         self._balance = initial_deposit
         self._entries: Tuple[DepositEntry, ...] = ()
@@ -702,14 +915,38 @@ class DerivativesAccount:
         """The net position in one contract, or ``None`` when flat."""
         return self.contracts.position(contract_code)
 
-    def multiplier_for(self, contract_code: str) -> Decimal:
-        """The contract multiplier. Explicit map first, VN30F default after."""
-        held = self.contracts.position(contract_code)
+    def multiplier_for(self, contract_code: str, ts: datetime) -> Decimal:
+        """The contract multiplier, RESOLVED at ``ts``. There is no default.
+
+        Three sources, in order, and none of them is a fallback in the sense
+        that matters -- each is an answer about *this* contract:
+
+        1. the caller's explicit ``multipliers`` override, for a contract the
+           dated table does not carry;
+        2. **the held position's own multiplier**, which is the one the
+           position was opened, margined and marked on. A position must not
+           change size mid-life because the table was edited underneath it;
+           that would silently restate every mark since it opened;
+        3. the dated table, via ``multiplier_resolver``.
+
+        ``ts`` is required and not optional. Locked shape 1: a venue -- and a
+        contract fact -- is ``(ticker, ts)``, so there is no instant-free
+        answer to cache, and an optional instant would immediately grow a
+        build-time default that is the same bug one level up.
+
+        Raises:
+            UnknownContractMultiplier: when no template matches and no
+                override was given. Caught by ``exchange.py`` at ``submit()``
+                and reported as ``INDETERMINATE``. Guessing here would scale
+                every margin and tax number downstream by whatever the guess
+                was wrong by, invisibly.
+        """
         if contract_code in self._multipliers:
             return self._multipliers[contract_code]
+        held = self.contracts.position(contract_code)
         if held is not None:
             return held.multiplier
-        return self._default_multiplier
+        return self._multiplier_resolver(contract_code, ts.date())
 
     def mark_for(self, contract_code: str,
                  marks: Optional[Mapping[str, Decimal]] = None) -> Decimal:
@@ -1103,8 +1340,14 @@ class DerivativesAccount:
                         'contract_code': code},
             )
 
+        # Both dated factors of ``IM = ratio x contracts x price x multiplier``
+        # resolve at ``ts``, not at build time. The multiplier used to be an
+        # account-wide default of VN30F's 100,000, which over-reserved every
+        # government-bond order by 10x -- an account that could plainly afford
+        # the position was refused, and the refusal named free_deposit as the
+        # constraint, so the log blamed the balance rather than the unit.
         rate = resolve_initial_margin_rate(rules, code, ts) + self.margin_buffer
-        multiplier = self.multiplier_for(code)
+        multiplier = self.multiplier_for(code, ts)
         required = rate * Decimal(increment) * multiplier * price
 
         if required > view.free_deposit:
@@ -1194,7 +1437,7 @@ class DerivativesAccount:
         code = fill.ticker
         if expiry is not None:
             self._expiries[code] = expiry
-        multiplier = self.multiplier_for(code)
+        multiplier = self.multiplier_for(code, stamp)
         before = self.contracts.position(code)
 
         signed = signed_quantity(fill.side, fill.quantity)

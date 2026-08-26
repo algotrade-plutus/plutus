@@ -106,7 +106,8 @@ from plutus.market.session.calendar import (
     weekday_trading_calendar,
 )
 from plutus.market.session.deposit import (
-    ContractLedger, DerivativesAccount, MarginMonitor, liquidation_sequence,
+    ContractLedger, DerivativesAccount, MarginMonitor, UnknownContractMultiplier,
+    liquidation_sequence, resolve_contract_multiplier,
 )
 from plutus.market.session.fills import FillPolicy, build_fill_policy
 from plutus.market.session.ledgers import (
@@ -591,6 +592,27 @@ class ExchangeSession:
         * **One ``on_terminal`` hook serves both accounts.** A terminal
           transition that forgets to release is then impossible by
           construction rather than by review.
+        * **The derivatives account is given a dated multiplier resolver**,
+          named here rather than left to a constructor default. It was left to
+          one, and the default was VN30F's 100,000 VND per index point applied
+          to every contract on HNXDS -- so a government-bond future, whose
+          multiplier is 10,000 (rulebook 4.1, HIGH), reserved ten times its
+          initial margin and the account was refused a position it could
+          afford. ``build`` is the only place a session's accounts are
+          assembled, so it is the only place that could have passed the
+          multipliers and never did; naming
+          :func:`~plutus.market.session.deposit.resolve_contract_multiplier`
+          makes the join visible and makes a silent family-wide default
+          impossible to reintroduce by omission.
+
+        **Orchestrator action:** ``build`` also hardwires the deposit's
+        ``investor`` to ``InvestorClass.INDIVIDUAL``, and rulebook 6.4 bars
+        individuals from government-bond futures entirely (cap 0). So a GB
+        order submitted through a session built here is refused on
+        ``POSITION_LIMIT`` before its margin is ever computed, and the
+        multiplier fix is not reachable end-to-end until ``AccountsConfig``
+        carries an investor class. That is a ``config`` change, not a change
+        here.
 
         **Both calendars default to the unsourced weekday-only ones**, whose
         ids contain ``UNSOURCED`` and whose settlement dates are wrong around
@@ -633,6 +655,7 @@ class ExchangeSession:
             AccountRef.derivatives(config.accounts.derivatives_account_no),
             config.accounts.initial_deposit, profile.terms, encumbrances,
             ContractLedger(), margin_buffer=profile.margin_buffer,
+            multiplier_resolver=resolve_contract_multiplier,
             opened_at=datetime.combine(config.period_start,
                                        datetime.min.time()))
 
@@ -1557,6 +1580,14 @@ class ExchangeSession:
         segregated deposit only, with no path between them. The three
         reservation shapes belong to the two account objects and none of their
         arithmetic is repeated here.
+
+        An unresolvable contract multiplier is caught here and reported as
+        ``INDETERMINATE``, for the same reason ``UnresolvedRule`` is:
+        ``IM = ratio x contracts x price x multiplier`` is linear in the
+        multiplier, so answering with a plausible one does not blur the number,
+        it scales it -- and the resulting ``INSUFFICIENT_DEPOSIT`` would blame
+        the balance for what was a unit gap. The data could not decide, which
+        is not the same as a rule saying no.
         """
         if pool_for_venue(venue) is Pool.DERIVATIVES:
             price = self._margin_price(order, state)
@@ -1569,8 +1600,25 @@ class ExchangeSession:
                                       'margined at the current mark and none '
                                       'has been observed',
                             'order_type': order.order_type.value})
-            return self._derivatives.reserve_for_order(
-                order_id, order, price, rules, self._config.broker_profile, ts)
+            try:
+                return self._derivatives.reserve_for_order(
+                    order_id, order, price, rules,
+                    self._config.broker_profile, ts)
+            except UnknownContractMultiplier as exc:
+                # SESSION_SEMANTICS is what ``_unresolved`` files any rule with
+                # no dedicated admission bucket under; ``detail`` carries the
+                # rule name so a report can still count multiplier gaps
+                # separately. The permanent home is a
+                # ``RuleName.CONTRACT_MULTIPLIER`` row in ``rulebook.py`` --
+                # see ``deposit.UnknownContractMultiplier``.
+                return Rejected(
+                    rule=AdmissionRule.SESSION_SEMANTICS,
+                    binding_constraint=None, ts=ts,
+                    verdict=Verdict.INDETERMINATE, order_id=order_id,
+                    detail={'reason': str(exc),
+                            'unresolved_rule': 'contract_multiplier',
+                            'status': 'unknown',
+                            'contract_code': exc.contract_code})
 
         cls_ = charge_class_for(instrument.kind if instrument is not None
                                 else InstrumentKind.STOCK)
@@ -2087,13 +2135,24 @@ class ExchangeSession:
         as a declared modelling choice, the per-row VAT flag -- follows
         ``ledgers.py``'s own arithmetic exactly.
 
+        The multiplier is resolved **at the fill instant**, per contract, not
+        taken from an account-wide default. This is the second site the default
+        leaked into: the derivatives PIT base is ``settlement price x
+        multiplier x contracts x IM ratio / 2`` (rulebook 12.3), so it is
+        linear in the multiplier and a government-bond fill was taxed on ten
+        times its notional. It cannot raise in practice -- an order reaches a
+        fill only through ``_reserve``, which resolves the same multiplier at
+        submission and refuses as ``INDETERMINATE`` when it cannot -- and if it
+        ever does, raising here is right: a fill priced on a guessed unit is
+        worse than no fill.
+
         **Orchestrator action:** either ``assess_charges`` should take the
         notional (or a multiplier) rather than deriving it, or ``ChargeRule``
         should carry a derivatives-notional base. Until then this is the only
         place a futures charge can be priced, and the duplication is
         deliberate rather than accidental.
         """
-        multiplier = self._derivatives.multiplier_for(fill.ticker)
+        multiplier = self._derivatives.multiplier_for(fill.ticker, fill.ts)
         notional = Decimal(fill.quantity) * multiplier * fill.price
         rows: Tuple[ChargeRule, ...] = (
             tuple(rules.charges(fill.venue, ChargeClass.FUTURE))

@@ -96,11 +96,17 @@ PROVENANCE = {
         'whole DerivativesAccount, computes MR = IM + VM with VM loss-only, '
         'and tests utilisation against BrokerTerms.'),
     'reproduction': (
-        'measurements.margin_incidence_account.compare_margin_paths. MEASURED '
-        'VERDICT: DISAGREE. At the unfitted funding level the account model '
-        'calls 100% of the 381 entries against a published 7.61 / 12.60 / '
-        '14.70%, and no funding multiple reproduces all three counts. Both '
-        'figures are reported; neither is restated.'),
+        'measurements.margin_incidence_account. SUPERSEDED VERDICT -- an '
+        'earlier revision recorded DISAGREE and "no funding multiple '
+        'reproduces all three counts". BOTH CLAIMS ARE FALSE. With the VSD '
+        'ratio frozen at the entry date, funding_multiple in [1.4110, 1.4136] '
+        'reproduces 29/48/56 EXACTLY; the earlier search stepped over that '
+        'interval on a 0.01 grid. The two models are the same functional form. '
+        'What is actually wrong is the EXPERIMENT: at funding_multiple=1 the '
+        '100% call rate is an arithmetic identity (U >= 1 at every price), and '
+        'the legacy series is a drawdown quantile at a threshold set by an '
+        'unsourced 5-point buffer. See docs/reference/'
+        'margin-model-adjudication.md.'),
 }
 
 
@@ -166,8 +172,10 @@ class MarginConfig:
        **The account-level replacement is built and it does not agree with
        this one.** ``plutus.market.session.deposit.account_margin_requirement``
        ships; ``measurements/margin_incidence_account.py`` runs it over the
-       identical 381 entries and reports both answers. The verdict is
-       DISAGREE, and the reason is structural rather than numerical: the
+       identical 381 entries and reports both answers. **An earlier revision
+       of this docstring said the verdict was DISAGREE and structural. That
+       was wrong** -- see :data:`PROVENANCE` and the adjudication document.
+       The residual sensitivity is real, though, and it is this: the
        utilisation test divides by the **deposit balance**, a quantity this
        class does not have and neither corpus records, so the account model's
        incidence is partly a statement about how much collateral an investor

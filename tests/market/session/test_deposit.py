@@ -28,10 +28,13 @@ import pytest
 from plutus.core.order import OrderType, Side
 from plutus.market.broker import BrokerTerms, CureWindow
 from plutus.market.protocol import Order, Position
-from plutus.market.session.deposit import (VN30F_MULTIPLIER, ContractLedger,
+from plutus.market.session.deposit import (CONTRACT_MULTIPLIERS,
+                                           VN30F_MULTIPLIER, ContractLedger,
                                            DerivativesAccount, MarginMonitor,
+                                           UnknownContractMultiplier,
                                            account_margin_requirement,
                                            liquidation_sequence, margin_status,
+                                           resolve_contract_multiplier,
                                            resolve_initial_margin_rate)
 from plutus.market.session.types import (AccountRef, BrokerProfile, Encumbrance,
                                          Fill, FillEvidence, InvestorClass,
@@ -43,6 +46,9 @@ from plutus.market.verdicts import Verdict
 
 VN30F = 'VN30F2212'
 OTHER = 'VN30F2303'
+#: A five-year government-bond future. Same venue, different contract template:
+#: dong quote on a 100,000d face, multiplier 10,000, +/-3% band, 1 VND tick.
+GB05 = 'GB05F2306'
 
 #: 2023-01-04, comfortably inside the 17% initial-margin regime that began
 #: 2022-12-15. Every arithmetic expectation below is written against 0.17.
@@ -914,10 +920,134 @@ def test_the_multiplier_is_per_contract_not_per_venue():
     the SAME venue quote dong on a 100,000d face with multiplier 10,000. The
     rulebook flags this as a unit hazard precisely because a per-venue field
     collapses two contracts whose ticks differ 10x and whose bands differ 2.3x.
+
+    Resolved from the dated table, with **no** ``multipliers=`` map supplied:
+    an account that has to be told the government-bond multiplier by hand is
+    an account that silently uses the index one when nobody remembers to.
     """
-    account, _ = build_account(multipliers={'GB05F2306': Decimal('10000')})
-    assert account.multiplier_for(VN30F) == VN30F_MULTIPLIER
-    assert account.multiplier_for('GB05F2306') == Decimal('10000')
+    account, _ = build_account()
+    assert account.multiplier_for(VN30F, TS) == VN30F_MULTIPLIER
+    assert account.multiplier_for(GB05, TS) == Decimal('10000')
+
+
+def test_a_government_bond_future_reserves_on_the_gb_multiplier():
+    """GB05/GB10 margin on 10,000, not on VN30F's 100,000. Rulebook 4.1.
+
+    The rulebook's government-bond futures row is explicit: "1 VND, quoted in
+    VND (not index points), on a 100,000d notional face. **Multiplier 10,000**;
+    contract size 1 ty dong", confidence HIGH, sourced to HNX's published
+    Mau HDTL TPCP 05 nam / 10 nam. 1,000,000,000 / 100,000 = 10,000, so the
+    contract size and the multiplier corroborate each other arithmetically.
+
+    ``IM = ratio x contracts x price x multiplier`` = 0.17 x 1 x 100,000 x
+    10,000 = 170,000,000d. Borrowing the index multiplier makes that
+    1,700,000,000d and the 500m deposit -- which comfortably covers the real
+    requirement -- is refused. That is the whole defect: the account cannot
+    open a position it can plainly afford.
+    """
+    account, _ = build_account(deposit=Decimal('500000000'))
+    enc = account.reserve_for_order(OrderId('O-GB'),
+                                    order(code=GB05, quantity=1),
+                                    Decimal('100000'), None, None, TS)
+    assert isinstance(enc, Encumbrance)
+    assert enc.amount == Decimal('170000000')
+    assert enc.amount != Decimal('0.17') * Decimal('100000') * VN30F_MULTIPLIER
+
+
+def test_an_unrecognised_contract_family_raises_rather_than_borrowing_vn30f():
+    """A multiplier the rulebook does not carry is INDETERMINATE, not 100,000.
+
+    IM is *linear* in the multiplier, and so is the derivatives PIT base
+    (rulebook 12.3). A guess therefore does not blur the number, it scales it,
+    and nothing downstream records that a guess was made. Two codes the table
+    genuinely cannot answer: an equity ticker, and HNX's 9-character coded
+    futures format, which the rulebook itself records at LOW confidence and
+    warns against trusting after finding three contradictory codes in the
+    2026-08-21 VSDC appendix.
+    """
+    account, _ = build_account()
+    for code in ('FPT', '41I1F6000'):
+        with pytest.raises(UnknownContractMultiplier) as caught:
+            account.multiplier_for(code, TS)
+        assert caught.value.contract_code == code
+
+    with pytest.raises(UnknownContractMultiplier):
+        account.reserve_for_order(OrderId('O-X'), order(code='FPT'),
+                                  Decimal('1000'), None, None, TS)
+
+
+def test_the_multiplier_table_is_keyed_on_contract_and_date():
+    """`(contract_code, effective_date) -> multiplier`, not a scalar.
+
+    Rulebook 6.3 makes the point for the margin RATIO -- VSDC publishes it per
+    contract, "so the correct key is (contract_code, date), not a scalar" --
+    and the multiplier needs the shape more, not less: the ratio has been one
+    number across every listed contract since 2022-12-15, whereas VN30F and
+    GB05 differ by 10x on the same venue on the same day.
+
+    The date axis is not decoration. GB10 listed 2021-06-28 and VN100F listed
+    2025-10-10; before those dates there was no contract of that family, so
+    the honest answer is a refusal rather than a value extrapolated backwards.
+    """
+    assert resolve_contract_multiplier('VN30F2212', date(2023, 1, 4)) == \
+        Decimal('100000')
+    assert resolve_contract_multiplier(GB05, date(2023, 1, 4)) == \
+        Decimal('10000')
+
+    assert resolve_contract_multiplier('GB10F2209', date(2021, 6, 28)) == \
+        Decimal('10000')
+    with pytest.raises(UnknownContractMultiplier, match='2021-06-28'):
+        resolve_contract_multiplier('GB10F2109', date(2021, 6, 27))
+
+    assert resolve_contract_multiplier('VN100F2512', date(2025, 10, 10)) == \
+        Decimal('100000')
+    with pytest.raises(UnknownContractMultiplier, match='2025-10-10'):
+        resolve_contract_multiplier('VN100F2512', date(2025, 10, 9))
+
+
+def test_a_held_position_keeps_the_multiplier_it_was_opened_on():
+    """A position must not be resized mid-life by an edit to the table.
+
+    Every mark, every variation-margin figure and the realised close-out are
+    all computed on ``position.multiplier``. If the account re-resolved on
+    each mark, amending the table would silently restate the whole life of an
+    open position rather than affecting only new ones.
+    """
+    account, _ = build_account(deposit=Decimal('500000000'))
+    account.apply_fill(fill(code=GB05, quantity=1, price=Decimal('100000')),
+                       None)
+    assert account.position(GB05).multiplier == Decimal('10000')
+
+    account._multiplier_resolver = lambda code, on: Decimal('1')
+    assert account.multiplier_for(GB05, TS) == Decimal('10000')
+
+
+def test_an_explicit_multiplier_overrides_the_table():
+    """The override is for what the rulebook does not carry, and only that.
+
+    The rulebook's coverage ends 2026-08-25, so a template listed after it has
+    no dated row and a caller must be able to state one. What the override is
+    *not* is where the ordinary answer comes from: a caller who has to
+    remember GB05's 10,000 by hand margins it at 100,000 on the run they
+    forget, which is exactly how this defect was built.
+    """
+    account, _ = build_account(multipliers={'XX99F2612': Decimal('500')})
+    assert account.multiplier_for('XX99F2612', TS) == Decimal('500')
+    with pytest.raises(UnknownContractMultiplier):
+        account.multiplier_for('XX98F2612', TS)
+
+
+def test_every_multiplier_row_carries_its_source():
+    """An unsourced value must say it is an assumption; these are all sourced.
+
+    Overclaiming is a defect in this codebase, so the table is auditable back
+    to a document row by row rather than being four numbers in a dict.
+    """
+    assert CONTRACT_MULTIPLIERS
+    for row in CONTRACT_MULTIPLIERS:
+        assert row.document and 'ulebook' in row.document
+        assert row.confidence == 'high'
+        assert row.note
 
 
 # --------------------------------------------------------------------------
