@@ -3,19 +3,35 @@
 **There is no maintenance margin ratio in Vietnam, at any date in 2020-2026.**
 Read that again before writing anything in this module, because
 :class:`plutus.market.margin.MarginConfig` has a ``maintenance_rate`` field and
-someone will copy it. It models a quantity that does not exist. The rulebook is
-flat on the point (6.3, "The actual call test"): VSDC publishes no maintenance
-ratio and instead monitors, in real time and per investor account, the ratio
+someone will copy it. It models a quantity that does not exist. This is now
+primary-sourced rather than merely reported: **QD 26/QD-HDTV Dieu 13**, the
+post-KRX margin-monitoring article, has been read in full and states the whole
+test as *"gia tri tai san ky quy tren tai khoan nha dau tu nho hon gia tri ky
+quy yeu cau"* -- margin assets below required margin. No ratio of notional
+appears anywhere in it. A "maintenance ratio" written as a fraction of notional
+is a different mechanism that mis-times calls in both directions -- a draft of
+the design spec paired initial 0.13 with maintenance 0.10, which fires at
+utilisation 1.30, i.e. an 8.89% adverse move, which the +/-7% VN30F band makes
+unreachable in a single session. Two correctly-cited numbers still produce a
+wrong rule when the mechanism between them is invented. If you find yourself
+adding a maintenance rate here, the shape is wrong.
 
-    utilisation = MR / total value of valid margin assets
-
-against a three-level ladder. A "maintenance ratio" written as a fraction of
-notional is a different mechanism that mis-times calls in both directions --
-a draft of the design spec paired initial 0.13 with maintenance 0.10, which
-fires at utilisation 1.30, i.e. an 8.89% adverse move, which the +/-7% VN30F
-band makes unreachable in a single session. Two correctly-cited numbers still
-produce a wrong rule when the mechanism between them is invented. If you find
-yourself adding a maintenance rate here, the shape is wrong.
+**The three-level utilisation ladder is OURS, not VSDC's -- corrected
+2026-08-26.** The paragraph above used to end by saying VSDC "monitors, in real
+time and per investor account, ``utilisation = MR / valid margin assets``
+against a three-level ladder", and this module said elsewhere that the ladder's
+shape (80/90/100) was sourced to "Article 13 of the clearing rulebook". The
+negative finding survived the primary text; the ladder did not. QD 26 Dieu 13
+has no percentages, and it monitors at three fixed checkpoints (09h30, 14h00,
+16h30), not continuously. The 80/90/100 that the
+citation chain was tracking lives at **Dieu 29** and is a ladder on **position
+limits** -- three warning levels at 80/90/100% of *gioi han vi the*, counted in
+contracts. Post-KRX the margin attribution is definitively wrong; pre-KRX it is
+**UNVERIFIED rather than disproven**, because QD 61/QD-VSD and QD 12/QD-HDTV
+have never been read and only the chain's last link has been checked. The
+numeric defaults in :class:`~plutus.market.broker.BrokerTerms` are unchanged --
+what was corrected is the claim, not the computation. See that module's
+``PROVENANCE`` for the full split.
 
 **The margin entry point takes the whole account.**
 :func:`account_margin_requirement` takes a :class:`DerivativesAccount` and
@@ -26,7 +42,12 @@ ACCOUNT PORTFOLIO -- not the position. A two-leg calendar spread on one account
 is *one* MR calculation, not two independent ones." A function that takes a
 lone position cannot express netting, cannot express the loss-only rule (which
 is stated over the account portfolio's P&L), and cannot be upgraded to
-portfolio margining without re-plumbing every call site.
+portfolio margining without re-plumbing every call site. **This one is now
+primary-sourced too:** QD 26 Dieu 5.5 defines MR as computed after the close
+*"cho danh muc vi the tren tung tai khoan giao dich cua nha dau tu va tai
+khoan cua chinh thanh vien bu tru"* -- for the position portfolio on each
+investor's trading account, and on the member's own account. The unit survives
+the regime change even though the formula does not.
 
 **The test this module implements**, all four terms sourced (rulebook 6.3):
 
@@ -50,12 +71,23 @@ portfolio margining without re-plumbing every call site.
           duoc tinh vao** gia tri ky quy duy tri yeu cau trong truong hop lai
           lo vi the cua danh muc dau tu tren tai khoan cua nha dau tu **o
           trang thai lo**". A favourable move contributes exactly zero.
-    MR  = IM + VM.
+    MR  = IM + VM. **Scope this to the pre-KRX regime.** Phu luc 2 of QD 26,
+          now read, assembles the post-KRX requirement completely differently:
+          ``MR = Max(SUM Pgm, 0)`` over underlying-asset groups, with
+          ``Pgm = Max((Rm + Sm + Dm), MM)`` -- scenario risk margin, basis
+          margin, delivery margin, floored at a minimum margin -- and
+          **variation margin is not a component at all**, because QD 26 Dieu 20
+          settles position P&L as a separate daily cash movement. That model is
+          specified in ``docs/reference/post-krx-margin-spec.md`` and is
+          deliberately **not built here**; building it is an author decision
+          that has not been taken.
     utilisation = MR / deposit assets, tested against
           :class:`plutus.market.broker.BrokerTerms`' warning / call /
-          forced-close ladder. The ladder's *shape* (80/90/100) is VSDC-sourced
-          (Article 13 of the clearing rulebook); each broker's own levels are
-          commercial terms and live in ``BrokerTerms``.
+          forced-close ladder. **The ladder is ours** -- see the correction at
+          the head of this module. Only the top rung has a regulated
+          counterpart: at the default 1.00 it is QD 26 Dieu 13's binary
+          ``assets < MR``, off by the ``assets == MR`` boundary. Every level is
+          a ``BrokerTerms`` field and none of them is sourced.
 
 **The deposit is segregated.** Vietnamese derivatives margin sits in a deposit
 account ("ky quy") opened by the clearing member in its own name, with margin
@@ -591,11 +623,33 @@ def margin_status(required: Decimal, assets: Decimal,
                   terms: BrokerTerms) -> MarginStatus:
     """Where ``MR / assets`` sits on the broker's utilisation ladder.
 
-    Four states rather than one call boolean, because the ladder is genuinely
-    three-tiered: rulebook 6.3, Article 13 of the clearing rulebook, sets
-    level 1 = 80%, level 2 = 90%, level 3 = 100% on utilisation, monitored per
-    investor account during the session. Only level 3 carries an
-    exchange-level suspension; levels 1 and 2 are notices.
+    Four states rather than one call boolean. **The three-tier shape is a
+    modelling choice, not a sourced rule -- corrected 2026-08-26.** This
+    docstring used to attribute levels 1/2/3 at 80/90/100 to "Article 13 of the
+    clearing rulebook". QD 26/QD-HDTV **Dieu 13** has now been read in full and
+    contains no percentage: it is binary, *"gia tri tai san ky quy ... nho hon
+    gia tri ky quy yeu cau"*, checked at **09h30, 14h00 and 16h30**, cured by
+    top-up before 09h30 the next trading day, and after **03 working days**
+    uncured VSDC directs another clearing member to close the account.
+
+    80/90/100 is primary-sourced, but to **Dieu 29** and to **position
+    limits**:
+    three warning levels at 80%, 90% and 100% of *gioi han vi the*, counted in
+    contracts. That is a different rule on a different quantity, and this
+    function does not implement it -- see ``FEATURES.md`` §11 for why it is
+    recorded NOT BUILT rather than bolted on here.
+
+    Pre-KRX (to 2025-05-04) the margin ladder is **UNVERIFIED, not disproven**.
+    QD 61/QD-VSD and QD 12/QD-HDTV have never been read; only the chain's last
+    link was checked, and it is silent. Do not restate this as "the pre-KRX
+    ladder is wrong".
+
+    What survives the primary text is the **top rung only**. At the default
+    ``forced_close_utilisation = 1.00``, ``required / assets >= 1`` is
+    ``assets <= required``, which is Dieu 13's test except at ``assets ==
+    required`` -- Dieu 13.2.c restores an account whose assets are *"bang hoac
+    lon hon"* the requirement, so equality is cured there and a breach here.
+    One tick, in the conservative direction, and stated rather than hidden.
 
     Two boundary cases, decided rather than left to arithmetic:
 
@@ -655,8 +709,11 @@ def account_margin_requirement(account: 'DerivativesAccount',
        instead of being deducted from assets, which is why doing both would
        double-count it.
     4. **The thresholds come from** :class:`~plutus.market.broker.BrokerTerms`,
-       never from this module. Their *levels* are commercial and unpublished;
-       only the ladder's shape is sourced.
+       never from this module. Their levels are commercial and unpublished --
+       and so, it turns out, is the ladder's shape: see :func:`margin_status`
+       and ``BrokerTerms.PROVENANCE``. Nothing about the three-rung test is
+       sourced except that its top rung coincides with QD 26 Dieu 13's binary
+       breach at the default 1.00.
 
     The mark for a contract is resolved ``marks`` -> the account's last
     observed mark -> the position's own ``average_entry``. The last fallback is
@@ -1092,16 +1149,28 @@ class DerivativesAccount:
         """The deposit leg of a deposit -> securities transfer.
 
         Rulebook 6.3 ("Margin withdrawal", VSDC section VI and section IV.3,
-        confidence HIGH) states three conditions. Two of them bind an investor
-        and both are enforced here:
+        confidence HIGH) states three conditions, and **QD 26/QD-HDTV Dieu 11.1
+        now sources the same three verbatim for the post-KRX regime** -- (a)
+        assets after withdrawal still meet the requirement, (b) securities
+        withdrawn do not exceed securities posted, (c) the account is not
+        suspended. Two of them bind an investor and both are enforced here:
 
-        1. **The utilisation ratio AFTER the withdrawal is below the level-3
-           threshold.** So the bound is ``balance - MR / forced_close``, which
-           at the default 1.00 threshold is exactly ``MarginView.equity`` --
-           "the withdrawable amount is assets minus MR at the broker's
-           threshold, **not** assets minus IM".
-        3. **The account is not currently suspended** for a
-           margin-utilisation breach, i.e. its status is not ``FORCED``.
+        1. **Assets after the withdrawal still cover MR** (Dieu 11.1.a: *"Tai
+           san ky quy sau khi rut dap ung duoc yeu cau ky quy theo thong bao
+           cua VSDC"*). Implemented as "utilisation after the withdrawal is
+           below the forced-close rung", so the bound is ``balance - MR /
+           forced_close``, which at the default 1.00 is exactly
+           ``MarginView.equity`` -- "the withdrawable amount is assets minus MR
+           at the broker's threshold, **not** assets minus IM". ("Level 3" is
+           this module's name for the top rung; it is not a citation to Dieu
+           29's position-limit level 3. See :func:`margin_status`.)
+        3. **The account is not currently suspended**, i.e. its status is not
+           ``FORCED``. **Narrower than the source.** Dieu 11.1.c bars a
+           withdrawal from an account suspended for a margin breach, **a
+           position-limit breach, or a payment default** -- three grounds. Only
+           the first has any representation here, so an account suspended under
+           Dieu 29 could withdraw. Recorded rather than fixed: the other two
+           states do not exist in this module.
 
         Condition (2) -- withdrawn securities not exceeding securities posted
         -- has no representation here because Tier 1 models cash-only margin;
@@ -1234,10 +1303,35 @@ class DerivativesAccount:
            room for a buy that then breaches the cap. Conservative by
            construction, and the conservative direction is the right one for a
            cap. Rejected with ``binding_constraint`` = the cap.
-        2. **Level 3** (rulebook 6.3, VSDC section V.4): "a trading account may
-           open a **new** position only while its utilisation is below the
-           level-3 threshold", with offsetting trades excepted. An order that
-           reduces the worst-case net is an offsetting trade and passes.
+
+           **Two divergences from QD 26, both now primary-sourced and both
+           left in place deliberately.** (a) The counted quantity here is per
+           *contract code*, i.e. per expiry. **Dieu 27.2.a counts across expiry
+           months**: *"tong so luong vi the cua cac HDTL co cung tai san co so,
+           cung he so nhan hop dong nhung khac thang dao han"*, with opposite
+           positions of the *same* expiry netted out first -- and the cap
+           itself is keyed on the contract family, not the code
+           (``rulebook._position_limit_table``). An account holding 4,000
+           VN30F2401 and 4,000 VN30F2403 counts 8,000 under Dieu 27.2.a and
+           passes here at 4,000 apiece against the same 5,000 cap. That is the
+           ordinary shape of a rolled futures book, not a corner case.
+           (b) Dieu 29.1.c puts level 3 at *"dat nguong
+           100%"* -- reaching the cap, not exceeding it -- and Dieu 29.3.b
+           requires the account to come back *below* it, so sitting exactly on
+           the limit is a breach there and admitted here. Fixing either changes
+           behaviour and is the author's call; see ``FEATURES.md`` §17.
+        2. **Level 3.** The *behaviour* is primary-sourced -- QD 26 Dieu 13.2.a
+           wires the clearing member to *"khong thuc hien giao dich mo moi vi
+           the tren tai khoan vi pham, ngoai tru giao dich doi ung de dong vi
+           the"*: no new positions on a breaching account, offsetting trades
+           excepted. An order that reduces the worst-case net is an offsetting
+           trade and passes. The *trigger* is where we diverge: Dieu 13 fires
+           on the binary ``assets < MR``, not on a 100% rung of a utilisation
+           ladder, and at the default ``forced_close_utilisation = 1.00`` the
+           two coincide except at ``assets == MR``. The name "level 3" is
+           retained because it is what the code and its tests call this gate;
+           it is **not** a citation to Dieu 29's level 3, which is the
+           position-limit ladder.
         3. **Free deposit**. Rejected with ``binding_constraint`` =
            ``free_deposit``.
 
@@ -1321,11 +1415,16 @@ class DerivativesAccount:
                         'contract_code': code},
             )
         if increment > 0 and view.status is MarginStatus.FORCED:
-            # Level 3 suspends the account from OPENING new positions. An
+            # A breaching account is suspended from OPENING new positions. An
             # offsetting order -- increment == 0 -- is explicitly excepted, and
-            # is in fact the action VSDC requires the member to take. The
-            # threshold used is the *broker's* forced-close level, which is at
-            # or tighter than VSDC's 100%: clearing members must be no looser.
+            # is in fact the action VSDC requires the member to take: QD 26
+            # Dieu 13.2.a, "khong thuc hien giao dich mo moi vi the tren tai
+            # khoan vi pham, ngoai tru giao dich doi ung de dong vi the".
+            # The threshold used is the *broker's* forced-close level. It is
+            # NOT true, as this comment used to say, that VSDC publishes a
+            # 100% margin level that members must be no looser than -- Dieu 13
+            # publishes no percentage at all. At the default 1.00 this gate is
+            # arithmetically Dieu 13's own assets < MR, off by equality.
             return Rejected(
                 rule=StatefulRule.INSUFFICIENT_DEPOSIT,
                 binding_constraint=view.free_deposit,
@@ -1584,11 +1683,14 @@ def liquidation_sequence(account: DerivativesAccount,
     """The order in which a forced close would shut contracts.
 
     **A modelling choice, not a sourced rule.** No Vietnamese document
-    prescribes a selection order for a broker's forced close; rulebook 6.3
-    shows the real level-3 mechanism is VSDC requesting HNX suspend the account
-    from opening new positions while the clearing member reduces it, and one
-    broker's published behaviour (Pinetree, 2024) prioritises the *nearest
-    expiry* rather than the largest loss. Design section 7.4 therefore requires
+    prescribes a selection order for a broker's forced close. The regulated
+    mechanism is now read in full and it is not a selection order at all:
+    QD 26 Dieu 13.2.a has VSDC ask HNX to suspend the breaching account and
+    wire the member to stop opening, Dieu 13.3 has the member top up or place
+    offsetting trades, and Dieu 13.3.b hands the closing to **another clearing
+    member** after 03 working days -- with which contracts to shut nowhere
+    stated. One broker's published behaviour (Pinetree, 2024) prioritises the
+    *nearest expiry* rather than the largest loss. Design section 7.4 requires
     the selection rule to be **stated** rather than assumed, which is what this
     function's return value and ``Event.margin(..., selection_rule=...)`` are
     for.
@@ -1632,15 +1734,32 @@ class MarginMonitor:
     nowhere to put a call that survives to the next element. It stays untouched
     as the batch research path.
 
-    **The cure window is a broker term.** The rulebook records this as an
-    important negative finding: the length of a retail cure window is a
-    commercial term in the account-opening agreement, not an exchange or
-    statutory number, and it must live in ``BrokerTerms``. (LuatVietnam's
-    summary of QD 61 attributes a 3-business-day cure to Article 13 and a
-    5-business-day cure to Article 28; VSDC's own page says the member may
-    require an intraday top-up. Those reconcile if the multi-day periods are
-    clearing-member-to-VSD deadlines while the broker-to-client call is
-    intraday and contractual -- so **do not hard-code either number**.)
+    **The cure window is PARTLY regulated -- corrected 2026-08-26.** The
+    broker-to-investor window is still a commercial term in the account-opening
+    agreement, is set by no document anyone on this project has read, and must
+    live in ``BrokerTerms``. That half of the finding stands. What was wrong
+    was the surrounding gloss, which rested on LuatVietnam's *summary* of
+    QD 61 and hedged with "do not hard-code either number". The primary text is
+    now in hand and the member-side deadlines are definite, at **QD 26/QD-HDTV
+    Dieu 13**:
+
+    * MR is computed and wired to the clearing member **by 16h30** on day T
+      (Dieu 13.1);
+    * a short account must be topped up **before 09h30 on T+1** (Dieu 13.1);
+    * VSDC checks at **09h30 / 14h00 / 16h30** -- suspending newly breaching
+      accounts, restoring cured ones, recomputing at the close (Dieu 13.2);
+    * after **03 working days** from the wire, uncured, VSDC directs **another
+      clearing member** to place the offsetting trades (Dieu 13.3.b). The same
+      03-working-day window and the same substitute-member mechanism apply to a
+      position-limit level-3 breach at Dieu 29.5 -- **not 5 days**, which is
+      what the LuatVietnam summary of the previous edition reported.
+
+    None of those is an investor cure window, so none of them may be
+    hard-coded here; they belong to the checkpoint schedule, which is
+    exchange/depository config keyed by date and is **not built** (FEATURES.md
+    §16.1 decision 4). What they do give is a bound: at the HNXDS 08:45 open
+    the default ``NEXT_SESSION`` deadline sits 45 minutes inside the regulated
+    09h30 T+1 top-up, which is the direction a broker term may move in.
 
     The window is measured in **sessions** through a ``TradingCalendar``, not
     in settlement business days: the two calendars diverge around Tet, and a

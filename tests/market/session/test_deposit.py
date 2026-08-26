@@ -347,11 +347,15 @@ def test_margin_assets_are_the_deposit_balance_with_no_mtm_accumulated():
 # --------------------------------------------------------------------------
 
 def test_utilisation_ladder_has_three_distinct_states_plus_ok():
-    """Level 1 = 80%, level 2 = 90%, level 3 = 100% on `MR / margin assets`.
+    """80 / 90 / 100 on `MR / margin assets` -- **our shape, not VSDC's**.
 
-    Article 13 of the VSDC clearing rulebook. Three states, not one call
-    boolean: only level 3 carries an exchange-level suspension, and a simulator
-    that collapses them cannot tell a warning from a forced close.
+    This docstring used to read "Article 13 of the VSDC clearing rulebook".
+    QD 26/QD-HDTV Dieu 13 has since been read in full and has no percentage in
+    it; see ``test_the_margin_utilisation_ladder_is_declared_unsourced``. What
+    this test pins is unchanged and still worth pinning: three states, not one
+    call boolean. Only the top rung carries a suspension, only the top rung has
+    a regulated counterpart, and a simulator that collapses them cannot tell a
+    warning from a forced close.
     """
     terms = BrokerTerms()
     assets = Decimal('1000')
@@ -376,10 +380,12 @@ def test_no_requirement_is_ok_and_a_requirement_with_no_assets_is_forced():
 def test_the_ladder_levels_come_from_broker_terms_not_from_this_module():
     """Each broker sets its own levels on the SAME utilisation ratio.
 
-    Pinetree's published 2024 example is 75 / 85 / 90, which is tighter than
-    VSDC's 80 / 90 / 100 in every rung. The levels are commercial terms; only
-    the ladder's shape is sourced. Hard-coding 0.80 here would assert one
-    firm's house rule as market law.
+    Pinetree's published 2024 example is 75 / 85 / 90, tighter in every rung
+    than the 80 / 90 / 100 defaults. The levels are commercial terms, and --
+    corrected 2026-08-26 -- **so is the shape**: the sentence that stood here,
+    "only the ladder's shape is sourced", was withdrawn when QD 26 Dieu 13 was
+    read. Hard-coding 0.80 here would assert one firm's house rule as market
+    law; hard-coding it *and* calling it sourced was the actual defect.
     """
     tight = BrokerTerms(warning_utilisation=Decimal('0.75'),
                         margin_call_utilisation=Decimal('0.85'),
@@ -621,12 +627,19 @@ def test_an_offsetting_resting_order_reserves_nothing():
 
 
 def test_level_three_suspends_opening_but_not_offsetting():
-    """"A trading account may open a NEW position only while its utilisation
-    is below the level-3 threshold" -- offsetting trades excepted.
+    """A breaching account may not OPEN -- offsetting trades excepted.
 
-    VSDC sections II.4(b) and V.4. The machine-level form at the KRX cutover is
-    the trading system accepting "only new orders with a close-out parameter"
-    for restricted accounts (VNX QD 21 Dieu 36), which is this rule.
+    **The behaviour is primary-sourced; the trigger is not.** QD 26/QD-HDTV
+    Dieu 13.2.a wires the clearing member to *"khong thuc hien giao dich mo moi
+    vi the tren tai khoan vi pham, ngoai tru giao dich doi ung de dong vi the"*
+    -- exactly this rule. What Dieu 13 does **not** have is a percentage: the
+    breach it fires on is the binary ``assets < MR``, which at the default
+    ``forced_close_utilisation = 1.00`` is the same event as the rung tested
+    here, off by the ``assets == MR`` boundary. "Level 3" below is this
+    module's own name for the top rung and is **not** a citation to Dieu 29's
+    level 3, which is a position-limit ladder. The machine-level form at the
+    KRX cutover is the trading system accepting "only new orders with a
+    close-out parameter" for restricted accounts (VNX QD 21 Dieu 36).
     """
     account, _ = build_account(deposit=Decimal('17000000'))
     account.apply_fill(fill(quantity=1, price=Decimal('1000')), None)
@@ -674,6 +687,16 @@ def test_the_position_limit_is_tested_on_the_worst_case_net():
     on the number itself is LOW -- HNX's current template delegates the limit to
     VSDC and prints none -- which is precisely why it comes from the RuleSet
     rather than from a constant here.
+
+    **What this test does NOT pin, now that QD 26 Dieu 27.2.a has been read.**
+    The regulated count is *"tong so luong vi the cua cac HDTL co cung tai san
+    co so, cung he so nhan hop dong nhung khac thang dao han"* -- summed across
+    expiry months of one underlying, with same-expiry opposite legs netted
+    first. This gate counts per contract code, so 4,000 VN30F2401 plus 4,000
+    VN30F2403 passes at 8,000 against a 5,000 cap. Dieu 29.1.c also puts its
+    level 3 at *reaching* 100%, where this test admits an order landing exactly
+    on the cap. Both are behaviour changes and are the author's call;
+    ``FEATURES.md`` §17 carries them.
     """
     account, _ = build_account(deposit=Decimal('10000000000000'))
     rules = FakeRuleSet(TS)
@@ -1378,3 +1401,106 @@ def test_a_stale_account_may_not_open_a_new_position():
     allowed = account.reserve_for_order(OrderId('O-3'), order(quantity=1),
                                         Decimal('1000'), None, None, NEXT)
     assert isinstance(allowed, Encumbrance)
+
+
+# --------------------------------------------------------------------------
+# Provenance of the utilisation ladder, pinned after QD 26 was read
+# --------------------------------------------------------------------------
+
+def test_the_margin_utilisation_ladder_is_declared_unsourced():
+    """The ladder we apply to MARGIN is ours. Pinned so it cannot drift back.
+
+    Until 2026-08-26 ``BrokerTerms.PROVENANCE`` said the 80/90/100 shape was
+    "VSDC-sourced", citing Article 13 of the clearing rulebook through the
+    chain QD 96 -> QD 61 -> QD 12 -> QD 26. The chain's last link was then read
+    in full: **QD 26/QD-HDTV Dieu 13 contains no percentage.** It is binary --
+    margin assets below required margin is the violation -- checked at 09h30,
+    14h00 and 16h30.
+
+    This test exists because the wrong claim was load-bearing in four places
+    at once (``broker.py``, ``deposit.py``, ``types.MarginStatus``,
+    ``margin.py``) and was quoted back by ``FEATURES.md`` as settled. A
+    docstring cannot be regression-tested; a ``PROVENANCE`` string can.
+    """
+    p = BrokerTerms.PROVENANCE
+
+    # The claim that was withdrawn must not reappear in any entry.
+    for key, text in p.items():
+        assert 'Article 13' not in text, key
+        assert 'VSDC-sourced' not in text, key
+
+    for key in ('warning_utilisation', 'margin_call_utilisation',
+                'forced_close_utilisation'):
+        assert p[key].startswith('UNSOURCED'), key
+
+    # 80/90/100 IS primary-sourced -- to a different rule, on a different
+    # quantity, which this object does not implement.
+    call = p['margin_call_utilisation']
+    assert 'Dieu 29' in call
+    assert 'POSITION LIMIT' in call
+
+    # Pre-KRX is UNVERIFIED, not disproven: QD 61 and QD 12 are unread.
+    assert 'UNVERIFIED, not disproven' in call
+    assert 'QD 61 and QD 12 have never been read' in call
+
+
+def test_provenance_covers_every_assumed_field_and_no_others():
+    """House rule 1: every non-sourced default is labelled on its own object.
+
+    The counterpart of ``AdvanceTerms.PROVENANCE`` and
+    ``CommissionSchedule.PROVENANCE``. ``advance_on_sale_enabled`` is a
+    behaviour switch rather than a market value, so it is the one field that
+    needs no provenance entry.
+    """
+    from dataclasses import fields
+
+    documented = set(BrokerTerms.PROVENANCE)
+    declared = {f.name for f in fields(BrokerTerms)}
+    assert documented <= declared
+    assert declared - documented == {'advance_on_sale_enabled'}
+
+
+def test_cure_window_separates_the_regulated_deadline_from_the_broker_term():
+    """QD 26 Dieu 13 regulates member->VSDC. The investor window is commercial.
+
+    Both halves have to be visible, because the previous text hedged ("do not
+    hard-code either number") on the strength of a LuatVietnam *summary*, and
+    the summary was wrong about one of them: the position-limit escalation at
+    Dieu 29.5 is **03 working days**, not five.
+    """
+    text = BrokerTerms.PROVENANCE['cure_window_sessions']
+    assert 'assumed' in text
+    assert 'PARTLY REGULATED' in text
+    assert '09h30' in text          # Dieu 13.1 top-up, next trading day
+    assert '03 working days' in text  # Dieu 13.3.b, Dieu 29.5
+    assert 'Dieu 29.5' in text
+    # The five-business-day figure came from a summary of the superseded
+    # edition and must not survive anywhere in this dict.
+    assert '05 working days' not in text
+    assert 'five' not in text.lower()
+
+    # And the default is unchanged: the author's decision stands.
+    assert BrokerTerms().cure_window_sessions == CureWindow.NEXT_SESSION
+    assert CureWindow.NEXT_SESSION == 1
+
+
+def test_the_forced_rung_is_qd26_dieu_13s_binary_test_off_by_equality():
+    """The one rung with a regulated counterpart, and its exact discrepancy.
+
+    ``MR / assets >= 1.00`` is ``assets <= MR``; Dieu 13's violation is
+    ``assets < MR``. So the default top rung reproduces the regulated test
+    everywhere except ``assets == MR``, where Dieu 13.2.c restores the account
+    (*"bang hoac lon hon muc ky quy yeu cau"*) and we hold it in breach. One
+    tick, conservative, and stated rather than hidden -- which is the whole
+    reason the numeric default was left alone when the citation was withdrawn.
+    """
+    terms = BrokerTerms()
+    assert terms.forced_close_utilisation == Decimal('1.00')
+
+    required = Decimal('100')
+    assert margin_status(required, required - 1, terms) is MarginStatus.FORCED
+    assert margin_status(required, required, terms) is MarginStatus.FORCED
+    assert (margin_status(required, required + 1, terms)
+            is not MarginStatus.FORCED)
+
+    assert 'assets == ' in BrokerTerms.PROVENANCE['forced_close_utilisation']

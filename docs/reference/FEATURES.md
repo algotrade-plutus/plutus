@@ -2,18 +2,32 @@
 
 **Read this before asking the author anything.** This document exists because a prior
 session asked the author to supply the derivatives margin-call thresholds. They were
-already implemented *and* already sourced at high confidence (80 / 90 / 100, Article 13
-of QĐ 96/QĐ-VSD → QĐ 61/QĐ-VSD → QĐ 12/QĐ-HĐTV → QĐ 26/QĐ-HĐTV). The question wasted the
-author's time and signalled that the code had not been read.
+already implemented, so the question wasted the author's time and signalled that the code
+had not been read.
+
+> **The original of that paragraph also said the thresholds were "already sourced at high
+> confidence (80 / 90 / 100, Article 13 of QĐ 96/QĐ-VSD → QĐ 61/QĐ-VSD → QĐ 12/QĐ-HĐTV →
+> QĐ 26/QĐ-HĐTV)". That half is now withdrawn.** QĐ 26 was obtained and read in full on
+> 2026-08-26; **Điều 13 has no percentages**. See §11 and §19. The lesson the anecdote
+> teaches is unchanged and now cuts both ways: read the code *and* read the document. A
+> citation chain is only as good as its last link, and nobody had followed this one to
+> the end.
 
 This file is the substitute for a memory the next session will not have.
 
 - **Repo:** `/Users/nadan/algotrade-research/plutus` · branch `rivf26-wp1-wp2-wp4`
-- **Suite:** 1314 tests collected, green at the last full run
+- **Suite:** `python -m pytest tests -q` → **1318 passed**, 0 failed, 2026-08-26 (1314
+  before this session; four tests added). **Note the word "passed", not "collected"** —
+  `python -m pytest tests --collect-only` reports **1365**, and the 47-test gap is a
+  live finding, not a rounding: see **D36**
 - **Last surveyed:** 2026-08-26, by five readers of the actual code (not of docstrings)
 - **Adversarially audited:** 2026-08-26 by four independent auditors; corrections applied
   and every count re-derived. **Read the [verification log](#19-verification-log) at the
   foot of this file before trusting any single row.**
+- **Primary sources obtained 2026-08-26:** QĐ 26/QĐ-HĐTV (2025-04-16) and its **Phụ lục
+  2**. These were the two highest-value missing documents in the derivatives domain and
+  they invalidate several rows this file previously graded HIGH. Every affected row is
+  marked below and the whole correction is logged in §19.
 
 ---
 
@@ -48,6 +62,9 @@ Companion documents, unchanged by this file:
 - `docs/reference/vn-exchange-rulebook-2020-2026.md` — 400 dated rules (**grep it, do not read it whole**)
 - `docs/reference/margin-model-adjudication.md` — why margin incidence was retracted
 - `docs/reference/equity-margin-spec.md` — the spec for §12, written but not built
+- `docs/reference/post-krx-margin-spec.md` — **new, 2026-08-26.** The post-KRX MR
+  assembly read out of QĐ 26 Phụ lục 2, with an inference register and a source-defect
+  register. **Specification only; nothing in it is built** (§11)
 
 ---
 
@@ -57,17 +74,20 @@ Each of these is in the code today with a dated citation. The file:line is where
 
 | Question a session might wrongly ask | The answer already in the code | Where |
 |---|---|---|
-| "What are the derivatives margin-call thresholds?" | **80 / 90 / 100 %** of utilisation, ladder shape sourced (Art. 13, QĐ 96 → QĐ 61 → QĐ 12 → QĐ 26), levels carried as broker terms | `broker.py:67-69`, `deposit.py:590` |
+| "What are the derivatives margin-call thresholds?" | **80 / 90 / 100 %** of utilisation is what we compute, unchanged. **The sourcing is withdrawn as of 2026-08-26** — applying a ladder to *margin* is now **UNSOURCED**, post-KRX definitively (QĐ 26 Điều 13 read in full, binary `assets < MR`, no percentage) and pre-KRX **UNVERIFIED not disproven** (QĐ 61 and QĐ 12 never read). 80/90/100 *is* primary-sourced — to **QĐ 26 Điều 29, for POSITION LIMITS**. Defaults deliberately unchanged | `broker.py:PROVENANCE`, `deposit.py:margin_status` |
+| "Then does anything in the primary text back the 1.00 forced level?" | **Yes, the top rung only.** `MR / assets ≥ 1.00` ≡ `assets ≤ MR`, and `assets < MR` is the entire QĐ 26 Điều 13 test. The two coincide except at `assets == MR`, which Điều 13.2.c treats as cured and we treat as breach — one tick, conservative, pinned by test | `deposit.py:margin_status`; `test_deposit.py::test_the_forced_rung_is_qd26_dieu_13s_binary_test_off_by_equality` |
 | "What is the initial margin ratio?" | **0.10 @ 2017-08-10, 0.13 @ 2018-07-18, 0.17 @ 2022-12-15**, still 0.17 at 2026-08-21. Press-sourced; **no quyết định number exists** | `margin.py:129`, `rulebook.py:1355` |
 | "What is the VN30F contract multiplier?" | **100,000 VND/point** from 2017-08-10; VN100F same from 2025-10-10; **GB05/GB10 10,000** | `deposit.py:495-530` |
-| "What are the position limits?" | INDEX 5,000 / 10,000 / 20,000 (**LOW** confidence values); GB 0 / 5,000 / 10,000 (HIGH) | `rulebook.py:1431` |
+| "What are the position limits?" | INDEX 5,000 / 10,000 / 20,000 (**LOW** confidence values); GB 0 / 5,000 / 10,000 (HIGH). QĐ 26 Điều 27.1 confirms the *mechanism* — VSDC sets them per account type and per futures type and publishes ≥ 02 working days ahead — and **prints no number**, which is why the values stay LOW | `rulebook.py:1431` |
+| "Is there a warning ladder on the position limits?" | **In the rulebook yes, in the code no.** QĐ 26 Điều 29 sets warning levels 1/2/3 at **80 / 90 / 100 % of the position limit**; level 3 suspends the account and allows only offsetting trades. **NOT BUILT** — see §11 for the three reasons, the first of which is that we do not compute the quantity the percentages apply to | §11, §16.3 |
 | "What is the settlement cycle?" | **T+2 since 2016-01-01** — not 2022. What changed on 2022-08-29 is the *time of day* (13:00). Never call it "T+1.5" | `rulebook.py:1266` |
 | "What is the trading unit?" | HOSE **10 → 100 @ 2021-01-04** (QĐ 894); resolved per instant | `core/constant.py:315`, `rulebook.py:633` |
 | "What are the exchange fees?" | **10 charge ids over 17 dated intervals**: HSX equity 0.0003 → **0.00027 @ 2020-03-19**, PIT sell-side 0.001, derivatives PIT `0.0005 × IM`, VSDC clearing 2,550/contract. (Count: `len(_charge_table())` = 10, `sum(len(v) …)` = 17 — §9 lists all ten) | `rulebook.py:1549-1795` |
 | "What is the daily price band?" | HSX .07 / HNX .10 / UPCoM .15 / HNXDS index .07 / GB .03, all dated. **Confidence differs by venue** — HIGH only from 2021-07-05 (HSX), 2022-03-31 (HNX), 2022-11-16 (UPCoM); **LOW before each**, text never retrieved. See §4 | `rulebook.py:672` |
 | "Can a covered warrant be traded?" | **No — not at any date.** A CW has no percentage band; the row is `_unsourced` **as sourced data**, `daily_trading_limit(HSX, WARRANT)` raises `UnresolvedRule`, and `exchange.py` turns that into `Rejected(INDETERMINATE)`. The formula that *would* apply is recorded. See §5 and §16.3 | `rulebook.py:763-777`, `:2717-2727` |
-| "What is the cure window?" | **Next session** is our default and an *assumed broker term*. The 3-day and 5-day figures in the sources are **clearing-member-to-VSD deadlines**, not investor cure windows — resolved, see §16 decision 5 | `broker.py:74`, `deposit.py:1757` |
-| "Does Vietnam publish a maintenance margin ratio **for derivatives**?" | **No — at no date, 2020–2026.** Maintenance is an absolute MR tested by utilisation. `margin.py`'s `maintenance_rate` models a quantity that does not exist. **The qualifier is load-bearing:** for *equity margin lending* a maintenance ratio floor of **30 %** is published and read verbatim (QĐ 87 Điều 5.2) — see §12. Two different products, two different answers | `margin.py:71-110`; §12 |
+| "What is the cure window?" | **Next session** is our default and an *assumed broker term* — unchanged. The regulated deadlines are now **primary-sourced and definite**, and all are **clearing-member-to-VSDC**, not investor cure windows: top-up **before 09h30 on T+1** (QĐ 26 Điều 13.1) and **03 working days** before VSDC directs *another clearing member* to close you out (Điều 13.3.b; identically Điều 29.5 for a position-limit breach). **The "5 business days" figure is refuted for post-KRX** — it came from a LuatVietnam summary of the superseded edition. See §16 decision 5 | `broker.py:CureWindow`, `deposit.py:MarginMonitor` |
+| "Does Vietnam publish a maintenance margin ratio **for derivatives**?" | **No — at no date, 2020–2026, and this is now primary-sourced rather than reported.** QĐ 26 Điều 13 is a comparison of two absolute values, `assets` vs `MR`; no fraction of notional appears in it. `margin.py`'s `maintenance_rate` models a quantity that does not exist. **The qualifier is load-bearing:** for *equity margin lending* a maintenance ratio floor of **30 %** is published and read verbatim (QĐ 87 Điều 5.2) — see §12. Two different products, two different answers | `margin.py:71-110`; §12 |
+| "Is `MR = IM + VM` still right?" | **Only to 2025-05-04.** QĐ 26 Điều 20 settles position P&L as a separate daily cash movement and Phụ lục 2 §6 assembles MR with **no VM term at all**: `MR = Max(Σ Pgm, 0)`, `Pgm = Max((Rm + Sm + Dm), MM)`. The code implements the pre-KRX shape at every date and says so. **The post-KRX model is specified and NOT BUILT** | `deposit.py` module docstring; `post-krx-margin-spec.md`; §11 |
 | "How is VM computed?" | **Loss-only**, netted account-wide, VSDC verbatim. Gains never relieve the requirement | `deposit.py:729-734` |
 | "What is the max order size?" | HOSE **500,000 from 2021-01-04**; HNXDS 500 contracts; **HNX and UPCoM publish none at any date** | `rulebook.py:1489` |
 | "What price does a match trade at?" | The **resting (passive) order's price**, not the aggressor's — QĐ 352 Điều 6.3, HIGH | `fills.py:48-73` |
@@ -107,15 +127,23 @@ already labelled as an assumption in its own docstring or `PROVENANCE` dict — 
 1. Nothing here needs the author's permission to keep using; it needs the author only if
 a published result turns on it.
 
-### 3A. Broker commercial terms — `market/broker.py`, `BrokerTerms.PROVENANCE:90`
+### 3A. Broker commercial terms — `market/broker.py`, `BrokerTerms.PROVENANCE`
+
+> **A1–A3 were re-graded on 2026-08-26.** They previously read "Ladder **shape** is
+> VSDC-sourced; the **levels** are per-firm and unpublished … the defaults are numerically
+> VSDC's own, so a default run reproduces the depository ladder". **The whole of that is
+> withdrawn except the last clause about the levels.** QĐ 26 Điều 13 was read in full and
+> publishes no ladder for margin; a default run therefore reproduces *our* ladder, not
+> VSDC's. The values did not change — only the claim. Pinned by
+> `test_deposit.py::test_the_margin_utilisation_ladder_is_declared_unsourced`.
 
 | # | Value | Default | Why assumed |
 |---|---|---|---|
-| A1 | `warning_utilisation` | `0.80` | Ladder **shape** is VSDC-sourced; the **levels** are per-firm and unpublished. The defaults are numerically VSDC's own, so a default run reproduces the depository ladder, not a broker's. A real broker example is Pinetree 75/85/90 |
-| A2 | `margin_call_utilisation` | `0.90` | as A1 |
-| A3 | `forced_close_utilisation` | `1.00` | as A1 |
-| A4 | `advance_on_sale_daily_rate` | `0.00031` | Inside the 0.025–0.05 %/day band brokers quote for the **advance**. Two things to know: (i) 0.031 %/day matches **no observed firm** in the rulebook's own 2021 snapshot (§8.3:840 — 0.025 / 0.029 / 0.0329 / 0.033 ×3 / 0.0389 / 0.04 / 0.05) **and is not the rulebook's recommended default of 0.00035/day** (§12.7:1194); (ii) `broker.py:95` attributes the band to margin lending — wrong, see D3 |
-| A5 | `cure_window_sessions` | `1` (NEXT_SESSION) | Author decision 5. No Vietnamese document sets an investor cure window |
+| A1 | `warning_utilisation` | `0.80` | **UNSOURCED, and with no counterpart of any kind in the read text** — QĐ 26 Điều 13 has one state, not three. A real broker example is Pinetree 75/85/90, which is evidence that brokers *do* run ladders, not evidence of these levels |
+| A2 | `margin_call_utilisation` | `0.90` | **UNSOURCED.** Applying a utilisation ladder to margin is our shape. 80/90/100 is primary-sourced at **QĐ 26 Điều 29 for POSITION LIMITS** — a different rule on a different quantity (contracts held vs the published cap), NOT BUILT (§11). Pre-KRX the margin thresholds are **UNVERIFIED, not disproven**: QĐ 61 and QĐ 12 have never been read |
+| A3 | `forced_close_utilisation` | `1.00` | **UNSOURCED as a rung**, but the *only* one with a regulated counterpart: at 1.00 the test `MR / assets ≥ 1` is `assets ≤ MR`, and `assets < MR` is the whole of QĐ 26 Điều 13. Discrepancy is the single boundary `assets == MR` — cured under Điều 13.2.c, breach here. This is why changing the default is a decision, not a cleanup |
+| A4 | `advance_on_sale_daily_rate` | `0.00031` | Inside the 0.025–0.05 %/day band brokers quote for the **advance**. Two things to know: (i) 0.031 %/day matches **no observed firm** in the rulebook's own 2021 snapshot (§8.3:840 — 0.025 / 0.029 / 0.0329 / 0.033 ×3 / 0.0389 / 0.04 / 0.05) **and is not the rulebook's recommended default of 0.00035/day** (§12.7:1194); (ii) the "margin lending" mis-attribution flagged as D3 is **fixed** — `PROVENANCE` now says *the sale advance itself* |
+| A5 | `cure_window_sessions` | `1` (NEXT_SESSION) | Author decision 5, unchanged. **Assumed for the broker→investor window only; the member→VSDC deadlines are now regulated and sourced** (QĐ 26 Điều 13.1 top-up before 09h30 T+1; Điều 13.3.b 03 working days to substitute-member close-out). Corroboration, not a source: HNXDS opens 08:45, so the default deadline sits 45 minutes *inside* the regulated 09h30 — the direction a broker term may move in |
 | A6 | `BrokerProfile.margin_buffer` | `0` | A percentage-of-notional add-on is a plausible **shape** only; the rulebook records that the broker's real lever is its utilisation thresholds |
 
 ### 3B. Sale advance — `session/ledgers.py`, `AdvanceTerms.PROVENANCE:690`
@@ -452,24 +480,35 @@ in `types.py`; `orders.py` holds no second copy.
 
 ## 11. Derivatives and margin
 
-`session/deposit.py` (1,779 lines) is what the session runs. `market/margin.py` is a
+`session/deposit.py` (1,895 lines) is what the session runs. `market/margin.py` is a
 retained batch-research path whose central quantity **does not exist** — do not extend it.
+
+> **Regime notice, 2026-08-26.** QĐ 26/QĐ-HĐTV and its Phụ lục 2 were obtained and read.
+> Everything in this table implements the **pre-KRX** margin regime and is correct for
+> dates to **2025-05-04**. From **2025-05-05** the requirement is assembled differently —
+> `MR = Max(Σ Pgm, 0)`, `Pgm = Max((Rm + Sm + Dm), MM)`, **no variation-margin term** —
+> and none of it is built. The full reading is
+> `docs/reference/post-krx-margin-spec.md`. Two rows below changed *status*, one was
+> withdrawn as a citation, and three new NOT BUILT rows were added.
 
 | Feature | Where | Status | Source / note |
 |---|---|---|---|
-| **`MR = IM + VM`**, computed on the whole account portfolio | `deposit.py:622-755` | IMPLEMENTED + SOURCED | VSDC "Thông tin về ký quỹ" §II.4(a), HIGH. `account_margin_requirement(Position(...))` raises `TypeError` by design — the fifth locked shape |
+| **`MR = IM + VM`**, computed on the whole account portfolio | `deposit.py::account_margin_requirement` | PARTIAL | VSDC "Thông tin về ký quỹ" §II.4(a), HIGH — **and correct only to 2025-05-04.** QĐ 26 Điều 20 settles position P&L as a separate daily cash movement and Phụ lục 2 §6 has no VM term at all, so from the cutover this shape is wrong and is applied anyway, at every date, with the divergence stated in the module docstring. `account_margin_requirement(Position(...))` raises `TypeError` by design — the fifth locked shape, and QĐ 26 Điều 5.5 now sources the per-investor-account unit it enforces (*"cho danh mục vị thế trên từng tài khoản giao dịch của nhà đầu tư"*) |
 | IM recomputed on the **current** price, never entry notional | `:726` | IMPLEMENTED + SOURCED | Rulebook 6.3, HIGH |
 | **VM loss-only**, netted account-wide before the sign test | `:729-734` | IMPLEMENTED + SOURCED | VSDC verbatim: *"chỉ được tính vào … ở trạng thái lỗ"*. A symmetric model mis-times calls in both directions |
 | Offsetting trades attract **no new IM** | `:1351`, `:1514` | IMPLEMENTED + SOURCED | *"giao dịch đối ứng của cùng một tài khoản giao dịch"* |
-| Utilisation ladder 80 / 90 / 100 | `deposit.py:590`, `broker.py:67` | IMPLEMENTED + SOURCED (shape) / ASSUMED (levels) | Art. 13, QĐ 96 → QĐ 61 → QĐ 12 → QĐ 26, HIGH. **A1–A3.** One older MBS PDF misprints level 3 as 90 % — do not cite it |
-| Level 3 = suspension from **opening** new positions, offsetting excepted | `:1323-1341` | IMPLEMENTED + SOURCED | Rulebook 6.3, VSDC §V.4 |
+| Utilisation ladder 80 / 90 / 100 **applied to margin** | `deposit.py::margin_status`, `broker.py` | IMPLEMENTED + **ASSUMED (shape *and* levels)** | **Re-graded 2026-08-26; this row previously read SOURCED (shape).** The chain Art. 13, QĐ 96 → QĐ 61 → QĐ 12 → QĐ 26 was followed to its end: **QĐ 26 Điều 13 contains no percentage.** Post-KRX the attribution is definitively dead; pre-KRX it is **UNVERIFIED, not disproven** — QĐ 61 and QĐ 12 have never been read, so this is a collapsed citation, not a demonstrated error. Numeric defaults unchanged on purpose. **A1–A3.** One older MBS PDF misprints level 3 as 90 % — do not cite it either |
+| — the one rung that *is* sourced: `forced_close_utilisation = 1.00` | `deposit.py::margin_status` | IMPLEMENTED + SOURCED | `MR / assets ≥ 1` ≡ `assets ≤ MR`; QĐ 26 Điều 13 tests `assets < MR`. Coincide except at `assets == MR`, cured under Điều 13.2.c and a breach here |
+| Warning ladder 80 / 90 / 100 **on POSITION LIMITS** — where the primary text actually puts it | — | **NOT BUILT** | **QĐ 26 Điều 29**, HIGH, read verbatim: level 1 at 80 %, level 2 at 90 %, level 3 at 100 % of *giới hạn vị thế*; 1 and 2 are notices to the clearing member (Điều 29.2); level 3 suspends the account, permits **only** offsetting trades, gives **03 working days**, and **invalidates an offsetting trade that fails to bring the account below level 3** (Điều 29.3.b), routing it to the error-handling account (Điều 29.4). **Three reasons it is not a small addition:** (1) we do not compute the quantity the percentages apply to — Điều 27.2.a counts across expiry months, we count per contract code (D33); (2) `DerivativesAccount` has **no account-level suspension state**, only per-order gates, so a level-3 suspension has nowhere to live; (3) Điều 29.3.b is a **post-match invalidation**, and nothing in the session models reversing a matched trade. Levels 1 and 2 would also need event vocabulary in `types.py`/`exchange.py`, outside this module |
+| Level 3 = suspension from **opening** new positions, offsetting excepted | `deposit.py::reserve_for_order` | IMPLEMENTED + SOURCED (behaviour) / ASSUMED (trigger) | **Behaviour upgraded to primary-sourced:** QĐ 26 Điều 13.2.a wires the member to *"không thực hiện giao dịch mở mới vị thế trên tài khoản vi phạm, ngoại trừ giao dịch đối ứng để đóng vị thế"*. The **trigger** is ours: Điều 13 fires on `assets < MR`, not on a 100 % rung. "Level 3" is the code's name for the top rung and is **not** a citation to Điều 29's level 3 |
 | IM ratio series, dated | `margin.py:129`, `rulebook.py:1355` | IMPLEMENTED + SOURCED | 0.10 / 0.13 / 0.17. Press-sourced, **no quyết định number exists**; 0.175 matches nothing at any date |
 | Contract multipliers, dated and cited | `deposit.py:495-587` | PARTIAL | VN30F 100,000 (2017-08-10), VN100F 100,000 (2025-10-10), GB05 10,000 (2019-07-04), GB10 10,000 (2021-06-28) — all HIGH, and `deposit.multiplier_for` **raises** on a missing one, so **margin is always right**. **"Never defaulted" is false through the adapter path:** `adapters/datahub.py:38` matches `^(VN30F\|VN100F\|GB\d)` and `:239-248` stamps `multiplier=100000` on **every** match; `SymbolRouter.instrument` (`rulebook.py:2732-2733`) takes `base.multiplier` from the source when one exists and only falls back to `_default_multiplier` (`:2774-2786`, correctly GB → 10,000) when there is none. Verified live: no-source `GB05F2312` → 10,000; DataHub-shaped `GB05F2312` → 100,000. `session.instrument()` therefore returns the wrong number to the caller (D25) |
-| Position limits | `:1229-1290` | PARTIAL | See §4. Enforced at exactly one site and only when `rules is not None`; `InvestorClass` is never asked of the caller (A58). Three declared conventions ride here: the cap is tested against the **worst-case net** (A70), margin charged is the **increment** and therefore order-dependent (A71), and a `BrokerProfile.margin_buffer` disagreeing with the account's **raises** rather than picking one |
-| Margin withdrawal bound = `balance − MR / forced_close_utilisation` | `:1087-1173` | IMPLEMENTED + SOURCED | Rulebook line 602, VSDC §VI and §IV.3, HIGH, three conditions. Condition (2) — securities withdrawn ≤ posted — has no representation because collateral is cash-only |
+| Position limits | `deposit.py::reserve_for_order` | PARTIAL | See §4. Enforced at exactly one site and only when `rules is not None`; `InvestorClass` is never asked of the caller (A58). Three declared conventions ride here: the cap is tested against the **worst-case net** (A70), margin charged is the **increment** and therefore order-dependent (A71), and a `BrokerProfile.margin_buffer` disagreeing with the account's **raises** rather than picking one. **Two new sourced divergences, 2026-08-26:** the count is per expiry where Điều 27.2.a sums across expiries (**D33**), and the cap is exclusive where Điều 29.1.c is inclusive (**D34**). QĐ 26 Điều 27.1 confirms the mechanism and publishes no number, so the LOW grade on the values stands |
+| Margin withdrawal bound = `balance − MR / forced_close_utilisation` | `deposit.py::transfer_out` | IMPLEMENTED + SOURCED | Rulebook line 602, VSDC §VI and §IV.3, HIGH — **and now primary-sourced: QĐ 26 Điều 11.1 states the same three conditions verbatim.** Condition (2) — securities withdrawn ≤ posted — has no representation because collateral is cash-only. Condition (3) is **narrower than the source**: Điều 11.1.c bars withdrawal from an account suspended for margin breach, position-limit breach *or* payment default; we test only the first (**D35**) |
 | Segregated deposit; **no auto-transfer** | `:762-846` | IMPLEMENTED + SOURCED | Rulebook 6.3, HIGH. Segregation is an import boundary: the module cannot reach securities cash |
 | `DepositEntry` / `DerivativesAccount.entries` — a full audit trail of every deposit movement | `:231-246`, `:906-908` | IMPLEMENTED + SOURCED | `[design]` §7.4 — a `ForcedLiquidation` must state "the resulting deposit balance", which is not reportable from a scalar mutated in place. `amount` is signed; every entry carries `balance_after` |
-| `MarginMonitor` — carries a call across days, cure measured in **sessions** | `:1619-1769` | IMPLEMENTED + ASSUMED | A5. `INDETERMINATE` advances **no state**: a deadline that passes during a blind stretch survives it |
+| `MarginMonitor` — carries a call across days, cure measured in **sessions** | `deposit.py::MarginMonitor` | IMPLEMENTED + ASSUMED | A5. `INDETERMINATE` advances **no state**: a deadline that passes during a blind stretch survives it. The docstring's old hedge (*"do not hard-code either number"*, resting on a LuatVietnam summary) is replaced by the sourced member-side deadlines — 16h30 wire, 09h30 T+1 top-up, 03 working days to substitute-member close-out |
+| Intraday margin checkpoints **09h30 / 14h00 / 16h30** | — | **NOT BUILT** | Author decision 4 says MUST HAVE. The times are now primary-sourced (QĐ 26 Điều 13.2), superseding the "09:30 and 14:30" broker figure. `MarginMonitor.on_mark` is driven by whatever instants the caller marks at; there is no checkpoint schedule. Implementation shape unchanged from §16.1: **exchange/depository config keyed by date**, pre-KRX continuous / post-KRX three checkpoints |
 | Realised close-out into the deposit, measured from the VM reference | `:1392-1466` | IMPLEMENTED + SOURCED | `[design]` — No Vietnamese rule states it; the design property is that the deposit movement exactly cancels the VM being charged, so no double count is possible |
 | Expiry settlement | `:1468`, `exchange.py:2425` | PARTIAL | Prefers a published settlement price; falls back to the expiry-day close with `substituted=True` (A56). **A56 names two tiers; there are three** — see the next row |
 | **`SettlementResolver` — the three-tier settlement chain** | `expiry.py:1-18`, `:58`, `:78`, `:92`, `:106`; `verdicts.py:51-56` | PARTIAL | (1) `PUBLISHED` — real `quote_settlementprice` rows, with corrupt rows excluded (`price < 100000`, because their price is the HHMMSS of their own timestamp); (2) **`TWAP_30M`** — time-weighted mean of matched price 14:15–14:45, recovered empirically at a mean error of **0.74 index points**, and it **requires the raw tick archive**; (3) `CLOSE_PROXY` — `quote_close`, the only tier on Parquet. Carries a sourced **negative** finding: `quote_reference` is deliberately excluded because it equals the previous close on **1,731 of 1,968** VN30F pairs. **The session cannot distinguish an adapter-computed TWAP from a published row** (`exchange.py:2447` says so), and every expiry settles on `CLOSE_PROXY` without the archive |
@@ -478,9 +517,10 @@ retained batch-research path whose central quantity **does not exist** — do no
 | Forced liquidation | `exchange.py:2326-2404` | PARTIAL | **Reports only.** `FORCED_LIQUIDATION` carries `detail['executed'] = False`, the selection rule and the sequence. Nothing is closed |
 | `LARGEST_LOSS_FIRST` ordering | `deposit.py:1580` | IMPLEMENTED + ASSUMED | A54. `PRO_RATA` raises `NotImplementedError` — it is an allocation, not an ordering |
 | Daily settlement rebaseline (`settle_daily`) | `:1190-1217` | PARTIAL | Exists and is tested, but **no session path calls it** — see D1 |
-| Cross-contract spread credit / portfolio margining | — | DEFERRED | The formula is in VSDC's unpublished Phụ lục 02. Strict per-contract sum over-charges, never under-charges |
-| Post-KRX margin model | `rulebook.py:1403` | DEFERRED | `margin_model()` **raises** rather than extending the pre-KRX shape. See §16 for what the research established about it |
-| Securities as margin collateral | — | DEFERRED | Author decision 2 — cash only for the MVP |
+| Cross-contract spread credit / portfolio margining | — | DEFERRED | **The reason has changed: the formula is no longer unobtainable.** Phụ lục 2 §2 gives it in full — `OA = (B + S) × C × Psr`, over underlying-asset groups formed on Kendall-tau ≥ 0.9 across ≥ 3 years. It is **correctly zero on our corpus anyway**: there is exactly one derivatives underlying in it, so no group can form. Strict per-contract sum over-charges, never under-charges |
+| Post-KRX margin model | `rulebook.py:1403` | DEFERRED | `margin_model()` **raises** rather than extending the pre-KRX shape. The refusal is still right and is now better justified: the post-KRX shape is not an extension of the pre-KRX one, it is a different assembly |
+| **Post-KRX scenario margin** — `Rm` (21-scenario grid), `Sm` (basis), `Dm` (delivery), `MM` (minimum), and the `MR = Max(Σ Pgm, 0)` assembly | — | **NOT BUILT** | Spec: **`docs/reference/post-krx-margin-spec.md`**, read out of QĐ 26 Phụ lục 2 (§1–§6) with every formula quoted verbatim. **Not built because the author has not taken the decision**, not because it is impossible: `Rm` and the MR assembly are implementable on the corpus today. What is *not* implementable: **`Sm`** — `quote_settlementprice` holds 18 distinct dates of intraday tick samples, not a daily DSP series, so it is the wrong shape and not merely short; **`Dm`** — fails on every input independently, and GB futures are out of scope by decision 3. Two source defects bind on any build: the scenario table prints `Sk = S0 × (1 + rate/10)` with **no `k` on the right-hand side** in all 21 rows, and §1.3.c announces the ratio formula then **omits the expression**. Both are recorded in the spec's defect register; neither has been guessed at |
+| Securities as margin collateral | — | DEFERRED | Author decision 2 — cash only for the MVP. **The haircuts are now primary-sourced** and no longer UNVERIFIED: QĐ 26 **Điều 9**, in the body and not an appendix — **5 %** government and government-guaranteed bonds, **30 %** VN30/HNX30 constituents, **40 %** everything else, changeable by VSDC on **01 working day's** notice. Eligibility is Điều 6 (ETF units excluded); the list and its haircuts are republished every 6 months. **What is still missing is the arithmetic, not the rate:** Điều 8.1's valuation formula did not survive extraction — the variable list is there (`VKQ`, `C`, `MR`, `x = 80 %` minimum cash margin ratio, `QKQ`, `P`, `H`) and the equation is not, so the 80 % is confirmed as *a rate named "tỷ lệ ký quỹ bằng tiền tối thiểu"* and **not** confirmed as "80 % of MR" |
 | Government bond futures as a product | — | DEFERRED | Author decision 3. The multiplier exists and is sourced; the product is out of scope |
 | Legacy `margin.py` per-position model | `margin.py:249` | DEFERRED | Wrong shape (per-position, symmetric, requirement frozen at entry) and models a non-existent maintenance ratio. Retained only because published figures were computed on it. See `margin-model-adjudication.md` |
 
@@ -603,21 +643,28 @@ different regulator, a different custody chain and a different call test.
 
 **Decision 2 — cash-only collateral (A57).** Already how `deposit.py` behaves: assets are
 `deposit_balance` alone. Future work is the securities leg: the eligible-collateral list,
-the VSDC haircuts, and the ≥80 % minimum cash share. Note the denominator moved at the
-cutover: pre-KRX it is cash / total margin assets; post-KRX TT 58 Điều 13.4 and QĐ 26
-Điều 8 make it **80 % of MR**. For equity margin lending the analogue is the per-ticker
-`loan_ratio` haircut.
+the VSDC haircuts, and the ≥80 % minimum cash share. For equity margin lending the
+analogue is the per-ticker `loan_ratio` haircut.
 
-> **Grade on the haircuts, added 2026-08-26 after audit.** The claim that the haircuts are
-> "now sourced — 5 % government bonds, 30 % VN30/HNX30 constituents, 40 % everything else,
-> in the *body* at QĐ 61/12 Điều 8 and QĐ 26 Điều 9" **overturns a row the rulebook grades
-> `UNVERIFIED`** (§6.3:600, *"Valuation percentages for securities collateral are in
-> rulebook appendices VSDC does not publish"*), and it carries **no source, no grade and
-> no retrieval note**. QĐ 26 is graded **`medium (never read)`** at rulebook §6.5:634.
-> **Treat the three percentages as REPORTED, not VERIFIED**, until the document is
-> obtained and the retrieval recorded. The *structural* claim — that the percentages live
-> in the body rather than an appendix — is what actually needs the citation, because it is
-> the part that says the rulebook's row is wrong.
+> **Resolved 2026-08-26 — QĐ 26 obtained and read.** The audit box that stood here asked
+> for the document before believing the haircuts. The document is now in hand and the
+> percentages are **VERIFIED**, not merely reported: QĐ 26 **Điều 9.1** — 5 % government
+> and government-guaranteed bonds, 30 % VN30/HNX30 constituents, 40 % all other
+> securities, with Điều 9.2 letting VSDC change them on **01 working day's** written
+> notice. The **structural** claim the audit correctly identified as load-bearing is also
+> confirmed: they are in the **body**, at an article, not in an unpublished appendix — so
+> rulebook §6.3:600's `UNVERIFIED` row (*"Valuation percentages … are in rulebook
+> appendices VSDC does not publish"*) is **overturned for post-KRX**. It stands for
+> pre-KRX, where QĐ 61 and QĐ 12 remain unread.
+>
+> **One half of the old text did NOT survive and has been deleted.** It claimed "post-KRX
+> TT 58 Điều 13.4 and QĐ 26 Điều 8 make it **80 % of MR**". QĐ 26 Điều 8.1 defines
+> `x = tỷ lệ ký quỹ bằng tiền tối thiểu (80 %)` in its variable list and then **the
+> equation itself does not survive extraction** — the line reads *"Giá trị tài sản ký quỹ
+> hợp lệ được xác định theo công thức sau:"* followed directly by *"Trong đó:"*. So the
+> rate is confirmed and its **denominator is not**. The variable list contains `MR`, which
+> is consistent with "80 % of MR" and does not establish it. Do not restate the
+> denominator as sourced.
 
 **Decision 3 — government bond futures out of scope.** What exists and stays: the
 multipliers `GB05 = GB10 = 10,000` (rulebook 4.1, HIGH, corroborated arithmetically —
@@ -633,77 +680,97 @@ because every session runs `InvestorClass.INDIVIDUAL`, whose GB cap is 0.
 **Decision 4 — intraday margin checkpoints. Answering the policy question before building.**
 The cutover **did** change them, and the value currently in our rulebook is wrong.
 
-> **Read this before acting on anything below. Added 2026-08-26 after audit.**
-> Everything in this sub-section rests on **VSDC QĐ 26/QĐ-HĐTV (2025-04-16)**, which our
-> own rulebook grades **`medium (never read)`** (§6.5:634), plus TT 58 Điều 10.3(a). The
-> article-level readings below (QĐ 26 Điều 5, 8, 9, 10.1.a, 13.2, 29) are stated as fact
-> and **carry no retrieval note**: no copy of QĐ 26 exists in this repository, so nothing
-> here can be corroborated or refuted from the codebase. **Each correction is graded
-> individually in the table below. Do not silently rely on either the current rulebook
-> rows or these corrections** — obtain QĐ 26 first. This is the section a next session
-> will act on first, which is exactly why the grade has to travel with it.
+> **The caveat that stood here is DISCHARGED, 2026-08-26.** It read: *"Everything in this
+> sub-section rests on VSDC QĐ 26/QĐ-HĐTV (2025-04-16), which our own rulebook grades
+> `medium (never read)` … no copy of QĐ 26 exists in this repository, so nothing here can
+> be corroborated or refuted … obtain QĐ 26 first."* **QĐ 26 and its Phụ lục 2 have now
+> been obtained and read in full.** Every article-level reading below has been checked
+> against the primary text; six of the seven corrections are confirmed, one is refuted,
+> and the grades are restated accordingly. The one thing that did **not** survive
+> unchanged is row 5. Provenance of the copy: thuvienphapluat.vn is Cloudflare-blocked to
+> automated fetching, so the documents came from the author directly.
 
 | | Pre-KRX (2022-06-01 → 2025-05-04, QĐ 61 → QĐ 12) | Post-KRX (2025-05-05 →, QĐ 26) |
 |---|---|---|
-| Who computes | VSD, **in-session, in real time** | VSDC, **after the close** |
-| What is tested | `utilisation = MR / valid margin assets` against **80 / 90 / 100** | **Binary**: margin assets vs MR. The utilisation ladder is **abolished for margin** and survives only for position limits (Điều 29) |
-| Checkpoints | none fixed — continuous monitoring | **09:30** (suspend newly violating accounts) · **14:00** (restore those now compliant) · **≤ 16:30** (recompute MR and assets; restore) |
-| Top-up deadline | intraday, at the member's demand | member must top up **before 09:30 on T+1** after the ≤16:30 T notice |
-| Member cure | 3 business days at margin level 3; 5 business days at position-limit level 3 | 3 business days from the violation wire |
+| Who computes | VSD, **in-session, in real time** | VSDC, **after the close** — Điều 5.5, *"tính toán sau khi kết thúc phiên giao dịch"* |
+| What is tested | `utilisation = MR / valid margin assets` against **80 / 90 / 100** — **UNVERIFIED, see below** | **Binary**: `assets < MR` (Điều 13.1). No percentage appears in Điều 13. 80/90/100 survives at Điều 29, **on position limits** |
+| Checkpoints | none fixed — continuous monitoring | **09h30** (suspend newly violating accounts; no new positions, offsetting only) · **14h00** (restore those now compliant) · **≤ 16h30** (recompute MR and assets; restore) — Điều 13.2.a/b/c |
+| Top-up deadline | intraday, at the member's demand | member must top up **before 09h30 on T+1** after the ≤16h30 T notice — Điều 13.1 |
+| Member cure | 3 business days at margin level 3; ~~5 business days at position-limit level 3~~ | **03 working days for both** — Điều 13.3.b (margin) and Điều 29.5 (position limit), same window, same substitute-clearing-member mechanism |
+
+> **Do not read the pre-KRX column as verified.** QĐ 61 and QĐ 12 have **never been read**.
+> The 80/90/100 margin ladder in that column is **UNVERIFIED, not disproven** — QĐ 26
+> removing a ladder that QĐ 61 had is entirely consistent with everything now in hand, and
+> so is QĐ 61 never having had one. Nobody has checked. The citation chain broke at its
+> last link; it has not been shown to be false at the others.
 
 Corrections to `docs/reference/vn-exchange-rulebook-2020-2026.md` §6.3 that this
-establishes — record them there when that file is next edited, **do not silently rely on
-the current rows**. Each is graded against the row it would overturn:
+establishes. **The rulebook was updated on 2026-08-26 and its §9.6 logs the same
+corrections**; the grades below are restated against the primary text:
 
-| # | Row it overturns | That row's grade | Grade of the correction |
+| # | Row it overturns | That row's grade | Verdict against the primary text |
 |---|---|---|---|
-| 1 | rulebook:596 intraday checkpoints "09:30 and 14:30" | `low` (Pinetree) | **REPORTED (QĐ 26 Điều 13.2, never read).** Safe direction — it replaces a broker attribution with a depository one |
-| 2 | rulebook:597 "Freeze and restore … kind: broker term" | `low` | **REPORTED**, same source, same caveat |
-| 3 | rulebook:595 "no post-KRX IM percentage published … Pinetree explicitly confirms" | ungraded prose | **WELL FOUNDED, needs no external source.** The rulebook already contradicts itself: :574 gives 0.17 from VSDC appendices at effective dates through **2026-08-21**, graded `high`. Fix :595 on the strength of :574 alone |
-| 4 | rulebook:593 "Post-margin model (COMS)" | `medium` | **REPORTED (QĐ 26 Điều 10.1.a, Điều 5; TT 58 Điều 10.3(a) — none read)** |
-| 5 | rulebook:592 the "3 vs 5 business day" CONFLICT | `low` | **REPORTED**, but the reconciliation is internally coherent and matches the hypothesis the row itself records |
-| 6 | rulebook:588 "at 90 % warns positions will be closed" | **`high`** | **REPORTED and UNCORROBORATED — the weakest correction in this table.** It overturns a HIGH row using a document nobody read. Do not apply without QĐ 26 |
-| 7 | rulebook:579 "(c) other factors VSD considers necessary" | **`high`** ("verbatim Vietnamese available on that page") | **REPORTED and UNCORROBORATED.** Same objection as #6 |
+| 1 | rulebook:596 intraday checkpoints "09:30 and 14:30" | `low` (Pinetree) | **CONFIRMED and extended.** Điều 13.2 gives **09h30 / 14h00 / 16h30** — three, not two, and 14h00 not 14h30 |
+| 2 | rulebook:597 "Freeze and restore … kind: broker term" | `low` | **CONFIRMED.** Điều 13.2.a/b is a depository rule: VSDC wires HNX to suspend, then to restore |
+| 3 | rulebook:595 "no post-KRX IM percentage published … Pinetree explicitly confirms" | ungraded prose | **REFUTED by the primary text**, which is stronger than the internal argument that stood here. Điều 5.1.1.b **requires** VSDC to compute the ratio, re-determine it on the 1st / 10th / 20th of each month, and publish it on its website **≥ 02 working days before it applies** |
+| 4 | rulebook:593 "Post-margin model (COMS)" | `medium` | **CONFIRMED on both halves.** Điều 10.1.a keeps cash at NHTT in an account in VSDC's name; Điều 5.5 computes MR after the close. Điều 5 names the four Vietnamese components (ký quỹ rủi ro / song hành / chuyển giao / tối thiểu) and no "COMS formula" |
+| 5 | rulebook:592 the "3 vs 5 business day" CONFLICT | `low` | **PARTLY REFUTED — the one correction that did not survive.** The reconciliation's *shape* was right (both are member-to-VSDC deadlines, neither is an investor cure window), but the **numbers are not 3 and 5**: QĐ 26 gives **03 working days for both** paths (Điều 13.3.b, Điều 29.5). The 5-day figure came from a LuatVietnam summary of the superseded edition and has no post-KRX counterpart |
+| 6 | rulebook:588 "at 90 % warns positions will be closed" | **`high`** | **CONFIRMED, and more strongly than claimed.** It is not that Điều 13 makes 90 % a mere notice — **Điều 13 has no percentages at all**. What levels 1 and 2 describe is Điều 29's position-limit ladder, where 29.2 makes them notices to the clearing member |
+| 7 | rulebook:579 "(c) other factors VSD considers necessary" | **`high`** | **CONFIRMED with a qualification.** Điều 5.1.1 gives the risk margin **two** inputs — tỷ lệ ký quỹ ban đầu and giá trị giảm trừ ký quỹ — so "two, not three" holds. But Điều 5.1.1.b does reserve a discretion: *"Trường hợp cần thiết, VSDC có quyền đánh giá lại tỷ lệ ký quỹ ban đầu căn cứ vào biến động thực tế của thị trường"*, effective the working day after publication. That is discretion over **the ratio**, not a third input to the computation. Do not restate it as absent |
 
-1. "Intraday margin checkpoints — 09:30 and 14:30" is **wrong**: QĐ 26 Điều 13.2 gives
-   **09:30 and 14:00**, plus a 16:30 step. The 14:30 figure is a broker (Pinetree) error.
-2. "Freeze and restore … kind: broker term" is **mis-classified** — it is QĐ 26 Điều
-   13.2(a)(b), a depository rule.
-3. "no post-KRX IM percentage published … Pinetree explicitly confirms" is **refuted**:
-   VSDC published 0.17 effective 2025-05-16, twelve days after go-live, and monthly since.
-4. "Post-margin model (COMS) … margin is held at the clearing member and the investor
-   trades immediately" is **wrong on both halves**: QĐ 26 Điều 10.1.a keeps custody at
-   VSDC via the settlement bank, and TT 58 Điều 10.3(a) still requires full IM **before**
-   trading. What changed is *when MR is computed*. QĐ 26 Điều 5 names four Vietnamese
-   components (ký quỹ rủi ro, ký quỹ song hành, ký quỹ chuyển giao, ký quỹ tối thiểu),
-   not a "COMS formula".
-5. The "3 vs 5 business day" CONFLICT is **resolved**, and the hypothesised
-   reconciliation was right: 3 days is the **clearing-member's** deadline to VSD at margin
-   level 3; 5 days is the member's deadline at **position-limit** level 3. Neither is an
-   investor cure window.
-6. "Action at each level … at 90 % warns positions will be closed" is **not a rule** —
-   Điều 13.2 says levels 1 and 2 produce a notice to the member and nothing else.
-7. "How VSD determines the ratio … (c) other factors VSD considers necessary" is **not in
-   the operative rulebook** for any date after 2022-06-01. Two inputs, not three.
+**Obtained since, and what it changed.** **Phụ lục 2 of QĐ 26** — previously described
+here as "still unobtainable … the highest-value remaining document in the derivatives
+domain" — was obtained on 2026-08-26 and read in full. It gives the scenario set and the
+formulas for risk margin, the margin offset, spread margin, minimum margin and the MR
+assembly. The reading is `docs/reference/post-krx-margin-spec.md`; the consequence for
+this inventory is a new **NOT BUILT** row in §11, not a build.
 
-**Still unobtainable, and the reason the post-KRX MR cannot be computed at all:**
-**Phụ lục 2 of QĐ 26** — the scenario set and the formulas for risk margin, the margin
-offset, spread margin and minimum margin. Paywalled on LuatVietnam, unpublished by VSDC.
-This is the highest-value remaining document in the derivatives domain. Also missing: the
-QĐ 26 Điều 8 collateral-valuation formula image (variables known, arithmetic not), any
-published GB delivery-margin ratio at any date, and the whole 2020-01-01 → 2022-05-31
-regime (QĐ 96/QĐ-VSD, ~40 % of the window, never read — **do not use the stale VSDC web
-page as a proxy for it**, it demonstrably differs from QĐ 61 in at least two places).
+**Still missing, and now precisely bounded:**
 
-**Implementation shape when this is built:** the checkpoint times are **exchange/depository
-config keyed by date**, not broker terms; the pre-KRX branch is a continuous test and the
-post-KRX branch is a three-checkpoint schedule; and the two branches must both exist
-because the rulebook edition already switches at 2025-05-05.
+1. **QĐ 26 Điều 8.1's collateral-valuation equation.** The variable list survives (`VKQ`,
+   `C`, `MR`, `x = 80 %`, `QKQ`, `P`, `H`); the formula line does not. So the haircut has
+   a confirmed *rate* (Điều 9) and an unconfirmed *application*.
+2. **Phụ lục 2 §1.3.c's initial-margin-ratio expression.** The heading is there, `n` is
+   defined, and the formula is absent — so `VaR = mean + 3δ` is computable and the ratio
+   it feeds is not. **Nobody guessed √n.**
+3. **Điều 7.3's bond conversion factors** — same failure mode, GB-only, out of scope by
+   decision 3.
+4. **QĐ 61/QĐ-VSD and QĐ 12/QĐ-HĐTV**, still never read. This is now the highest-value
+   gap in the domain, because the pre-KRX regime is what the code actually implements and
+   what every corpus date falls in.
+5. The whole 2020-01-01 → 2022-05-31 regime (QĐ 96/QĐ-VSD, ~40 % of the window, never
+   read — **do not use the stale VSDC web page as a proxy for it**, it demonstrably
+   differs from QĐ 61 in at least two places).
+6. Any published GB delivery-margin *ratio* at any date. Note the *formulas* for `Dm` are
+   now in hand (Phụ lục 2 §4); it is the inputs that are missing.
+
+**Implementation shape when this is built:** unchanged, and now confirmed by the primary
+text. The checkpoint times are **exchange/depository config keyed by date**, not broker
+terms; the pre-KRX branch is a continuous test and the post-KRX branch is a
+three-checkpoint schedule at **09h30 / 14h00 / 16h30**; and the two branches must both
+exist because the rulebook edition switches at 2025-05-05. What the primary text adds is
+that the post-KRX checkpoints are not merely times to re-test at — each does a *different*
+thing (suspend new violators / restore the cured / recompute), so a single "re-mark at
+these three instants" loop does not express Điều 13.2.
 
 **Decision 5 — cure window defaults to next session (A5).** Already the implementation:
 `BrokerTerms.cure_window_sessions = CureWindow.NEXT_SESSION = 1`, advanced through
 `TradingCalendar.next_session_open`, i.e. **sessions, not settlement business days** (the
-two diverge around Tết). Stated as an assumption in `broker.py:90`.
+two diverge around Tết). Stated as an assumption in `BrokerTerms.PROVENANCE`.
+
+> **Re-scoped 2026-08-26. The default is unchanged; what changed is what it is a default
+> *for*.** The old text called the cure window a broker term full stop. It is **partly
+> regulated**, and the regulated half is now primary-sourced to QĐ 26 Điều 13: MR wired to
+> the member by **16h30**; top-up due **before 09h30 the next trading day**; **03 working
+> days** from the wire before VSDC directs *another clearing member* to place the
+> offsetting trades (Điều 13.3.b — and Điều 29.5 for a position-limit breach, the same
+> window). All three run **clearing member ↔ VSDC**. None is a broker's deadline to a
+> retail client, and nothing anyone on this project has read sets that one — so `A5`
+> stays an assumption and the number stays in `BrokerTerms`, not in the dated rulebook.
+>
+> One corroboration worth having, and it is *not* a source: HNXDS opens at **08:45**, so
+> the default `NEXT_SESSION` deadline lands 45 minutes **inside** the regulated 09h30 T+1
+> top-up. A broker term may be tighter than the rule it sits under; it may not be looser.
 
 **It is already user-configurable — an earlier revision of this paragraph was wrong.**
 `BrokerProfile.from_config` (`types.py:2449-2484`) accepts `margin_cure_window` as either
@@ -728,7 +795,8 @@ that would replace the assumed default — see §16.2.
 | **Corporate-action engine wired into `advance_to`** | A CA feed is exogenous data; a session that invented an ex-date would be worse than one that says it does not know | `corporate.py:18` |
 | **Put-through trading** | Out of scope; `Side.CROSS` raises rather than being silently mis-modelled | `exchange.py:1630` |
 | **Auction allocation at the marginal price** | Sourced as an **absence** — UNVERIFIED in rulebook 2.4. Drawing a number for an unwritten rule is treated as worse than drawing one for an unobservable queue position | `fills.py:1141` |
-| **Portfolio margining / spread credits** | The formula is in VSDC's unpublished Phụ lục 02 | `deposit.py:681` |
+| **Portfolio margining / spread credits** | ~~The formula is in VSDC's unpublished Phụ lục 02~~ — **the reason is spent.** Phụ lục 2 was obtained 2026-08-26 and §2 gives `OA = (B + S) × C × Psr` in full. It is now deferred for a different and better reason: it is **correctly zero on our corpus**, which holds exactly one derivatives underlying, so no Kendall-tau ≥ 0.9 group can form | `deposit.py::account_margin_requirement`; `post-krx-margin-spec.md` §5 |
+| **Post-KRX scenario margin** (`Rm` / `Sm` / `Dm` / `MM` and the `MR = Max(Σ Pgm, 0)` assembly) | Specified in full and **not built by decision-not-yet-taken**, which is a gap, not a deferral — listed here so it is not mistaken for one. `Rm` and the assembly are implementable today; `Sm` is blocked on data *shape* (`quote_settlementprice` is an intraday tick sample over 18 dates, not a daily DSP series) and two formulas are missing from the gazetted text | `post-krx-margin-spec.md`; §11 |
 | **Amend price / amend-up** | Re-taking a reservation on the same key is refused by design, and release-then-retake can fail after the release and leave a live order unfunded | `exchange.py:938` |
 
 ### 16.3 NOT BUILT with no decision recorded — the real gaps
@@ -770,6 +838,20 @@ These are not deferrals. Nobody decided them.
     outside a pytest run** (D31). They are a legacy portfolio/P&L layer, out of scope by
     the project goal — the caller owns P&L — so the honest options are "delete" or "fix
     the import", and nobody has decided which.
+20. **The Điều 29 position-limit warning ladder.** 80 / 90 / 100 % of *giới hạn vị thế*,
+    three levels, level 3 suspending the account and permitting only offsetting trades,
+    with an offsetting trade **invalidated** if it fails to bring the account below level
+    3 (QĐ 26 Điều 29.1–29.5, read verbatim). This is where the primary text actually puts
+    the 80/90/100 ladder, and it is the rule we spent years mis-citing at Điều 13. Not
+    built; §11 gives the three reasons, of which the binding one is D33 — we do not
+    compute the quantity the percentages apply to.
+21. **Account-level suspension state.** `DerivativesAccount` has per-order gates and no
+    suspended/not-suspended flag, so QĐ 26's three grounds for suspension (margin breach
+    Điều 13.2.a, position-limit breach Điều 29.3.a, payment default Điều 26.3) collapse
+    into one implicit condition, `MarginStatus.FORCED`. This is the prerequisite for #20
+    and for D35, and nobody has decided to add it.
+22. **Post-KRX margin (`Rm` / `Sm` / `Dm` / `MM`).** Specified, not built, decision not
+    taken. See §11 and `post-krx-margin-spec.md`.
 
 ---
 
@@ -782,7 +864,6 @@ prove very little on their own** (standing rule 4).
 |---|---|---|
 | D1 | `settle_daily` is documented as the DSP rebaseline but **no session path calls it**, so VM is measured from `average_entry` for the life of every position (A60) | `deposit.py:1190` vs `exchange.py` |
 | D2 | `ExchangeSession.transfer`'s docstring says the deposit withdrawal is bounded by `free_deposit`; it is bounded by `balance − MR/threshold`, which `deposit.py` explicitly says is **not** `free_deposit` | `exchange.py:1083` vs `deposit.py:1113` |
-| D3 | **Provenance conflict on the advance rate — now adjudicated: `ledgers.py:691` is right, `broker.py:95` is wrong.** The rulebook puts the 0.025–0.05 %/day band squarely under *"Advance on sale proceeds (ứng trước tiền bán)"* — §8.3:839-843 (the 2021 nine-broker snapshot: 0.025 / 0.029 / 0.0329 / 0.033 ×3 / 0.0389 / 0.04 / 0.05 %/day) and §12.7:1194 (*"0.00025–0.0005 per day; default 0.00035/day"*). So the band **is** observed for the advance, and `broker.py:95`'s "which is a different product" mis-attributes it. **Independently true and worth recording, so the confusion does not recur:** equity margin-lending rates fall in the same band (SSI 13.5 %/năm ÷ 360 = 0.0375 %/day; DNSE 0.0342 %/day, both re-fetched 2026-08-26). The bands coincide; the provenance does not. **Fix: reword `broker.py:95-97`** | `ledgers.py:691`, `broker.py:95` |
 | D4 | `MarginView.initial_margin` is populated as IM + resting-order margin while its own docstring defines it as IM alone (`posted_margin` is the real IM). No double count; the **name** is wrong | `deposit.py:745` vs `types.py:1568` |
 | D5 | `_session_refusal` stamps `INDETERMINATE` purely on `phase is UNKNOWN`, mislabelling three **definite** refusals (already-terminal, non-amendable type, quantity-below-filled) as ignorance | `orders.py:1130` |
 | D6 | `StatefulRule` is a second rejection enum the code itself says must be merged into `verdicts.AdmissionRule`; a rejection-log consumer must read the `RejectionRule` union | `types.py:524` |
@@ -811,6 +892,11 @@ prove very little on their own** (standing rule 4).
 | D29 | **`third_thursday` exists twice** — `expiry.py:46` and `adapters/datahub.py:84` — and the adapter carries its own `_CONTRACT_MONTH_RE` (`:39`, `^VN30F(\d{2})(\d{2})$`) which is **narrower** than its own `_FUTURES_RE` (`^(VN30F\|VN100F\|GB\d)`), so a VN100F or GB contract matched as a future gets `expiry=None`. Same drift risk as D7 | `expiry.py:46`, `adapters/datahub.py:84`, `:39` |
 | D30 | **A dead branch documented as live.** `SymbolRouter.instrument`'s `if limit is None` (`rulebook.py:2721-2727`) can never run: `daily_trading_limit` **raises** for a warrant, and the only `None`-valued band row is `(None, 'BOND')`, unreachable because `InstrumentKind` has no BOND member (D21). Behaviour is unchanged; the docstring describes a path that does not execute | `rulebook.py:2721` |
 | D31 | **Five `core/` modules cannot be imported outside pytest.** `core/position.py:35` and `core/transaction.py:74` do `import utils`, which resolves to **`tests/utils.py`** only because pytest's prepend import mode puts it on `sys.path`. Verified: `PYTHONPATH=src:. python -c "import plutus.core.bot"` → `ModuleNotFoundError: No module named 'utils'`, and the same for `position`, `portfolio`, `transaction`, `algorithm`. **The suite is green because `tests/utils.py` shadows the gap** — a textbook standing-rule-4 case. `protocol.py:20-21` already records the fact in a comment; it had never reached this inventory. Note `market.protocol.Position` (`protocol.py:164`) is a **different class** and is the live one | `core/position.py:35`, `core/transaction.py:74` |
+| D32 | **The withdrawn Article-13 attribution survives in three modules this correction did not own.** `broker.py` and `deposit.py` were corrected on 2026-08-26; the identical claim is still live at `margin.py:12-14` (*"an 80/90/100 ladder … Article 13 of QĐ 96/QĐ-VSD → QĐ 61/QĐ-VSD, **confidence high**"* — note this one stops the chain at QĐ 61 and grades it HIGH anyway), `margin.py:75` (`PROVENANCE`, *"the actual call test is utilisation = MR / margin assets against an 80/90/100 ladder"*), `exchanges/derivatives.py:115`, and — the one most likely to be copied — **`types.py:643-649`, `MarginStatus`'s own docstring**, which still says *"the shape of the ladder is VSDC-sourced (rulebook 6.3, Article 13: levels 1/2/3 at 80/90/100 per investor account)"*. Behaviour is unaffected in all four; the **claim** is dead. Reword to match `BrokerTerms.PROVENANCE` | `types.py:643`, `margin.py:12`, `:75`, `exchanges/derivatives.py:115` |
+| D33 | **The position-limit gate counts the wrong quantity, and QĐ 26 Điều 27.2.a now says so in primary text.** The regulated count is *"tổng số lượng vị thế của các HĐTL có cùng tài sản cơ sở, cùng hệ số nhân hợp đồng nhưng khác tháng đáo hạn"* — summed **across expiry months** of one underlying, same-expiry opposite legs netted first — and `rulebook._position_limit_table` is correctly keyed on the contract *family*. But `reserve_for_order` tests `_worst_case_net(contract_code)`, i.e. **one expiry**. An account holding 4,000 VN30F2401 and 4,000 VN30F2403 counts 8,000 under Điều 27.2.a and passes both tests at 4,000 each against a 5,000 cap. This is the ordinary shape of a rolled futures position, not a corner case. **Fix changes behaviour — author's call** | `deposit.py::reserve_for_order`, `_worst_case_net` |
+| D34 | **The position cap is exclusive; Điều 29.1.c is inclusive.** We reject on `after > cap`. Điều 29.1.c fires level 3 when the count *"đạt ngưỡng 100% giới hạn vị thế"* — **reaches** the cap — and Điều 29.3.b requires the account back *below* it, so an account resting exactly on the limit is suspended there and admitted here. One contract, in the permissive direction. Behaviour change; author's call | `deposit.py::reserve_for_order` |
+| D35 | **`transfer_out`'s suspension test is narrower than its source.** QĐ 26 Điều 11.1.c bars withdrawal from an account suspended for a margin breach, **a position-limit breach, or a payment default** — three grounds. We test only `status is FORCED`. Not fixable in isolation: the other two states do not exist anywhere in `deposit.py`, which has no account-level suspension flag at all, only per-order gates | `deposit.py::transfer_out` |
+| D36 | **The suite's own total is not stable across invocations: 1318 vs 1365, a gap of 47. Observation, not a diagnosis — do not repeat it as one.** Everything below was run from the repo root on 2026-08-26 and is reproducible. (a) `pytest tests -q` → **`1318 passed`**, exit 0, and the summary line names **no** skipped, deselected, xfailed or errored tests. Run twice, same number. (b) `pytest tests --collect-only` → **1365 collected**, twice, once with `-p no:cacheprovider`; the 1365 node ids are unique (`sort \| uniq -d` is empty). (c) `pytest tests -rs -q` prints **`collected 1365 items`** in its own header and is observed executing files that the 1318 runs did not reach. (d) Same split one level down: `pytest tests/market` → **863 passed**, `pytest tests/market --collect-only` → **910**. (e) The 47 are individually healthy: `pytest tests/market/test_margin_incidence.py tests/market/test_margin_incidence_account.py tests/market/test_equity_headline.py` → **47 passed** standalone. That triple summing to exactly 47 is suggestive and may be coincidence — **nobody has diffed the two node-id sets**. **Why it matters more than a bookkeeping slip:** a run that silently drops 47 tests and a run that keeps them print the same word, *passed*, and differ only in a number nobody checks. Standing rule 4, in its purest form. **Pre-existing** — the four tests added this session live in `test_deposit.py`, which runs in every variant, so the same split sat under the 1314 baseline (inferred; no baseline `--collect-only` was ever recorded). **The obvious candidate does not fit:** the corpus/tick `skipif` gates in `tests/market/conftest.py` would surface as *skipped*, both corpus roots resolve on this machine, and skips do not change a collected count. **How to settle it:** dump collected node ids (`pytest tests --collect-only -q -q`, keep `::` lines, sort) and executed node ids (`pytest tests -v`, extract `^tests/…::…`, sort), then `diff`. The 47 names are the answer. Until someone does, the header and §19 counts say "passed", never "collected" | `tests/market/conftest.py`; `tests/market/test_margin_incidence.py`, `test_margin_incidence_account.py`, `test_equity_headline.py` |
 
 ---
 
@@ -844,12 +930,84 @@ Concretely:
    three wrong counts, two of them in §1.
 9. **Never cite a traceability artefact that does not exist in the code.** The audit found
    one invented catalogue. A row that names an artefact must be greppable.
+10. **A citation chain is worth only its last link.** The 80/90/100 margin ladder was
+    graded HIGH here, in four modules and in the rulebook, on the chain QĐ 96 → QĐ 61 →
+    QĐ 12 → QĐ 26. Nobody had read *any* of them; the chain was a chain of secondary
+    summaries. When the final document was obtained it did not contain the rule. **Cite
+    the article you read, name the edition you read it in, and if you have not read it,
+    grade it UNVERIFIED and say which document would settle it.**
+11. **Withdrawing a citation is not the same as disproving a rule.** When QĐ 26 turned out
+    not to contain the ladder, the correct post-KRX statement became "misattributed" and
+    the correct pre-KRX statement became "**UNVERIFIED, not disproven**" — because QĐ 61
+    and QĐ 12 are still unread. Do not let the first conclusion contaminate the second.
+    Overclaiming a *refutation* is as much a defect as overclaiming a source.
 
 ---
 
 ## 19. Verification log
 
-**2026-08-26 — adversarially audited by four independent auditors**, briefed to break this
+### 2026-08-26 (later the same day) — QĐ 26/QĐ-HĐTV and Phụ lục 2 obtained and read
+
+The two documents the audit above named as the reason to distrust §16.1 were obtained
+from the author (thuvienphapluat.vn is Cloudflare-blocked to automated fetching) and read
+in full: **QĐ 26/QĐ-HĐTV of 2025-04-16**, the derivatives clearing rulebook in force from
+the KRX cutover and replacing QĐ 12/QĐ-HĐTV of 2023-08-10, and its **Phụ lục 2**, the
+margin calculation methods.
+
+**The one finding that changes what this file claims.**
+
+| | Before | After |
+|---|---|---|
+| 80 / 90 / 100 applied to **margin** | IMPLEMENTED + SOURCED (shape), HIGH, "Article 13" | **IMPLEMENTED + ASSUMED.** Post-KRX **misattributed** — Điều 13 is binary `assets < MR` and carries no percentage. Pre-KRX **UNVERIFIED, not disproven** — QĐ 61 and QĐ 12 remain unread |
+| 80 / 90 / 100 applied to **position limits** | not in this file | **Primary-sourced, QĐ 26 Điều 29**, and **NOT BUILT** (§11, §16.3 #20) |
+
+Rows corrected as a consequence, all in this file: §1's headline anecdote (which *itself*
+rested on the dead citation), §1's threshold / cure-window / maintenance-ratio / position-
+limit rows plus three new §1 rows; §3A's A1–A3 and A5; §11's `MR = IM + VM`, ladder,
+level-3, position-limit, withdrawal, `MarginMonitor`, portfolio-margining and post-KRX
+rows, plus four new rows; §16.1 decisions 2, 4 and 5 in full; §16.2's portfolio-margining
+reason; §16.3 #20–#22; §17 (D3 deleted as fixed, **D32–D35 added**); §18 rules 10–11.
+
+**Rows that got *stronger*, not weaker** — the primary text confirms them:
+
+- **Haircuts 5 / 30 / 40 %** move UNVERIFIED → sourced (Điều 9.1), including the
+  structural claim that they are in the body rather than an unpublished appendix, and the
+  01-working-day change notice (Điều 9.2). §6.3:600 of the rulebook is overturned for
+  post-KRX only.
+- **No maintenance margin ratio for derivatives** moves from reported to primary-sourced.
+- **The withdrawal conditions** (§11) are QĐ 26 Điều 11.1 verbatim, all three.
+- **The per-investor-account unit of assessment** that `account_margin_requirement`'s
+  `TypeError` enforces is Điều 5.5 verbatim.
+- **Level 3's behaviour** — no new positions, offsetting excepted — is Điều 13.2.a
+  verbatim. Only its *trigger* is ours.
+- **Intraday checkpoints 09h30 / 14h00 / 16h30** confirmed, and the "09:30 and 14:30"
+  broker figure retired.
+
+**What was refuted, beyond the ladder.** §16.1 decision 4's row 5 claimed the "3 vs 5
+business day" conflict resolved as 3 days for margin and **5** for position limits. QĐ 26
+gives **03 working days for both** (Điều 13.3.b, Điều 29.5). The 5-day figure came from a
+LuatVietnam summary of the superseded edition and has no post-KRX counterpart.
+
+**What was NOT done, deliberately.** No numeric default changed. `BrokerTerms`'
+80/90/100 and the `NEXT_SESSION` cure window are exactly as they were; only the claims
+around them moved. The post-KRX margin model was **not built** — that is an author
+decision not yet taken — and no measurement was added. Three sourced divergences found
+during the read (**D33** per-expiry position counting, **D34** exclusive-vs-inclusive cap,
+**D35** narrow suspension test) were recorded rather than fixed, because each changes
+behaviour.
+
+**What this correction did not reach.** `types.py`, `margin.py` and
+`exchanges/derivatives.py` still carry the withdrawn Article-13 attribution in prose —
+logged as **D32** with exact anchors. No behaviour depends on it in any of the three.
+
+**Suite:** `python -m pytest tests -q` → **1318 passed** (1314 before; four tests added,
+all in `tests/market/session/test_deposit.py`, pinning the corrected `BrokerTerms.
+PROVENANCE` text, the field/provenance cover, the regulated-vs-commercial cure-window
+split, and the `assets == MR` boundary).
+
+### 2026-08-26 — adversarially audited by four independent auditors
+
+Briefed to break this
 document rather than confirm it. One read the research behind §12 and
 `equity-margin-spec.md` against primary mirrors; one hunted **false negatives** (features
 in the code with no row here); one audited the **SOURCED vs ASSUMED** classification
@@ -880,8 +1038,13 @@ stated as verified — warrant band raises, coverage window not enforced at 2027
 ladder's `Gói` header; hoatieu.vn and dongduong.net truncation).
 
 **What was checked and found already correct — do not re-audit these:** §9's ten charge
-rows, value by value; §11's `MR = IM + VM` chain and the Art. 13 80/90/100 provenance;
-§4's coverage-window row; the nine module line counts; the enum censuses (12 `RuleName`,
+rows, value by value; ~~§11's `MR = IM + VM` chain and the Art. 13 80/90/100 provenance~~
+— **struck the same day: both were wrong and four auditors passed them.** The auditor who
+graded SOURCED vs ASSUMED checked the provenance *against the rulebook*, and the rulebook
+carried the same unread citation chain, so the two agreed and neither was true. **This is
+the single most instructive failure in this log**: internal consistency between two
+documents that share a source is not corroboration. See the QĐ 26 entry above and §18
+rules 10–11. §4's coverage-window row; the nine module line counts; the enum censuses (12 `RuleName`,
 12 `EventKind`, 7 `OrderState`, 6 `AdmissionRule`, 4 `StatefulRule`); §12's greenfield
 grep; and the assumed side of §3, which survived the adversarial test almost everywhere.
 
@@ -895,6 +1058,11 @@ were counting real things, and the row now states the distinction explicitly.
 
 **How much to trust this file after the audit.** The `file:line` anchors and the counts
 are the strongest part — every one has now been resolved or re-derived at least once. The
-weakest parts are the ones that depend on documents nobody in this repository has read:
-**§16.1 Decisions 2 and 4** (QĐ 26) and **§12** (commercial mirrors only). Both now say so
-in place. If a row here disagrees with the code, the code wins and §18 rule 6 applies.
+weakest parts are the ones that depend on documents nobody in this repository has read.
+At the time of the audit those were **§16.1 Decisions 2 and 4** (QĐ 26) and **§12**
+(commercial mirrors only); the QĐ 26 half was closed later the same day, and the audit's
+instinct was right — that is exactly where the false HIGH grade was hiding. **What
+remains unread, and is therefore where the next false grade will be:** QĐ 61/QĐ-VSD and
+QĐ 12/QĐ-HĐTV (the *pre-KRX* regime, which is what the code implements and what every
+corpus date falls in), QĐ 96/QĐ-VSD, and §12's commercial mirrors. If a row here disagrees
+with the code, the code wins and §18 rule 6 applies.
