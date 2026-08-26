@@ -83,6 +83,7 @@ import importlib
 import json
 from dataclasses import replace
 from datetime import date, datetime, timedelta
+from datetime import time as _time
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from typing import (
@@ -109,6 +110,7 @@ from plutus.market.session.deposit import (
     ContractLedger, DerivativesAccount, MarginMonitor, UnknownContractMultiplier,
     liquidation_sequence, resolve_contract_multiplier,
 )
+from plutus.market.session.charges import ChargeContext, assess_at_maturity
 from plutus.market.session.fills import FillPolicy, build_fill_policy
 from plutus.market.session.ledgers import (
     CashLedger, EncumbranceLedger, HoldingsLedger, SecuritiesAccount,
@@ -239,10 +241,13 @@ _RULE_FOR_RULENAME: Mapping[RuleName, AdmissionRule] = {
 
 #: How the margin ladder's statuses map onto the event cursor.
 #:
-#: ``OK`` has no member: an ``OK`` view can only reach the session as the
-#: *clearance* of an outstanding call, and ``EventKind`` carries no clearance
-#: member (see ``deposit.MarginMonitor.on_mark``). A clearance is therefore
-#: visible only through ``session.margin()``, which is declared.
+#: ``OK`` maps to nothing **on its own**: an ``OK`` view can only reach the
+#: session as the *clearance* of an outstanding call, and a clearance is not a
+#: rung. It is emitted separately as ``MARGIN_CALL_CLEARED`` by
+#: :meth:`ExchangeSession._mark_derivatives`, which knows whether a call was
+#: outstanding before the mark; this table cannot, because a status alone does
+#: not say what it came from. A ``WARNING`` that clears a call emits **both**
+#: rows, for the same reason.
 _EVENT_FOR_MARGIN_STATUS: Mapping[MarginStatus, EventKind] = {
     MarginStatus.WARNING: EventKind.MARGIN_WARNING,
     MarginStatus.CALL: EventKind.MARGIN_CALL,
@@ -337,10 +342,30 @@ def parse_config(payload: Mapping[str, Any]) -> SessionConfig:
     legal, but recorded as overrides in :meth:`ExchangeSession.provenance` --
     which is the difference between a counterfactual and a lie.
 
+    ``broker_profile.firm`` names a **shipped margin profile** from
+    :mod:`plutus.market.session.broker_profile` -- ``"PLUTUS_DEFAULT"``,
+    ``"TCBS"``, ``"SSI_FOREIGN"`` and so on -- and is the supported way to run
+    a session under one firm's published policy. Without it the three
+    utilisation levels are read from the payload and default to
+    ``BrokerTerms()``'s 0.80 / 0.90 / 1.00, which **is not any firm's ladder
+    and is not PLUTUS_DEFAULT's** (0.80 / 0.90 / **0.95**): the session's
+    historical default and the profile module's default synthesis disagree at
+    the top rung, and naming the firm is the only way to get the latter.
+
+    Two refusals rather than a merge, because both would otherwise publish a
+    firm's name over a number the firm never wrote:
+
+    * naming a firm **and** a utilisation level in the same payload raises --
+      the profile owns the ladder;
+    * ``fill_from_default: true`` is required before a firm that *delegates* a
+      rung (MBS, KIS, VPS) will build, and every filled field is then marked
+      as ours by ``BrokerProfile.supplied_fields``.
+
     Raises:
         KeyError: on a missing ``period`` or ``exchange_rules.venues``, rather
             than defaulting. A session that silently ran on an invented period
             or venue list would produce a result nobody can reproduce.
+        ValueError: on ``firm`` together with an explicit ladder level.
     """
     period = payload['period']
     rules_payload = payload.get('exchange_rules') or {}
@@ -379,12 +404,66 @@ def parse_config(payload: Mapping[str, Any]) -> SessionConfig:
         period_end=_as_date(period['end']),
         resolution=Resolution(payload.get('resolution', Resolution.DAILY.value)),
         exchange_rules=exchange_rules,
-        broker_profile=BrokerProfile.from_config(
-            payload.get('broker_profile') or {}),
+        broker_profile=_broker_profile(payload.get('broker_profile') or {}),
         accounts=accounts,
         fill_policy=fill_policy,
         data=data,
     )
+
+
+#: Payload keys the margin profile owns. Naming a firm and one of these in the
+#: same config is a contradiction, not a merge: the whole point of the profile
+#: is that the ladder is the firm's.
+_PROFILE_OWNED_KEYS = ('warning_utilisation', 'margin_call_utilisation',
+                       'forced_close_utilisation', 'margin_cure_window')
+
+
+def _broker_profile(payload: Mapping[str, Any]) -> BrokerProfile:
+    """The session's broker profile: a named firm's, or the payload's own.
+
+    Imported lazily. ``broker_profile.py`` is a pure policy declaration whose
+    own test pins that it imports nothing but ``plutus.market.broker``, so the
+    bridge between the two same-named classes has to live on this side of it,
+    and there is no reason a session with no firm named should pay for the
+    module at all.
+    """
+    firm = payload.get('firm')
+    if not firm:
+        return BrokerProfile.from_config(payload)
+
+    from plutus.market.session.broker_profile import PLUTUS_DEFAULT, get_profile
+
+    clash = [key for key in _PROFILE_OWNED_KEYS if key in payload]
+    if clash:
+        raise ValueError(
+            f'broker_profile names the firm {firm!r} and also sets '
+            f'{", ".join(sorted(clash))}. The firm\'s profile owns its ladder '
+            f'and its cure window; overriding one of them and keeping the '
+            f'name would publish our number under {firm}\'s label. Drop the '
+            f'firm to configure the levels by hand, or drop the levels.')
+    profile = get_profile(
+        str(firm),
+        fill_from=PLUTUS_DEFAULT if payload.get('fill_from_default') else None,
+        warn=bool(payload.get('warn', True)))
+    session_profile = BrokerProfile.from_margin_profile(
+        profile,
+        margin_buffer=Decimal(str(payload.get('margin_buffer', 0))),
+        # Parsed through the public path so there is one commission parser.
+        commission=BrokerProfile.from_config(
+            {'commission': payload.get('commission', ())}).commission)
+
+    # The sale advance is a securities product and no margin profile carries
+    # it, so it stays a payload key even when a firm is named.
+    advance = payload.get('advance_sale_proceeds') or {}
+    if advance:
+        session_profile = replace(session_profile, terms=replace(
+            session_profile.terms,
+            advance_on_sale_enabled=bool(advance.get('enabled', False)),
+            advance_on_sale_daily_rate=Decimal(
+                str(advance.get('daily_rate',
+                                session_profile.terms
+                                .advance_on_sale_daily_rate)))))
+    return session_profile
 
 
 def load_data_source(config: DataConfig) -> Optional[MarketDataSource]:
@@ -458,6 +537,7 @@ class ExchangeSession:
         derivatives: DerivativesAccount,
         orders: OrderBookOfRecord,
         monitor: Optional[MarginMonitor] = None,
+        equity_margin: Optional[Any] = None,
     ) -> None:
         """Compose the six modules. Nothing they own is rebuilt here.
 
@@ -488,6 +568,18 @@ class ExchangeSession:
         self._book = orders
         self._monitor = monitor or MarginMonitor(
             config.broker_profile.terms, trading)
+
+        #: The equity margin account, or ``None`` for a cash-only session.
+        #:
+        #: Typed ``Any`` on purpose: ``equity_margin.py`` imports this module's
+        #: ``Event`` and ``Rejected``, so importing its class here would close
+        #: a cycle. The contract is three methods -- ``gate``, ``unwind`` and
+        #: ``on_advance`` -- and nothing in this file constructs one. A session
+        #: without one **refuses** an ``on_margin`` order rather than treating
+        #: it as an ordinary cash buy, which is the only safe default: silently
+        #: dropping the credit leg would turn a leveraged strategy into an
+        #: unleveraged one and report the result as if it had been asked for.
+        self._equity_margin = equity_margin
 
         #: The venues this session is configured for. A ticker routing
         #: outside the set is refused rather than silently traded.
@@ -578,6 +670,7 @@ class ExchangeSession:
               fill_policy: Optional[FillPolicy] = None,
               initial_holdings: Optional[Mapping[str, int]] = None,
               monitor: Optional[MarginMonitor] = None,
+              equity_margin: Optional[Any] = None,
               ) -> 'ExchangeSession':
         """Assemble a session from a parsed config, wiring the shared hooks.
 
@@ -629,8 +722,17 @@ class ExchangeSession:
         ``FORCED_LIQUIDATION`` event and the provenance record must state.
         The constructor has always taken one; ``build`` dropping it on the
         floor meant there was no supported way to configure it.
+
+        **The margin model is selected here and refused here.** When the config
+        carries a firm's margin profile, that profile's ``margin_model`` names
+        which engine computes the one user-facing margin number. This session
+        runs exactly one of them -- ``deposit.py``'s ``MR = IM + VM`` family --
+        so a profile selecting ``SCENARIO_GRID`` raises
+        :class:`NotImplementedError` rather than silently being marked on a
+        model it did not choose. See :meth:`_check_margin_model`.
         """
         profile = config.broker_profile
+        cls._check_margin_model(profile)
         trading = trading or weekday_trading_calendar()
         settlement = cls._settlement_calendar(config.data, settlement)
         if isinstance(settlement, VsdcSettlementCalendar):
@@ -677,9 +779,84 @@ class ExchangeSession:
             next_seq=lambda: cell['session']._next_seq(),
         )
         session = cls(config, source, rulebook, router, settlement, trading,
-                      policy, securities, deposit, book, monitor)
+                      policy, securities, deposit, book, monitor,
+                      equity_margin=equity_margin)
         cell['session'] = session
         return session
+
+    def attach_equity_margin(self, account: Any) -> None:
+        """Bind an equity margin account to a session already built.
+
+        ``build`` takes one too; this exists because the account needs a
+        business-day calendar and a price feed the config file cannot express,
+        so a caller often has the session first.
+
+        Refuses to replace one and refuses after the clock has moved. Both are
+        the same failure in different clothes: a margin account that did not
+        see the disbursement of a loan cannot reconcile it, and one swapped
+        mid-run leaves an open call in an object nobody reads.
+        """
+        if self._equity_margin is not None:
+            raise ValueError(
+                f'this session already has equity margin account '
+                f'{self._equity_margin.account_id!r}. TT 120 Dieu 9.3 makes '
+                f'the margin account segregated per investor per CTCK; one '
+                f'session is one client at one firm')
+        if self._now > datetime.combine(self._config.period_start,
+                                        datetime.min.time()):
+            raise ValueError(
+                f'the clock has already advanced to {self._now.isoformat()}. '
+                f'An account attached mid-run has no record of the loans, '
+                f'holdings and calls that came before it, so its DB, its '
+                f'breach-day counter and its cure clock would all start from a '
+                f'state that never existed')
+        self._equity_margin = account
+
+    @staticmethod
+    def _check_margin_model(profile: BrokerProfile) -> None:
+        """Refuse a session whose profile selects a model we do not compute.
+
+        The author's sixth axis, enforced. A profile carries **two** margin
+        models -- the intraday continuously-updated one and the overnight CCP
+        submission -- and ``user_facing_model`` names which of them the
+        client's ladder is tested against. Every model but one is
+        ``deposit.py``'s; ``MarginModel.SCENARIO_GRID`` is QD 26 Phu luc 2's
+        21-scenario grid, implemented in
+        :mod:`plutus.market.session.scenario_margin` and **not wired to this
+        session**.
+
+        Refusing is the whole point. Running the grid-selecting profile on
+        ``IM + VM`` would produce a number, put it on the firm's ladder, and
+        report it under the firm's name -- a result that is wrong in the one
+        way a provenance record cannot catch, because the record would say the
+        run was configured correctly. ``scenario_margin.required_margin`` also
+        needs a ``VsdcParameterSet`` per underlying group that most profiles do
+        not publish (``BrokerProfile.parameters_for`` raises for TCBS, MBS, KIS
+        and VPS), so the refusal is not merely a missing call site.
+
+        ``MarginModel.UNSTATED`` -- SSI, Pinetree, TCBS's intraday numerator --
+        is **not** refused. Those firms publish a real ladder and no formula,
+        so the levels are theirs and the divisor is ours; the session runs and
+        ``SessionProvenance.margin_model_is_assumed`` says so.
+
+        Raises:
+            NotImplementedError: naming the profile, the layer, the model and
+                the module that would have to be wired.
+        """
+        margin_profile = getattr(profile, 'margin_profile', None)
+        if margin_profile is None:
+            return
+        model = margin_profile.margin_model
+        if model.engine in (None, 'plutus.market.session.deposit'):
+            return
+        raise NotImplementedError(
+            f'{margin_profile.firm} declares its user-facing margin number to '
+            f'be the {margin_profile.user_facing_model.name} layer, whose '
+            f'model is {model.name}. That model is computed by '
+            f'{model.engine}, which is not wired into ExchangeSession: this '
+            f'session computes only deposit.py\'s MR = IM + VM. Running it '
+            f'anyway would put our number on {margin_profile.firm}\'s ladder '
+            f'and report it under {margin_profile.firm}\'s name.')
 
     @staticmethod
     def _settlement_calendar(data: DataConfig,
@@ -804,7 +981,29 @@ class ExchangeSession:
         self._settle(ts)
         self._securities.cash_ledger.accrue_interest(ts)
         self._mark_derivatives(ts)
+        self._run_equity_margin(ts)
         return self.poll()
+
+    def _run_equity_margin(self, ts: datetime) -> None:
+        """Step 7b: the equity margin pass. QD 87 Dieu 6.1, 7, 8.
+
+        **After** the derivatives mark and after settlement, and the order is
+        not arbitrary: the margin ratio is computed over ``CB`` -- *tien + tien
+        ban chung khoan cho ve* -- so a tranche settling this instant has to be
+        in the settled balance before the account is graded, or the
+        determination runs against a cash position that ceased to exist one
+        line earlier.
+
+        Unlike ``_mark_derivatives``, this pass **can submit orders**: a *ban
+        giai chap* is a real sell order and it goes through ``submit()`` like
+        any other, so it faces the same band, the same tick grid, the same lot
+        and the same fill policy. That is deliberate and it is the difference
+        between reporting a liquidation and running one.
+        """
+        if self._equity_margin is None:
+            return
+        for event in self._equity_margin.on_advance(self, ts, self._next_seq):
+            self._emit(event)
 
     # -- orders ---------------------------------------------------------
 
@@ -887,9 +1086,27 @@ class ExchangeSession:
             return self._reject(order, venue, order_id,
                                 Rejected.from_admissibility(adm, order_id))
 
+        draw = None
+        if order.on_margin:
+            gated = self._margin_gate(order, order_id, venue, state, ts)
+            if isinstance(gated, Rejected):
+                if gated.regime_tag is None:
+                    gated = replace(gated, regime_tag=regime_tag)
+                return self._reject(order, venue, order_id, gated)
+            draw = gated
+
         reservation = self._reserve(order, order_id, venue, state, rules, ts,
                                     instrument)
         if isinstance(reservation, Rejected):
+            if draw is not None:
+                # The loan was credited so the pre-funding test could see it;
+                # the order never reached the book, so it is unwound in full.
+                # Leaving it drawn would give the account borrowed cash with no
+                # position behind it and a DB nobody can explain.
+                self._equity_margin.unwind(
+                    draw, ts, self,
+                    f'the reservation refused the order: '
+                    f'{reservation.rule.value}')
             if reservation.regime_tag is None:
                 reservation = replace(reservation, regime_tag=regime_tag)
             reservation = self._annotate_segregation(reservation, venue)
@@ -1055,6 +1272,34 @@ class ExchangeSession:
             self._config.broker_profile.terms, self._now,
             resting=self._live_derivative_orders())
 
+    def outstanding_call(self) -> Optional[datetime]:
+        """The cure deadline of an unanswered margin call, else ``None``.
+
+        Closes the gap recorded as ``FEATURES.md`` §17 D41 and re-found by two
+        validation scenarios. :meth:`margin` deliberately returns
+        ``cure_by=None`` -- a deadline is state across days, not a property of
+        one mark -- so before this accessor existed the deadline was stamped
+        on the ``MARGIN_CALL`` event and **nowhere else**. A caller that polls
+        its account rather than draining the cursor, or one that restarted,
+        could not find out when it had to pay.
+
+        Pair it with :meth:`in_forced_breach`: this answers *"by when"*, that
+        answers *"is the account already being processed"*.
+        """
+        return self._monitor.outstanding_call
+
+    def in_forced_breach(self) -> bool:
+        """A forced close has been reported and nothing has cured it.
+
+        Distinct from ``margin().status is FORCED``: an account that slips
+        from the forced rung back to the call rung without ever reaching the
+        warning rung is still being processed, and :meth:`margin` reports the
+        rung while the monitor latches the processing. The two disagreeing is
+        the documented latch, not a defect -- but a caller could previously
+        only see one of them.
+        """
+        return self._monitor.in_forced_breach
+
     def charges(self) -> Tuple[Charge, ...]:
         """Everything debited or withheld so far, itemised, across both pools.
 
@@ -1140,7 +1385,17 @@ class ExchangeSession:
         one failure a provenance record cannot have: an unrecorded assumption
         is a gap, but a recorded wrong one is a false claim that reads as
         evidence.
+
+        The three ``margin_model*`` fields are ``None``/``False`` for a session
+        configured without a firm's margin profile. That is deliberate: a
+        session that selected nothing must not report a selection. When a firm
+        *is* named, ``margin_model_is_assumed`` is the honest half of the
+        record -- five of the shipped profiles publish a ladder and no formula,
+        and a result from one of those is our divisor under their levels.
         """
+        profile = self._config.broker_profile
+        margin_profile = getattr(profile, 'margin_profile', None)
+        model = None if margin_profile is None else margin_profile.margin_model
         return SessionProvenance(
             rulebook_id=self._config.exchange_rules.rulebook,
             resolution=self._config.resolution,
@@ -1149,11 +1404,18 @@ class ExchangeSession:
             venues=self._venues,
             fill_policy_kind=getattr(self._policy, 'signature',
                                      self._policy.kind),
-            broker_profile_name=self._config.broker_profile.name,
+            broker_profile_name=profile.name,
             pins=self._rulebook.pins,
             settlement_calendar_id=getattr(self._settlement, 'calendar_id',
                                            None),
             liquidation_rule=self._liquidation_rule(),
+            margin_model=None if model is None else model.name,
+            margin_model_engine=(None if model is None
+                                 else model.engine
+                                 or 'plutus.market.session.deposit'),
+            margin_model_is_assumed=(model is not None and model.engine is None),
+            block_opening_utilisation=getattr(
+                profile, 'block_opening_utilisation', None),
         )
 
     def _liquidation_rule(self) -> LiquidationRule:
@@ -1566,6 +1828,62 @@ class ExchangeSession:
             ticker=ticker, start=ts, end=ts + span,
             resolution=self._config.resolution, state=state,
             close=close, missing=frozenset(missing))
+
+    # -- equity margin lending -------------------------------------------
+
+    def securities_cash_ledger(self) -> CashLedger:
+        """The securities cash ledger, for the equity margin account.
+
+        A margin loan is a **credit to the client's own cash** and its
+        repayment is a debit -- QD 87 Dieu 2 khoan 5 counts the disbursed dong
+        in ``CB`` like any other *tien*. There is no second pool: TT 120 Dieu
+        9.3's segregation is per investor, not per product, and the margin
+        account **is** the securities account at a firm the client margins at.
+
+        Exposed rather than reached for, so the one module that needs it does
+        not have to touch ``session._securities``. Nothing else in this package
+        calls it.
+        """
+        return self._securities.cash_ledger
+
+    def _margin_gate(self, order: Order, order_id: OrderId, venue: Venue,
+                     state: MarketState, ts: datetime) -> Any:
+        """Step 4b: QD 87 Dieu 13.5(d), for an ``on_margin`` order only.
+
+        Runs **after** ``admits()`` and **before** the reservation, and both
+        halves of that matter. After ``admits()``, because an order off the
+        tick grid is a tick-grid rejection whether or not the client could have
+        borrowed for it -- the same rule that puts the cash reservation last.
+        Before the reservation, because the reservation tests ``Cash.available``
+        and the borrowed dong must be in it by then.
+
+        A session with no margin account **refuses**. Treating the order as an
+        ordinary cash buy would silently unlever the strategy and report the
+        result as if that was what was asked for; the flag is on the ticket and
+        an unhonoured flag is a defect, not a default.
+        """
+        if pool_for_venue(venue) is not Pool.SECURITIES:
+            return Rejected(
+                rule=StatefulRule.MARGIN_LENDING, binding_constraint=None,
+                ts=ts, order_id=order_id,
+                detail={'reason': 'giao dich ky quy is equity margin lending '
+                                  'under QD 87/QD-UBCK. A derivatives order '
+                                  'margins against the segregated VSDC deposit '
+                                  '-- a different product, a different '
+                                  'regulator and a different call test',
+                        'venue': venue.value})
+        if self._equity_margin is None:
+            return Rejected(
+                rule=StatefulRule.MARGIN_LENDING, binding_constraint=None,
+                ts=ts, order_id=order_id,
+                detail={'reason': 'this order is flagged on_margin and the '
+                                  'session has no equity margin account. '
+                                  'TT 120 Dieu 9.1 / QD 87 Dieu 12.1 make the '
+                                  'hop dong giao dich ky quy the credit '
+                                  'agreement: with no account there is no '
+                                  'contract and no lending to discuss',
+                        'article': 'TT 120 Dieu 9.1'})
+        return self._equity_margin.gate(self, order, order_id, state, ts)
 
     # -- reservation ----------------------------------------------------
 
@@ -2005,10 +2323,7 @@ class ExchangeSession:
             self._derivatives.apply_fill(
                 fill, rules, ts, expiry=self._expiry_for(fill.ticker,
                                                          instrument))
-            total = sum((c.total for c in charges), Decimal('0'))
-            if total:
-                self._derivatives.debit(
-                    total, ts, reason=f'charges on {fill.fill_id}')
+            self._debit_charges(charges, ts, f'on {fill.fill_id}')
             self._deposit_charges.extend(charges)
         else:
             charges = assess_charges(rules, profile, fill,
@@ -2114,6 +2429,40 @@ class ExchangeSession:
         if instrument is not None and instrument.expiry is not None:
             return instrument.expiry
         return expiry_date(ticker)
+
+    def _debit_charges(self, charges: Sequence[Charge], ts: datetime,
+                       occasion: str) -> Decimal:
+        """Debit the deposit **once per charge**, naming the charge each time.
+
+        One aggregate debit was cheaper and it cost the derivatives pool its
+        itemisation. ``DepositEntry`` is the only cash journal either pool has
+        on the session side -- ``CashLedger`` keeps none, by design -- so a
+        single ``charges on FILL-000031`` row for -66,610 is the whole record
+        of what was actually four separate levies by four separate parties:
+        the state's transfer tax, HNX's trading service price, VSDC's clearing
+        fee and the broker's commission. The securities pool already itemises
+        (``CashLedger.levy`` takes one ``Charge``), so the two halves of the
+        same simulator disagreed about whether a fee statement is auditable,
+        and a caller reconciling a derivatives statement against
+        ``session.charges()`` had one number to reconcile four rows against.
+
+        The reason string keeps its ``charges <occasion>`` opening and appends
+        ``: <kind>``, so every caller that classified the old string on its
+        prefix still classifies these, and the levy is now identifiable
+        without joining anything. Zero-amount charges are still skipped: a
+        levy of nothing moved no cash and ``DepositEntry`` records movements.
+
+        Returns:
+            The total debited, which the expiry event reports.
+        """
+        total = Decimal('0')
+        for charge in charges:
+            if charge.total:
+                self._derivatives.debit(
+                    charge.total, ts,
+                    reason=f'charges {occasion}: {charge.kind}')
+                total += charge.total
+        return total
 
     def _derivative_charges(self, fill: Fill,
                             rules: RuleSet) -> Tuple[Charge, ...]:
@@ -2374,7 +2723,26 @@ class ExchangeSession:
                 self._by_field[DataField.SETTLEMENT_PRICE] = (
                     self._by_field.get(DataField.SETTLEMENT_PRICE, 0) + 1)
 
+        # Read the call state BEFORE the mark. ``on_mark`` clears ``_cure_by``
+        # in place when the account comes back, so afterwards there is no way
+        # to tell a clearance from an ordinary quiet mark.
+        call_before = self._monitor.outstanding_call
         for news in self._monitor.on_mark(self._derivatives, view, rules, ts):
+            # A call that was outstanding and is now answered gets its own
+            # row, whether the account came back to WARNING or all the way to
+            # OK. Escalation also drops ``_cure_by``, so the FORCED status is
+            # excluded here -- that is the call being enforced, not cured.
+            if (call_before is not None
+                    and self._monitor.outstanding_call is None
+                    and news.status in (MarginStatus.OK,
+                                        MarginStatus.WARNING)):
+                self._emit(Event.margin(
+                    EventKind.MARGIN_CALL_CLEARED, news, self._next_seq(),
+                    cure_by=call_before,
+                    cured_at=ts,
+                    reason='utilisation returned below the call level before '
+                           'the cure deadline; the outstanding call is '
+                           'discharged'))
             kind = _EVENT_FOR_MARGIN_STATUS.get(news.status)
             if kind is None:
                 continue
@@ -2403,9 +2771,11 @@ class ExchangeSession:
             self._emit(Event.margin(kind, news, self._next_seq(), **detail))
 
         for code, position in list(positions.items()):
-            if position.expiry is None or ts.date() < position.expiry:
+            expiry = position.expiry
+            if expiry is None or not self._expiry_reached(expiry, rules, ts):
                 continue
-            settlement, source, basis = self._final_settlement(code, ts)
+            struck = self._expiry_instant(expiry, ts)
+            settlement, source, basis = self._final_settlement(code, struck)
             if settlement is None:
                 self._evaluations += 1
                 self._indeterminate += 1
@@ -2413,13 +2783,132 @@ class ExchangeSession:
                     self._by_field.get(DataField.SETTLEMENT_PRICE, 0) + 1)
                 continue
             quantity = position.net_quantity
-            cash_flow = self._derivatives.settle_expiry(code, settlement, ts)
+            # ``struck``, not ``ts``: the settlement happened when the
+            # contract expired, not when this caller noticed. See
+            # ``_expiry_instant``.
+            cash_flow = self._derivatives.settle_expiry(code, settlement,
+                                                        struck)
+            charges = self._maturity_charges(code, quantity, settlement,
+                                             rules, struck)
+            total = self._debit_charges(
+                charges, struck, f'on the final settlement of {code}')
+            self._deposit_charges.extend(charges)
             self._emit(Event.expiry_settled(
-                code, ts, self._next_seq(), settlement=settlement,
+                code, struck, self._next_seq(), settlement=settlement,
                 cash_flow=cash_flow, quantity=quantity,
                 settlement_source=source.value,
                 substituted=source is SettlementSource.CLOSE_PROXY,
-                price_basis=basis))
+                price_basis=basis,
+                charges=tuple(c.kind for c in charges),
+                charges_total=total))
+
+    def _expiry_reached(self, expiry: date, rules: RuleSet,
+                        ts: datetime) -> bool:
+        """Has the contract stopped trading by ``ts``?
+
+        **The last trading day is a trading day.** A VN30F contract trades
+        through its whole expiry session -- on 2022-10-20 VN30F2210 printed a
+        close and the front-month roll into VN30F2211 is a large part of that
+        day's volume -- and VSDC's final settlement is struck from the
+        underlying's closing period, after the market shuts. Settling at the
+        first advance that lands on the expiry *date* therefore extinguished
+        the position at 09:30 and made the session unreachable: a roll
+        submitted that morning found nothing to close, and the offsetting
+        order opened a brand-new naked position in a contract that had
+        already cash-settled. So the test is the venue's own close, resolved
+        for this instant, and not the date alone.
+
+        Falls back to the date test when the schedule cannot be resolved --
+        that is the behaviour this replaces, and refusing to settle at all on
+        an unresolved clock would strand the position forever.
+        """
+        if ts.date() > expiry:
+            return True
+        if ts.date() < expiry:
+            return False
+        try:
+            close = rules.session_close(Venue.HNXDS)
+        except UnresolvedRule:
+            return True
+        return close is None or ts.time() >= close
+
+    def _expiry_instant(self, expiry: date, ts: datetime) -> datetime:
+        """The instant the final settlement is struck -- price **and** cash.
+
+        Always on the expiry date, whatever instant the caller noticed the
+        expiry at. :meth:`_final_settlement` already says that a close carried
+        over from another session is not a worse settlement price but a
+        different contract-day's price; that only holds if the read is pinned
+        to the expiry date, and it was not -- an advance that first crossed
+        the expiry on a *later* date read that later date's row and found
+        nothing, silently turning a settlement into an INDETERMINATE.
+
+        **The money is now pinned here too.** It was not: the price read used
+        this method and the cash movement, the maturity tax and the
+        ``EXPIRY_SETTLED`` event all used ``ts``, the observing advance. So
+        one contract, one code and one settlement price produced two
+        different settlement *dates* depending only on when the caller
+        happened to poll -- ``2022-11-17T14:45`` for a run that stepped to
+        14:50 on the expiry day, ``2022-11-18T09:20`` for the same position
+        in a run whose next step was the following morning. A settlement log
+        dated by observation cannot answer "was this settled on time".
+
+        The same-date branch now returns the venue **close** rather than
+        ``ts`` for the same reason: VSDC strikes the final settlement from the
+        underlying's closing period, so 14:50 and 15:30 on the expiry day are
+        both the close's settlement. :meth:`_expiry_reached` already
+        guarantees ``ts`` is at or after that close, so this never dates a
+        settlement in the future -- and the ``_time.max`` fallback, reachable
+        only when the schedule will not resolve, is clamped to ``ts`` so an
+        unresolved clock cannot either.
+        """
+        if ts.date() == expiry:
+            try:
+                close = self._rulebook.at(ts).session_close(Venue.HNXDS)
+            except (UnresolvedRule, CalendarError):
+                close = None
+            if close is None:
+                return ts
+            return min(datetime.combine(expiry, close), ts)
+        try:
+            close = self._rulebook.at(
+                datetime.combine(expiry, _time.min)).session_close(
+                    Venue.HNXDS)
+        except (UnresolvedRule, CalendarError):
+            close = None
+        return datetime.combine(expiry, close or _time.max)
+
+    def _maturity_charges(self, code: str, quantity: int,
+                          settlement: Decimal, rules: RuleSet,
+                          ts: datetime) -> Tuple[Charge, ...]:
+        """The derivatives transfer tax on a contract carried into settlement.
+
+        Rulebook 8.1 and 12.3: taxable income on a futures contract is
+        determined when the order is matched **or at contract maturity**. A
+        position carried to expiry is never matched out, so a fill-only model
+        under-charges every held-to-expiry contract by exactly one leg -- the
+        leg the trader who closed the day before pays. ``assess_at_maturity``
+        was implemented, sourced and tested with no call site (FEATURES.md
+        s16.3 #16); this is the call site.
+
+        **Only the tax.** ``assess_at_maturity`` refuses to levy the exchange
+        trading fee and the VSDC clearing fee, because neither is sourced as
+        charged on a final cash settlement, and inventing them here would be
+        worse than omitting them. The side is whichever direction closes the
+        position, and the row is two-sided, so a short pays it too.
+        """
+        if quantity == 0:
+            return ()
+        try:
+            multiplier = self._derivatives.multiplier_for(code, ts)
+        except UnknownContractMultiplier:
+            return ()
+        ctx = ChargeContext(
+            venue=Venue.HNXDS, charge_class=ChargeClass.FUTURE,
+            side=Side.SELL if quantity > 0 else Side.BUY,
+            quantity=abs(quantity), price=settlement, ts=ts, ticker=code,
+            multiplier=multiplier)
+        return tuple(levied.charge for levied in assess_at_maturity(rules, ctx))
 
     def _final_settlement(self, code: str, ts: datetime
                           ) -> Tuple[Optional[Decimal],

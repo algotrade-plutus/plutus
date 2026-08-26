@@ -859,6 +859,88 @@ def test_the_scale_policy_rescales_both_the_quantity_and_the_limit_price():
     assert bk.get(order_id).state.value == 'resting'
 
 
+def test_a_scaled_limit_outside_the_ex_date_band_is_cancelled_not_rested():
+    """The worst finding of the corporate-charges audit, closed.
+
+    Measured: a VIB sell resting at the published ceiling of 53.40 was scaled
+    across the ex-date to ``38.14285714285714285714285714`` -- 26 significant
+    digits, off the 0.05 grid, and **8.31 below the published floor of
+    46.45** -- and the fill pass matched it, levying 14,418 of exchange fee
+    and 53,400 of PIT on a 53,400,000 trade value the exchange could not have
+    printed. Eight of nine identities passed; the ninth failed for an
+    unrelated and expected reason, so the impossible print was masked.
+
+    ``book.amend`` deliberately does not re-run admission, so nothing
+    downstream re-checked the band. The engine cannot resolve a band for
+    itself, so it takes one -- and refuses when the scaled price falls
+    outside it, which is the fallback this branch already uses for a
+    degenerate quantity.
+    """
+    acct = account(holdings={'FPT': 1000})
+    bk = book(acct)
+    order_id = a_resting_sell(bk, acct)          # rests at 96.0
+
+    # A 1->2 split halves the limit to 48.0, below a floor of 60.0.
+    applied = engine(resting_orders=RestingOrderPolicy.SCALE).apply(
+        CorporateAction.split('FPT', EX_DATE, into=2),
+        account=acct, ts=T0, book=bk, base_price=Decimal('96.0'),
+        venue=Venue.HSX, lot=100,
+        band=(Decimal('60.0'), Decimal('80.0')))
+
+    outcome, = applied.resting_orders
+    assert outcome.policy is RestingOrderPolicy.SCALE
+    assert bk.get(order_id).state.value == 'cancelled'
+    assert 'outside the ex-date band' in outcome.reason
+    assert outcome.limit_price_after is None
+    # The reservation went with the order, through the book's terminal hook.
+    assert acct.holding('FPT').committed == 0
+
+    # Control: the same split with a band the scaled price sits inside is
+    # rested, so the guard refuses prices and not corporate actions.
+    acct2 = account(holdings={'FPT': 1000})
+    bk2 = book(acct2)
+    ok_id = a_resting_sell(bk2, acct2)
+    engine(resting_orders=RestingOrderPolicy.SCALE).apply(
+        CorporateAction.split('FPT', EX_DATE, into=2),
+        account=acct2, ts=T0, book=bk2, base_price=Decimal('96.0'),
+        venue=Venue.HSX, lot=100,
+        band=(Decimal('40.0'), Decimal('60.0')))
+    assert bk2.get(ok_id).state.value == 'resting'
+    assert bk2.get(ok_id).order.limit_price == Decimal('48.0')
+
+
+def test_a_scaled_limit_is_put_on_the_order_tick_grid_not_the_reference_one():
+    """``tick`` rounds the reference; ``order_tick`` rounds the limit.
+
+    One parameter served both roundings and they are incompatible: F-1 says
+    the HOSE ex-date reference must **not** be tick-rounded, and a limit price
+    must be or it can never match. A caller resolving the conflict in favour
+    of the reference -- which is the correct choice -- got a limit price with
+    26 significant digits.
+
+    A 3-for-2 bonus takes 96.0 to 64.0 exactly; a 1.35 stock dividend takes it
+    to 71.111... , which is what needs a grid.
+    """
+    acct = account(holdings={'FPT': 1000})
+    bk = book(acct)
+    order_id = a_resting_sell(bk, acct)
+
+    applied = engine(resting_orders=RestingOrderPolicy.SCALE).apply(
+        CorporateAction.stock_dividend('FPT', EX_DATE, ratio=Decimal('0.35')),
+        account=acct, ts=T0, book=bk, base_price=Decimal('96.0'),
+        venue=Venue.HSX, lot=100, order_tick=Decimal('0.05'))
+
+    outcome, = applied.resting_orders
+    price = outcome.limit_price_after
+    assert price == Decimal('71.10')
+    assert (price / Decimal('0.05')) % 1 == 0, 'the limit is on the grid'
+    assert bk.get(order_id).order.limit_price == price
+    # Nothing unchecked is left silent: the band was not supplied and the
+    # outcome says so rather than implying the price was validated.
+    assert 'no ex-date band supplied' in outcome.reason
+    assert 'no order tick supplied' not in outcome.reason
+
+
 def test_scaling_re_takes_the_reservation_so_invariant_4_still_holds():
     """The book's ``amend`` does not touch encumbrances -- a reservation
     change would have to re-run admission, which is ``exchange.py``'s

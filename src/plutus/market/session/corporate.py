@@ -69,7 +69,7 @@ data, not as prose, so a published result can print it.
 
 from dataclasses import dataclass, replace
 from datetime import date, datetime
-from decimal import ROUND_FLOOR, ROUND_HALF_UP, Decimal
+from decimal import ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_UP, Decimal
 from enum import Enum
 from typing import (Dict, FrozenSet, Iterable, List, Mapping, Optional,
                     Protocol, Sequence, Tuple)
@@ -107,6 +107,22 @@ __all__ = [
     'round_to_quotation_unit',
     'subscription_shares',
 ]
+
+
+#: One dong. The Vietnamese dong has no subunit, so every cash quantity this
+#: module writes back to a ledger is an integer number of them.
+_DONG = Decimal('1')
+
+
+def _whole_dong(amount: Decimal) -> Decimal:
+    """Round a cash amount up to a whole dong.
+
+    Used where a ratio is applied to money. ``ROUND_CEILING`` rather than
+    ``ROUND_HALF_UP`` because the only caller is re-taking a **reservation**,
+    where the safe direction is to hold slightly too much rather than slightly
+    too little.
+    """
+    return amount.quantize(_DONG, rounding=ROUND_CEILING)
 
 
 # --------------------------------------------------------------------------
@@ -166,9 +182,19 @@ REFERENCE_ROUNDED_TO_TICK = RuleCitation(
          'reference is a close, already on the grid, so the rule only bites '
          'after a corporate-action adjustment -- and that case is untested." '
          'This module therefore takes the direction as a parameter and '
-         'defaults it to half-up, which is the only direction with any '
+         'defaults it to half-up, which was the only direction with any '
          'evidence behind it anywhere in the domain (UPCoM references are '
-         'rounded half-up to 100d, 98.70% of 410,999 corpus name-days).',
+         'rounded half-up to 100d, 98.70% of 410,999 corpus name-days). '
+         'THE HOSE CASE IS NO LONGER UNTESTED, and the corpus refutes '
+         'rounding it at all: across 9 HOSE ex-dates in 2021-05..2021-07 the '
+         'UNROUNDED adjusted reference reproduces the published ceiling and '
+         'floor 9/9, while tick-rounding reproduces 5/9 half-up, 4/9 down and '
+         '4/9 up. HPG 2021-05-31 settles it -- its published 52.70/45.90 band '
+         'brackets the reference into (49.3011, 49.3458), which contains no '
+         'multiple of the 0.05 quotation unit, so no rounding direction can '
+         'produce it. Pass tick=None for a HOSE ex-date. Evidence and the '
+         'nine cases: validation/scenarios/corporate-charges.py, EX_DATES and '
+         'reference_evidence().',
 )
 
 #: Dividend or bonus paid in TREASURY shares: reference not adjusted, band
@@ -1341,6 +1367,8 @@ class CorporateActionEngine:
         prices: Optional[Mapping[str, Decimal]] = None,
         venues: Optional[Mapping[str, Venue]] = None,
         ticks: Optional[Mapping[str, Decimal]] = None,
+        order_ticks: Optional[Mapping[str, Decimal]] = None,
+        bands: Optional[Mapping[str, Tuple[Decimal, Decimal]]] = None,
         lots: Optional[Mapping[str, int]] = None,
         take_up: Optional[bool] = None,
     ) -> Tuple[CorporateActionApplied, ...]:
@@ -1371,6 +1399,9 @@ class CorporateActionEngine:
                 base_price=None if prices is None else prices.get(ticker),
                 venue=None if venues is None else venues.get(ticker),
                 tick=None if ticks is None else ticks.get(ticker),
+                order_tick=(None if order_ticks is None
+                            else order_ticks.get(ticker)),
+                band=None if bands is None else bands.get(ticker),
                 lot=None if lots is None else lots.get(ticker),
                 take_up=take_up,
             ))
@@ -1387,10 +1418,21 @@ class CorporateActionEngine:
         base_price: Optional[Decimal] = None,
         venue: Optional[Venue] = None,
         tick: Optional[Decimal] = None,
+        order_tick: Optional[Decimal] = None,
+        band: Optional[Tuple[Decimal, Decimal]] = None,
         lot: Optional[int] = None,
         take_up: Optional[bool] = None,
     ) -> CorporateActionApplied:
         """Apply one event to the account, and to any order still live.
+
+        ``tick`` rounds the ex-date **reference**; ``order_tick`` rounds a
+        rescaled **limit price**; ``band`` is the ``(floor, ceiling)`` the
+        exchange publishes for the ex-date. All three are per-ticker inputs
+        the engine cannot resolve for itself, and the last two exist because
+        ``RestingOrderPolicy.SCALE`` was measured writing a limit price off
+        the quotation grid and below the published floor -- which then
+        filled, because ``book.amend`` does not re-run admission. See
+        :meth:`_scale`.
 
         **Who receives a cash dividend: the register on the record date, not
         the settlement state of the parcel.** The rule is
@@ -1561,7 +1603,7 @@ class CorporateActionEngine:
         if book is not None:
             outcomes = self._adjust_resting(
                 book, account, action, factor, reference, ts, phase, lot,
-                tick)
+                tick, order_tick=order_tick, band=band)
 
         applied = CorporateActionApplied(
             action=action, ts=ts, quantity_factor=factor,
@@ -1620,6 +1662,8 @@ class CorporateActionEngine:
         phase: Optional[SessionPhase],
         lot: Optional[int],
         tick: Optional[Decimal],
+        order_tick: Optional[Decimal] = None,
+        band: Optional[Tuple[Decimal, Decimal]] = None,
     ) -> Tuple[RestingOrderOutcome, ...]:
         """Cancel or scale every live order on the ticker. The open question.
 
@@ -1635,7 +1679,8 @@ class CorporateActionEngine:
                                              'RestingOrderPolicy.CANCEL'))
                 continue
             outcomes.append(self._scale(book, account, record, factor,
-                                        reference, ts, phase, lot, tick))
+                                        reference, ts, phase, lot, tick,
+                                        order_tick=order_tick, band=band))
         return tuple(outcomes)
 
     @staticmethod
@@ -1675,6 +1720,8 @@ class CorporateActionEngine:
         phase: Optional[SessionPhase],
         lot: Optional[int],
         tick: Optional[Decimal],
+        order_tick: Optional[Decimal] = None,
+        band: Optional[Tuple[Decimal, Decimal]] = None,
     ) -> RestingOrderOutcome:
         """Scale one order's quantity by the factor and its price by the ratio.
 
@@ -1747,10 +1794,49 @@ class CorporateActionEngine:
                           if lot_enforced else '')
                        + f', which is not an order; cancelled instead')
 
+        # The scaled LIMIT price, which is a different rounding from the
+        # scaled REFERENCE and now takes a different parameter. F-10, in the
+        # corporate-charges scenario's own words: "one tick parameter, two
+        # incompatible roundings ... the two roundings want separate
+        # parameters". ``tick`` is the reference's (and on a HOSE ex-date it
+        # must be ``None``, per F-1); ``order_tick`` is the order's, and a
+        # limit price must be on the grid or it can never match.
         new_price = before_price
         if before_price is not None and reference is not None:
             new_price = round_to_quotation_unit(
-                before_price * reference.ratio, tick, rounding=self._rounding)
+                before_price * reference.ratio, order_tick,
+                rounding=self._rounding)
+
+        # **A price this branch cannot show to be admissible is not written.**
+        #
+        # Measured: a VIB sell resting at the published ceiling of 53.40 was
+        # scaled to 38.14285714285714285714285714 -- 26 significant digits,
+        # off the 0.05 grid, and 8.31 BELOW the published floor of 46.45 --
+        # and the fill pass then matched it, levying real charges on a print
+        # the exchange could not have made. ``book.amend`` deliberately does
+        # not re-run admission (its own docstring says so: admission is
+        # ``exchange.py``'s composition, not the book's), so nothing
+        # downstream re-checks the band, the tick or the lot.
+        #
+        # The engine cannot resolve a band for itself -- it is a per-ticker
+        # input, like ``prices`` and ``ticks`` -- so it refuses on the ones it
+        # was given and *says* which ones it was not. Cancelling is the same
+        # fallback this branch already takes for a degenerate quantity, and
+        # ``CANCEL`` is the policy default in any case.
+        if new_price is not None and new_price != before_price:
+            outside = (band is not None
+                       and not (band[0] <= new_price <= band[1]))
+            if outside:
+                return replace(
+                    self._cancel(book, record, ts, phase,
+                                 'RestingOrderPolicy.SCALE'),
+                    policy=RestingOrderPolicy.SCALE,
+                    limit_price_after=None,
+                    reason=f'the scaled limit {new_price} falls outside the '
+                           f'ex-date band [{band[0]}, {band[1]}]; an order '
+                           f'the exchange would refuse is cancelled rather '
+                           f'than rested at a price that cannot legally '
+                           f'match')
 
         live = account.encumbrances.of(record.order_id)
         amended = book.amend(
@@ -1778,23 +1864,57 @@ class CorporateActionEngine:
                     quantity=int(Decimal(enc.quantity) * qty_ratio),
                     ticker=enc.ticker, order_quantity=remaining_after)
             else:
+                # **Whole dong.** ``qty_ratio`` and ``price_ratio`` are exact
+                # Decimal quotients, so the product is a repeating fraction
+                # far more often than not, and the re-taken reservation used
+                # to carry it: a measured run reported ``committed_cash
+                # 43978090.45206159960258320914`` and an available balance
+                # with 20 decimal places, on a currency with no subunit.
+                # ``encumbrance_matches`` held throughout because both sides
+                # were equally fractional -- the identity compares the
+                # reservation to itself.
+                #
+                # Rounded UP, and the direction is deliberate: a reservation
+                # is a promise that the money is there, so the error must
+                # never be in the direction of under-reserving. At most one
+                # dong is over-committed per leg, and it is released on the
+                # same terminal edge as the rest.
                 value_ratio = qty_ratio * price_ratio
                 account.encumbrances.take(
                     record.order_id, enc.pool, enc.resource, ts,
-                    amount=enc.amount * value_ratio,
+                    amount=_whole_dong(enc.amount * value_ratio),
                     ticker=enc.ticker,
-                    estimated_charges=enc.estimated_charges * value_ratio,
+                    estimated_charges=_whole_dong(
+                        enc.estimated_charges * value_ratio),
                     order_quantity=remaining_after)
 
+        # An admissibility guard this branch could not run is NAMED, never
+        # silently skipped. The three are independent, and a scaled order that
+        # passed none of them is one the exchange might refuse on any of the
+        # three grounds -- which is what produced a fill 8.31 below the
+        # published floor on a price with 26 significant digits.
+        unchecked: List[str] = []
+        if not lot_enforced:
+            unchecked.append(
+                'no round lot supplied: a scaled quantity off the lot can '
+                'never fill (ROUND_LOT)')
+        if new_price != before_price and order_tick is None:
+            unchecked.append(
+                'no order tick supplied: a limit price off the quotation grid '
+                'can never match')
+        if new_price != before_price and band is None:
+            unchecked.append(
+                'no ex-date band supplied: a limit price outside it would be '
+                'refused (BAND_LIMIT), and book.amend does not re-run '
+                'admission')
         return RestingOrderOutcome(
             order_id=record.order_id, ticker=record.order.ticker,
             side=record.order.side, policy=RestingOrderPolicy.SCALE,
             quantity_before=before_qty, quantity_after=remaining_after,
             limit_price_before=before_price, limit_price_after=new_price,
             lot_enforced=lot_enforced,
-            reason=None if lot_enforced else
-            'no round lot supplied: a scaled quantity off the lot can never '
-            'fill (ROUND_LOT), and this branch did not check')
+            reason=None if not unchecked else
+            'this branch did not check: ' + '; '.join(unchecked))
 
 
 # --------------------------------------------------------------------------

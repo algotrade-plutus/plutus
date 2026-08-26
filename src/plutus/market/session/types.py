@@ -522,7 +522,7 @@ TERMINAL_TRIGGERS_BY_TIF: Mapping[TimeInForce, FrozenSet[ExpiryTrigger]] = {
 # --------------------------------------------------------------------------
 
 class StatefulRule(str, Enum):
-    """The four rejections that need account state, so ``admits()`` cannot see them.
+    """The rejections that need account state, so ``admits()`` cannot see them.
 
     .. warning::
 
@@ -534,7 +534,7 @@ class StatefulRule(str, Enum):
        modify ``verdicts.py``, and Python cannot extend an ``Enum`` that
        already has members.
 
-       When the orchestrator merges them: add these four members to
+       When the orchestrator merges them: add these members to
        ``AdmissionRule``, delete this class, and re-point
        :data:`RejectionRule` at ``AdmissionRule``. Every call site reads
        :data:`RejectionRule`, so nothing else changes. The values below are
@@ -543,12 +543,21 @@ class StatefulRule(str, Enum):
     Reusing ``SESSION_SEMANTICS`` for any of these would be the real damage:
     ``AdmissionRule`` *is* the rejected-order log, and a log that cannot tell
     "you had no cash" from "the market was shut" measures nothing.
+
+    ``MARGIN_LENDING`` is the equity margin gate -- QD 87 Dieu 13.5(d)'s
+    buying-power test and the eligibility rules around it. It is **not**
+    ``INSUFFICIENT_CASH``: a client refused for buying power has cash and is
+    refused credit, and a log that reported the two under one member could not
+    tell a funding-bound run from a lending-bound one. It is not
+    ``INSUFFICIENT_DEPOSIT`` either -- that is the segregated derivatives
+    deposit at VSDC, a different product with a different regulator.
     """
 
     UNSETTLED_HOLDING = 'unsettled_holding'
     INSUFFICIENT_CASH = 'insufficient_cash'
     INSUFFICIENT_DEPOSIT = 'insufficient_deposit'
     POSITION_LIMIT = 'position_limit'
+    MARGIN_LENDING = 'margin_lending'
 
 
 #: Any rule that can refuse a submission, a cancellation or a transfer.
@@ -793,6 +802,15 @@ class EventKind(str, Enum):
     a caller if it emits no event. :class:`BrokerTerms.warning_utilisation`
     already exists to trigger it.
 
+    ``MARGIN_CALL_CLEARED`` is an addition made on 2026-08-27, after three
+    independent validation scenarios found the same hole: a call was opened in
+    the event log and **never closed**. ``MarginMonitor.on_mark`` computes the
+    clearance and returns it; the session dropped it, because this enum had no
+    member for it. A reader joining the streams saw an unanswered call with an
+    expired deadline and no way to learn it had been cured -- which is exactly
+    the audit-trail hole a "proper log, as a real broker produces" is about.
+    A *thong bao giai toa* is a record; it now has a row.
+
     There is deliberately **no ``RESTING`` event**. Resting is a state, not
     news; the caller learns it from ``session.orders()``.
     """
@@ -806,6 +824,7 @@ class EventKind(str, Enum):
     INDETERMINATE = 'indeterminate'
     MARGIN_WARNING = 'margin_warning'
     MARGIN_CALL = 'margin_call'
+    MARGIN_CALL_CLEARED = 'margin_call_cleared'
     FORCED_LIQUIDATION = 'forced_liquidation'
     SETTLEMENT_CREDITED = 'settlement_credited'
     EXPIRY_SETTLED = 'expiry_settled'
@@ -1979,7 +1998,13 @@ class Event:
         seq: int,
         **detail: Any,
     ) -> 'Event':
-        """A ``MARGIN_WARNING``, ``MARGIN_CALL`` or ``FORCED_LIQUIDATION``.
+        """A ``MARGIN_WARNING``, ``MARGIN_CALL``, ``MARGIN_CALL_CLEARED`` or
+        ``FORCED_LIQUIDATION``.
+
+        A ``MARGIN_CALL_CLEARED`` carries the discharged call's ``cure_by``
+        rather than the view's (which is ``None`` on a clearance), so the row
+        names the deadline it beat, plus ``cured_at``. That is what lets a
+        reader join it back to the ``MARGIN_CALL`` that opened it.
 
         A ``FORCED_LIQUIDATION`` must additionally state, in ``detail``, its
         **selection rule** (:class:`LiquidationRule`), the contracts closed,
@@ -2246,6 +2271,37 @@ class SessionProvenance:
     pins: Tuple[Pin, ...] = ()
     settlement_calendar_id: Optional[str] = None
     liquidation_rule: LiquidationRule = LiquidationRule.LARGEST_LOSS_FIRST
+    margin_model: Optional[str] = None
+    """Which model produced the **one user-facing margin number**, by name.
+
+    ``None`` when the session was configured from a bare config object rather
+    than from a firm's margin profile: nothing was selected, so nothing is
+    claimed. Otherwise it is the profile's ``margin_model.name``.
+    """
+    margin_model_engine: Optional[str] = None
+    """The module that computed :attr:`margin_model`, by dotted name.
+
+    ``plutus.market.session.deposit`` for every IM+VM family model. A session
+    whose profile selects ``SCENARIO_GRID`` never gets built, so this never
+    reports ``scenario_margin`` -- see ``ExchangeSession.build``.
+    """
+    margin_model_is_assumed: bool = False
+    """The profile publishes a ladder and **no formula**, and we ran IM+VM.
+
+    ``MarginModel.UNSTATED`` is SSI, TCBS's intraday numerator and Pinetree.
+    Their rungs are real and their divisor is not published, so the number the
+    ladder was tested against is ours, not theirs. Recorded rather than merged
+    into ``margin_model``, because "this firm's model" and "our model under
+    this firm's levels" are different claims.
+    """
+    block_opening_utilisation: Optional[Decimal] = None
+    """The utilisation at which the profile blocks **opening** a new position.
+
+    ``None`` when no profile was supplied or its first rung is not a block.
+    Reported because it is admission behaviour, not reporting: an order
+    refused here appears in the trade log as ``INSUFFICIENT_DEPOSIT`` and a
+    reader has to be able to see which level refused it.
+    """
 
     @property
     def is_counterfactual(self) -> bool:
@@ -2438,12 +2494,115 @@ class BrokerProfile:
     ``terms`` is :class:`plutus.market.broker.BrokerTerms`, reused whole and
     not rebuilt. Read its ``PROVENANCE`` before quoting any default: none of
     them is sourced to a document.
+
+    ``margin_profile`` is the **other** ``BrokerProfile`` -- the margin-policy
+    declaration in :mod:`plutus.market.session.broker_profile`, gap kind
+    ``G18`` occurring in our own code. It is carried, not merged: this class is
+    what the session is configured with, that one is what a firm published.
+    When it is present the session reports the firm, the user-facing margin
+    model and the engine that computes it in
+    :class:`SessionProvenance`, and refuses to run a model it does not have.
+
+    ``block_opening_utilisation`` is the one piece of ladder semantics that
+    :meth:`plutus.market.session.broker_profile.BrokerProfile.to_broker_terms`
+    cannot express and that changes admission rather than reporting. Every
+    surveyed firm's first rung is *"toi da de duoc mo vi the moi"* -- a hard
+    block on **opening**, not a warning -- and projecting it onto
+    ``warning_utilisation`` turns a refusal into a notification. Carried as a
+    bare ``Decimal`` so ``deposit.py`` can read it without importing the
+    profile module.
     """
 
     name: str
     terms: BrokerTerms = BrokerTerms()
     margin_buffer: Decimal = Decimal('0')
     commission: Tuple[ChargeRule, ...] = ()
+    margin_profile: Optional[Any] = None
+    block_opening_utilisation: Optional[Decimal] = None
+
+    @classmethod
+    def from_margin_profile(cls, profile: Any, *,
+                            margin_buffer: Decimal = Decimal('0'),
+                            commission: Tuple[ChargeRule, ...] = (),
+                            ) -> 'BrokerProfile':
+        """Configure a session from a firm's published margin policy.
+
+        The bridge the two ``BrokerProfile`` classes did not have. It is
+        deliberately **lossy in one direction only**: everything
+        ``to_broker_terms`` drops (the denominator, fire-versus-target, the
+        notice obligation, the model) is kept on ``margin_profile`` so the
+        session can report it and so a later build can read it, rather than
+        being discarded at the boundary.
+
+        ``initial_margin_ratio`` is **not** mapped onto ``margin_buffer`` and
+        that is deliberate. The profiles publish an *absolute* ratio
+        (PLUTUS_DEFAULT 0.1785, VNDIRECT 0.175) while ``margin_buffer`` is an
+        add-on above whatever the VSDC rate is *at the simulated instant* --
+        0.13 before 2022-12-15, 0.17 after. There is no date-free subtraction
+        that turns one into the other, so mapping them would make the firm's
+        published number mean something different at every date. Pass
+        ``margin_buffer`` yourself if you want one.
+
+        **The positional mapping is checked, not trusted.**
+        ``to_broker_terms`` reads ``ladder[0..2]`` into warning / call / forced
+        by *position*, and the rungs are not positionally comparable across
+        firms. Found 2026-08-27 by the derivatives-margin validation scenario:
+        **MBS**'s ladder is ``AR duy tri`` (NOTIFY) / ``AR xu ly`` (LIQUIDATE)
+        / ``Nguong xu ly tai VSDC`` (LIQUIDATE) -- it has no block-opening rung
+        at all, so the level at which MBS **closes positions** lands in
+        ``margin_call_utilisation`` and the level in
+        ``forced_close_utilisation`` is the CCP's, one rung too high. Filled
+        from PLUTUS_DEFAULT that is 0.90 / 0.95 / 1.00, and a session running
+        it would emit ``MARGIN_CALL`` at 0.95, where MBS liquidates, and would
+        not force-close until 1.00. Every event on that run would name a
+        milder action than the firm's own document. So a profile whose first
+        closing rung is not the third is refused here rather than mapped.
+
+        A profile that publishes rungs and **no** action at any of them
+        (VNDIRECT: three ``Nguong canh bao`` levels, all ``Action.NONE``,
+        ``TargetRef.UNRESOLVED``) is *not* refused -- there is no contradiction
+        to catch, only silence -- but note that calling its third rung a forced
+        close is our reading, and ``broker_profile.forced_reduction`` refuses
+        to quantify the same firm for the same reason.
+
+        Raises:
+            plutus.market.session.broker_profile.CoverageError: propagated from
+                ``to_broker_terms`` -- a falling-coverage firm, a firm with
+                fewer than three rungs, or one that delegates a level -- or
+                raised here when the ladder's action semantics contradict the
+                positional mapping. Those profiles cannot configure this
+                session and say so.
+        """
+        from plutus.market.session.broker_profile import Action, CoverageError
+        terms = profile.to_broker_terms()
+
+        def closes(rung: Any) -> bool:
+            return bool(rung.action.closes_positions
+                        or (rung.follow_on is not None
+                            and rung.follow_on.closes_positions))
+
+        closing = [i for i, rung in enumerate(profile.ladder) if closes(rung)]
+        if closing and closing[0] != 2:
+            rung = profile.ladder[closing[0]]
+            raise CoverageError(
+                f'{profile.firm} closes positions at ladder rung '
+                f'{closing[0]} ({rung.coverage_key}, "{rung.name}", '
+                f'{rung.action.name}), not at rung 2. BrokerTerms is read '
+                f'positionally -- rung 0 is the warning, rung 1 the call, '
+                f'rung 2 the forced close -- so this firm\'s liquidation '
+                f'level would be reported as a margin call and its forced '
+                f'close would be set one rung too high. Configure the three '
+                f'levels by hand if you want to model {profile.firm}, and '
+                f'say in the result that the mapping is yours.')
+
+        block = None
+        for rung in profile.ladder:
+            if rung.action is Action.BLOCK_OPENING and rung.level is not None:
+                block = rung.level
+                break
+        return cls(name=profile.firm, terms=terms, margin_buffer=margin_buffer,
+                   commission=tuple(commission), margin_profile=profile,
+                   block_opening_utilisation=block)
 
     @classmethod
     def from_config(cls, payload: Mapping[str, Any]) -> 'BrokerProfile':
@@ -2493,7 +2652,29 @@ def _commission_rule(row: Mapping[str, Any]) -> ChargeRule:
     ``debited_at`` is deliberately ``FILL`` and not ``DAILY``: Tier 1 does not
     model tiered commission, and pretending otherwise would produce a daily
     charge computed at a flat rate, which is worse than an honest per-fill one.
+
+    Raises:
+        ValueError: on a row that sets neither ``rate`` nor ``amount`` -- which
+            is what a **tiered** commission config looks like from here.
+            ``charges.CommissionSchedule.from_config`` understands ``tiers``
+            and this function is the one ``BrokerProfile.from_config``
+            actually calls, so a config asking for tiers used to be accepted
+            at build time and then kill the run at the **first fill**, deep
+            inside ``charge_amount``, with a message naming a charge rule and
+            not the config. Refusing here turns that into a config error the
+            caller can act on, and states plainly that tiers are not modelled
+            rather than pretending the row was understood.
     """
+    if 'rate' not in row and 'amount' not in row:
+        raise ValueError(
+            f'broker_profile.commission row for venue {row.get("venue")!r} '
+            f'sets neither "rate" nor "amount": got keys '
+            f'{sorted(row)}. A TIERED schedule is not modelled by this config '
+            f'-- the rate a tier selects depends on the day\'s total '
+            f'transaction value per account and is not knowable at fill time, '
+            f'so it needs charges.assess_daily and there is no session call '
+            f'site for it. Give one flat rate or amount, or price the tiers '
+            f'yourself with charges.CommissionSchedule.')
     venue = Venue.from_code(row['venue'])
     return ChargeRule(
         charge_id=f'broker.commission.{venue.value.lower()}',

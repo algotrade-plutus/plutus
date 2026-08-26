@@ -1,0 +1,758 @@
+"""Futures expiry, the roll, and overnight holding, against the real corpus.
+
+Every number asserted here came out of ``plutus.market.session``. Where a test
+pins behaviour that is *wrong*, it says so in its own docstring and names what
+the right behaviour would be, so the pin is a record and not an endorsement.
+
+The scenario module is imported by path because its filename carries a hyphen,
+which is the convention this package already uses (``corporate-charges.py``).
+"""
+
+import importlib
+from datetime import date, datetime, time
+from decimal import Decimal
+
+import pytest
+
+from conftest import requires_corpus
+
+from plutus.market.session.rulebook import Rulebook, UnresolvedRule
+from plutus.market.session.types import EventKind, MarginStatus, Venue
+from validation.logs import CashMovement, SettlementAction
+
+S = importlib.import_module('validation.scenarios.expiry-overnight')
+
+
+# --------------------------------------------------------------------------
+# Fixtures -- each corpus run is expensive, so each runs once per module
+# --------------------------------------------------------------------------
+
+@pytest.fixture(scope='module')
+def expiry_run():
+    return S.run_expiry_and_roll()
+
+
+@pytest.fixture(scope='module')
+def tet_run():
+    return S.run_overnight_across_tet()
+
+
+@pytest.fixture(scope='module')
+def overnight_pair():
+    return S.run_flat_versus_overnight()
+
+
+@pytest.fixture(scope='module')
+def variation_trail():
+    return S.run_variation_settlement_trail()
+
+
+@pytest.fixture(scope='module')
+def cure_run():
+    return S.run_cure_across_tet()
+
+
+@pytest.fixture(scope='module')
+def cure_run_default_loop():
+    return S.run_cure_across_tet(open_time=time(9, 30))
+
+
+# --------------------------------------------------------------------------
+# Expiry: the last trading day
+# --------------------------------------------------------------------------
+
+@requires_corpus
+def test_the_expiring_contract_is_still_tradable_on_its_last_trading_day(
+        expiry_run):
+    """VN30F2210 printed 1058.0 on 2022-10-20; the caller must be able to act.
+
+    The session used to settle every expiring position at the **first advance
+    that landed on the expiry date**, which under the loop ``advance_to``
+    documents is 09:30. The strategy's own decision point is after that
+    advance, so it arrived to find the front month already gone -- and the
+    offsetting sell it then submitted was admitted as a *new naked short* in a
+    contract that had already cash-settled, filled at the close, and settled a
+    second time at 14:45 for a cash flow of ``-0.0``.
+
+    ``_expiry_reached`` now tests the venue's own close, so the whole last
+    session is available. Without that change ``seen_on_roll_day`` reads
+    ``{'VN30F2211': 1}`` instead of the two front-month lots.
+    """
+    assert expiry_run.strategy.seen_on_roll_day == {'VN30F2210': 2}
+
+
+@requires_corpus
+def test_the_roll_leaves_the_back_month_and_nothing_else(expiry_run):
+    """One lot sold, one lot bought, one lot settled: the book is the back
+    month alone from the close of the expiry day."""
+    after = [row for row in expiry_run.strategy.marks
+             if row['ts'] == datetime(2022, 10, 20, 14, 45)]
+    assert after and after[0]['positions'] == {'VN30F2211': 1}
+
+    final = expiry_run.result.snapshots[-1]
+    assert final.positions == {}
+
+
+@requires_corpus
+def test_each_contract_settles_exactly_once(expiry_run):
+    """Two contracts, two ``EXPIRY_SETTLED`` rows, on the two expiry days.
+
+    The pre-fix run produced **three**: the extra one settled the phantom
+    short the expiry-day sell had opened.
+    """
+    rows = expiry_run.settlements
+    assert [(r.ticker, r.ts) for r in rows] == [
+        ('VN30F2210', datetime(2022, 10, 20, 14, 45)),
+        ('VN30F2211', datetime(2022, 11, 17, 14, 45)),
+    ]
+    assert [r.quantity for r in rows] == [1, 1]
+
+
+@requires_corpus
+def test_the_settlement_price_records_which_tier_produced_it(expiry_run):
+    """A close standing in for a settlement price is a **substitution**.
+
+    The Parquet corpus publishes no ``settlement_price``, so both expiries
+    resolve on ``CLOSE_PROXY``. The event says so, and the ``price_basis``
+    carries the measured cost of the substitution rather than leaving the
+    reader to assume it is nil.
+    """
+    assert expiry_run.sources == ('close_proxy', 'close_proxy')
+    assert expiry_run.substituted == (True, True)
+    for row in expiry_run.settlements:
+        assert 'trimmed 14:15-14:45 average' in row.detail['price_basis']
+
+
+@requires_corpus
+def test_the_settlement_cash_flow_is_marked_from_the_variation_reference(
+        expiry_run):
+    """``quantity x multiplier x (settlement - reference)``, to the dong.
+
+    Both VN30F2210 lots were opened at 1032.5 and no daily settlement ever
+    ran, so the reference is still the entry price: one lot settled at 1058.0
+    pays ``1 x 100,000 x 25.5 = 2,550,000``. The VN30F2211 lot was bought at
+    1037.2 on the roll and settled at 972.5: ``1 x 100,000 x -64.7 =
+    -6,470,000``.
+    """
+    front = expiry_run.settlement_for('VN30F2210')
+    back = expiry_run.settlement_for('VN30F2211')
+    assert front.amount == (Decimal('1') * S.VN30F_MULTIPLIER
+                            * (Decimal('1058.0') - Decimal('1032.5')))
+    assert front.amount == Decimal('2550000.0')
+    assert back.amount == (Decimal('1') * S.VN30F_MULTIPLIER
+                           * (Decimal('972.5') - Decimal('1037.2')))
+    assert back.amount == Decimal('-6470000.0')
+
+
+@requires_corpus
+def test_a_contract_carried_into_settlement_pays_the_transfer_tax(expiry_run):
+    """Rulebook 8.1/12.3: taxable *"when matched, **or at contract
+    maturity**"*.
+
+    ``charges.assess_at_maturity`` was implemented, sourced and tested with no
+    call site (FEATURES.md s16.3 #16), so every held-to-expiry contract went
+    untaxed -- one whole leg of tax that a trader who closed the day before
+    pays. The expected figures are rebuilt here from the statute's own
+    structure, ``0.001 x notional x IM / 2``, not copied from the run.
+
+    Without ``_maturity_charges`` both of these read ``()`` and ``0``.
+    """
+    front = expiry_run.settlement_for('VN30F2210')
+    back = expiry_run.settlement_for('VN30F2211')
+    assert front.detail['charges'] == ('pit_derivatives_transfer',)
+    assert back.detail['charges'] == ('pit_derivatives_transfer',)
+    assert front.detail['charges_total'] == S.maturity_tax(
+        1, Decimal('1058.0'), Decimal('0.13')) == Decimal('6877')
+    assert back.detail['charges_total'] == S.maturity_tax(
+        1, Decimal('972.5'), Decimal('0.13')) == Decimal('6321')
+
+
+@requires_corpus
+def test_closing_by_trade_costs_more_than_closing_by_settlement(expiry_run):
+    """Two identical lots, same price, same day, two different fee bills.
+
+    Both VN30F2210 lots left the book on 2022-10-20 at 1058.0. The one sold
+    paid three rows -- HNX's service price 2,700, VSDC's clearing fee 2,550
+    and the transfer tax 6,877 -- and the one settled paid the tax alone. The
+    5,250 difference is **deliberately not levied**: no source read charges
+    either fee on a final cash settlement, and ``assess_at_maturity`` says so
+    in its own docstring. This test exists so the omission stays visible; if a
+    source is later found, it fails.
+    """
+    on_expiry_day = [c for c in expiry_run.result.logs.cash.entries
+                     if c.ts == datetime(2022, 10, 20, 14, 45)
+                     and c.movement is CashMovement.CHARGE_DEBITED]
+    traded = [c for c in on_expiry_day if 'FILL-000002' in (c.cause or '')]
+    settled = [c for c in on_expiry_day
+               if 'final settlement of VN30F2210' in (c.cause or '')]
+
+    assert sorted(-c.amount for c in traded) == [Decimal('2550'),
+                                                 Decimal('2700'),
+                                                 Decimal('6877')]
+    assert [-c.amount for c in settled] == [Decimal('6877')]
+    assert (sum(-c.amount for c in traded)
+            - sum(-c.amount for c in settled)) == Decimal('5250')
+
+
+@requires_corpus
+def test_the_deposit_reconciles_to_the_dong_over_the_whole_run(expiry_run):
+    """Opening balance plus every logged movement equals the closing balance.
+
+    And the same figure rebuilt independently from the trades: two lots long
+    VN30F2210 from 1032.5, both out at 1058.0 (+5,100,000); one lot long
+    VN30F2211 from 1037.2, out at 972.5 (-6,470,000); five charge occasions.
+    """
+    rows = [c for c in expiry_run.result.logs.cash.entries
+            if c.pool == 'derivatives']
+    opening = rows[0].amount
+    assert opening == Decimal('200000000')
+    assert rows[-1].balance_after == opening + sum(r.amount for r in rows[1:])
+
+    charges = sum(-c.amount for c in rows
+                  if c.movement is CashMovement.CHARGE_DEBITED)
+    trading = (Decimal('2') * S.VN30F_MULTIPLIER
+               * (Decimal('1058.0') - Decimal('1032.5'))
+               + Decimal('1') * S.VN30F_MULTIPLIER
+               * (Decimal('972.5') - Decimal('1037.2')))
+    assert rows[-1].balance_after == opening + trading - charges
+    assert rows[-1].balance_after == Decimal('198568760')
+
+
+@requires_corpus
+def test_every_derivatives_charge_row_is_joinable_to_the_charge_that_made_it(
+        expiry_run):
+    """The derivatives statement names its fees, like the securities one.
+
+    Measured before the fix: ``session.charges()`` returned 11 itemised
+    derivatives charges and the cash log carried 11 anonymous debits -- three
+    rows reading ``charge_debited -2,700 / -6,877 / -2,550 "charges on
+    FILL-000002"`` where a *sao ke phai sinh* names phi giao dich, phi bu tru
+    and thue TNCN. ``charge_kind``, ``fill_id`` and ``ticker`` were all
+    ``None``, because ``drain_deposit`` builds these rows from
+    ``DepositEntry``, which carries none of them.
+
+    That was not only a readability gap: it is what made
+    ``deposit_segregation`` vacuous on every derivatives run, since the
+    identity joins on ``charge_kind`` and ``fill_id``.
+    """
+    rows = [c for c in expiry_run.result.logs.cash.entries
+            if c.pool == 'derivatives'
+            and c.movement is CashMovement.CHARGE_DEBITED]
+    assert len(rows) == 11
+
+    # Every row names its levy, its base and the pool that owes it. Before
+    # the fix every one of these was None and the assertion below was the
+    # difference between an itemised statement and eleven anonymous debits.
+    for row in rows:
+        assert row.charge_kind is not None, row.cause
+        assert row.charge_base is not None
+        assert row.charge_base_value is not None
+        assert row.detail['pool'] == 'derivatives'
+        assert row.detail['venue'] == 'HNXDS'
+        assert row.ticker == 'VN30F2210' or row.ticker == 'VN30F2211'
+
+    # And the kinds are the three a derivatives contract note carries.
+    assert {r.charge_kind for r in rows} == {
+        'exchange_service_index_future', 'pit_derivatives_transfer',
+        'vsdc_derivatives_clearing'}
+    # The itemisation reconciles to the run's own total, kind by kind.
+    by_kind = {}
+    for row in rows:
+        by_kind[row.charge_kind] = by_kind.get(row.charge_kind,
+                                               Decimal('0')) - row.amount
+    assert by_kind['exchange_service_index_future'] == Decimal('10800')
+    assert by_kind['vsdc_derivatives_clearing'] == Decimal('10200')
+    assert by_kind['pit_derivatives_transfer'] == Decimal('40240')
+    assert sum(by_kind.values()) == Decimal('61240')
+
+
+@requires_corpus
+def test_every_identity_holds_across_the_expiry_run(expiry_run):
+    assert expiry_run.result.failed_identities == ()
+    assert expiry_run.result.error is None
+
+
+@requires_corpus
+def test_an_order_in_a_dead_contract_is_refused_for_want_of_data_not_expiry(
+        expiry_run):
+    """A gap, pinned rather than hidden.
+
+    After 2022-10-20 VN30F2210 no longer exists, and the sell submitted on
+    2022-10-21 is indeed refused -- but on ``band_limit`` with verdict
+    ``INDETERMINATE`` and ``band_source='absent'``, i.e. *the corpus has no
+    row*, not *this contract has expired*. On a source that kept publishing a
+    price past the last trading day the same order would be **admitted**, and
+    the account would open a position in a contract the exchange has
+    delisted. There is no admission rule keyed on ``InstrumentSpec.expiry``;
+    ``ExpiryTrigger.INSTRUMENT_EXPIRY`` is declared in ``types.py`` and fired
+    nowhere.
+    """
+    refused = expiry_run.strategy.after_expiry
+    assert len(refused) == 1
+    assert refused[0].rule.value == 'band_limit'
+    assert refused[0].verdict.value == 'indeterminate'
+    assert refused[0].detail.get('band_source') == 'absent'
+
+
+@requires_corpus
+def test_every_order_reached_a_terminal_state(expiry_run):
+    """Four submissions, three accepted-and-filled, one refused. Nothing live.
+
+    ``order_lifecycle`` checks the join both ways -- every fill has an
+    ``ACCEPTED`` row and every accepted order ends live or terminal -- and the
+    final snapshot is the other half: no order is still resting after the last
+    close.
+    """
+    actions = [t.action.value for t in expiry_run.result.logs.trades.entries]
+    assert actions.count('submitted') == 4
+    assert actions.count('accepted') == 3
+    assert actions.count('filled') == 3
+    assert actions.count('rejected') == 1
+    assert expiry_run.result.snapshots[-1].live_orders == 0
+
+
+@requires_corpus
+def test_the_settlement_price_the_run_used_is_the_corpus_close(expiry_run):
+    """And what that substitution cost, measured against the published price.
+
+    The Parquet corpus has no ``settlement_price``, so both expiries resolve
+    at the futures close. Read read-only from the production
+    ``quote.settlementprice``, the real final settlements were **1058.29** and
+    **972.78** against the 1058.00 and 972.50 used here -- **-29,000 and
+    -28,000 VND per contract**, one-sided, and four times the size of the
+    transfer tax the same settlement now pays.
+
+    The published figures are in ``PUBLISHED_SETTLEMENT`` with their
+    timestamps. This test asserts only what runs offline: that the price used
+    *is* the close, and that it is flagged as a substitution rather than
+    passed off as a settlement.
+    """
+    assert expiry_run.settlement_for('VN30F2210').detail['settlement_source'] \
+        == 'close_proxy'
+    front = expiry_run.settlements[0]
+    back = expiry_run.settlements[1]
+    assert 'final settlement at 1058.0' in front.reason
+    assert 'final settlement at 972.5' in back.reason
+
+    gap_front = (S.PUBLISHED_SETTLEMENT['VN30F2210'] - Decimal('1058.0')
+                 ) * S.VN30F_MULTIPLIER
+    gap_back = (S.PUBLISHED_SETTLEMENT['VN30F2211'] - Decimal('972.5')
+                ) * S.VN30F_MULTIPLIER
+    assert gap_front == Decimal('29000.000')
+    assert gap_back == Decimal('28000.000')
+
+
+@requires_corpus
+def test_under_hard_fills_the_whole_scenario_is_undecidable():
+    """The calibration for every other number in this file.
+
+    ``soft`` is the optimistic bound and it is what makes these scenarios
+    runnable at all. Under ``hard`` -- the policy that refuses to claim a fill
+    the bar cannot evidence -- the identical strategy on the identical window
+    fills **nothing**: three orders go INDETERMINATE, are swept EXPIRED at the
+    close, no position is ever opened and no expiry is ever settled.
+
+    And ``by_field`` is **empty** while it happens, so a caller asking which
+    data was missing is told nothing. Every fill in this module is therefore a
+    model output.
+    """
+    run = S.run_expiry_under_hard_fills()
+    actions = [t.action.value for t in run.result.logs.trades.entries]
+    assert actions.count('filled') == 0
+    assert actions.count('indeterminate') == 3
+    assert actions.count('expired') == 3
+    assert run.settlements == ()
+    assert run.result.snapshots[-1].positions == {}
+    assert run.result.indeterminate.indeterminate == 3
+    assert run.result.indeterminate.by_field == {}
+    assert run.result.failed_identities == ()
+
+
+# --------------------------------------------------------------------------
+# Overnight holding
+# --------------------------------------------------------------------------
+
+@requires_corpus
+def test_the_tet_break_is_eight_calendar_days_with_no_mark(tet_run):
+    """No mark, no call, no cure, and a 46.3-point gap on the far side.
+
+    2021-02-09 is the last session before Tet 2021 and 2021-02-17 the first
+    after it. An account holding six lots is in breach for the whole of it and
+    there is no instant at which it could have been marked, called or closed.
+    """
+    gaps = S.unmarked_gaps(tet_run.result)
+    assert (date(2021, 2, 9), date(2021, 2, 17), 8) in gaps
+
+    marks = tet_run.strategy.marks
+    inside = [m for m in marks
+              if date(2021, 2, 10) <= m['ts'].date() <= date(2021, 2, 16)]
+    assert inside == []
+
+
+@requires_corpus
+def test_the_overnight_gap_arrives_as_one_mark(tet_run):
+    """1130.3 -> 1176.6 in a single step: 46.3 points, 27,780,000 VND on six
+    lots, and the requirement moves the whole way in one advance."""
+    before = tet_run.strategy.at(date(2021, 2, 9), 'close')
+    after = tet_run.strategy.at(date(2021, 2, 17), 'open')
+    assert before['initial_margin'] == (Decimal('0.13') * Decimal('6')
+                                        * S.VN30F_MULTIPLIER
+                                        * Decimal('1130.3'))
+    assert after['initial_margin'] == (Decimal('0.13') * Decimal('6')
+                                       * S.VN30F_MULTIPLIER
+                                       * Decimal('1176.6'))
+
+
+@requires_corpus
+def test_the_deposit_never_moves_while_the_account_is_in_breach(tet_run):
+    """FEATURES.md D1/A60, measured on six lots across Tet 2021.
+
+    The account reports ``FORCED`` on 2021-02-08 and stays in breach through
+    2021-02-18, and over that whole stretch ``deposit_balance`` is
+    **99,939,344 at every single mark**. Nothing is paid, nothing is
+    collected, and the entire position P&L arrives in one movement at expiry.
+
+    That is internally consistent -- ``DerivativesAccount`` declares in its
+    own class docstring that Tier 1 does not model the T+1 leg, and an account
+    that never pays must carry the whole loss in ``MR`` -- but it is not a
+    Vietnamese broker statement, on which the balance moves every session.
+    """
+    breach = [m for m in tet_run.strategy.marks
+              if m['status'] in (MarginStatus.CALL.value,
+                                 MarginStatus.FORCED.value)]
+    assert breach, 'the window is sized to breach; it did not'
+    assert {m['deposit_balance'] for m in breach} == {Decimal('99939344')}
+
+    settled = tet_run.settlements
+    assert len(settled) == 1
+    assert settled[0].amount == (Decimal('6') * S.VN30F_MULTIPLIER
+                                 * (Decimal('1187.3') - Decimal('1139.9')))
+    assert settled[0].amount == Decimal('28440000.0')
+
+
+@requires_corpus
+def test_the_ladder_is_walked_in_order_and_skips_no_rung_it_reached(tet_run):
+    """Six lots: WARNING at 0.8897 on the entry mark, FORCED at 1.1399 next.
+
+    The ``CALL`` rung is never reported and that is correct -- ``on_mark``
+    reports **at most one step** and a jump straight past the call level
+    reports ``FORCED`` without inventing an intermediate call that never
+    happened. What follows is the documented Tier 1 behaviour and is pinned
+    here so nobody reads it as an escalation: ``FORCED_LIQUIDATION``
+    *reports* and does not execute (``detail['executed'] is False``), so the
+    account stays in breach and the event repeats at **every** mark --
+    including on 2021-02-17 and 2021-02-18, when utilisation is back down at
+    0.918 and 0.927, below the forced rung. Count distinct sessions, never
+    events.
+    """
+    kinds = [(e.ts, e.kind) for e in S.margin_events(tet_run.result)]
+    assert kinds[0] == (datetime(2021, 2, 5, 14, 45),
+                        EventKind.MARGIN_WARNING)
+    assert kinds[1] == (datetime(2021, 2, 8, 9, 30),
+                        EventKind.FORCED_LIQUIDATION)
+    assert all(k is EventKind.FORCED_LIQUIDATION for _, k in kinds[1:])
+    assert EventKind.MARGIN_CALL not in {k for _, k in kinds}
+
+    forced = S.margin_events(tet_run.result, EventKind.FORCED_LIQUIDATION)
+    assert all(e.detail['executed'] is False for e in forced)
+    assert len(forced) > len({e.ts.date() for e in forced})
+
+
+@requires_corpus
+def test_the_derivatives_settlement_log_carries_expiries_and_nothing_else(
+        tet_run, expiry_run):
+    """What a Vietnamese futures statement is mostly made of is not here.
+
+    A derivatives account statement is a daily list of *lai lo vi the*
+    settling T+1 -- one line per session for as long as the position is open.
+    The settlement log's derivatives leg carries ``EXPIRY_SETTLED`` rows only:
+    no daily variation settlement (it does not happen, D1) and no row for the
+    P&L realised by an offsetting trade, which lands in the **cash** log as
+    ``realised_pnl`` on trade date rather than in the settlement log on T+1.
+
+    So the three logs are complete for what the simulator models, and the
+    simulator does not model the leg that dominates a real statement.
+    """
+    for run in (tet_run.result, expiry_run.result):
+        legs = {r.leg for r in run.logs.settlement.entries}
+        assert legs <= {'derivatives'}
+        assert all(r.action is SettlementAction.EXPIRY_SETTLED
+                   for r in run.logs.settlement.entries)
+
+    realised = [c for c in expiry_run.result.logs.cash.entries
+                if c.movement is CashMovement.REALISED_PNL]
+    assert realised, 'the roll realised a close-out'
+    assert realised[0].ts == datetime(2022, 10, 20, 14, 45)   # trade date
+    assert not [r for r in expiry_run.result.logs.settlement.entries
+                if r.ticker == 'VN30F2210'
+                and r.action is not SettlementAction.EXPIRY_SETTLED]
+
+
+@requires_corpus
+def test_the_corpus_inverts_the_futures_band_around_tet_2021():
+    """A data defect that reaches the derivatives rows, pinned here.
+
+    ``quote_ceil`` and ``quote_floor`` are swapped for VN30F2102 on
+    **2021-02-08** and **2021-02-09** -- the two sessions either side of the
+    Tet break -- so ``ceiling < floor`` and every order on them is refused on
+    ``band_limit``. The session is right to refuse; the point of the test is
+    that a scenario placed on those two dates measures the corpus, not the
+    rulebook.
+    """
+    source = S.datahub_source()
+    for day in (date(2021, 2, 8), date(2021, 2, 9)):
+        state = source.state_at('VN30F2102',
+                                datetime.combine(day, time(9, 30)))
+        assert state is not None
+        assert state.ceiling < state.floor, day
+
+
+# --------------------------------------------------------------------------
+# Flat by close versus holding overnight
+# --------------------------------------------------------------------------
+
+@requires_corpus
+def test_flat_by_close_carries_no_overnight_requirement(overnight_pair):
+    """The day-trader's requirement at 14:45 is zero; the holder's is not.
+
+    Both accounts bought two VN30F2211 lots at 942.0 on 2022-10-24; the
+    day-trader also sold two, at the same price, in the same session. At the
+    close one carries 24,492,000 VND of requirement into the night and the
+    other carries none.
+    """
+    assert overnight_pair.requirement(flat=True) == Decimal('0')
+    assert overnight_pair.requirement(flat=False) == (
+        Decimal('0.13') * Decimal('2') * S.VN30F_MULTIPLIER
+        * Decimal('942.0'))
+    assert overnight_pair.requirement(flat=False) == Decimal('24492000.000')
+    assert overnight_pair.day_trader.snapshots[-1].positions == {}
+    assert overnight_pair.holder.snapshots[-1].positions == {'VN30F2211': 2}
+
+
+@requires_corpus
+def test_the_overnight_requirement_is_the_intraday_formula(overnight_pair):
+    """Finding F-1 says the overnight layer is the scenario grid. It is not.
+
+    At every step of the holder's run the requirement is exactly
+    ``posted_margin + resting_order_margin + variation_margin`` -- the
+    continuously updated broker number ``MR = IM + VM`` that ``deposit.py``
+    computes -- and the 14:45 figure is produced by the same call, on the same
+    basis, as the 09:30 one. There is no post-close recomputation, no
+    underlying-close basis and no scenario-grid term anywhere in the run.
+
+    ``broker_profile.MarginModel.SCENARIO_GRID`` and
+    ``MarginLayer.OVERNIGHT`` exist and name
+    ``plutus.market.session.scenario_margin`` as the engine; no module under
+    ``session/`` imports it.
+
+    A naming trap found on the way, worth knowing before reading any margin
+    number off a snapshot: ``MarginView.initial_margin`` is
+    ``initial + resting_order_margin``, so it already contains the resting
+    leg. ``posted_margin`` is the open-position half alone. Adding
+    ``initial_margin`` and ``resting_order_margin`` double-counts a resting
+    order, which is what the first version of this test did.
+    """
+    for snapshot in overnight_pair.holder.snapshots:
+        assert snapshot.margin_required == (snapshot.posted_margin
+                                            + snapshot.resting_order_margin
+                                            + snapshot.variation_margin)
+        assert snapshot.initial_margin == (snapshot.posted_margin
+                                           + snapshot.resting_order_margin)
+
+    rules = Rulebook.load('vn-2020-2026')
+    for stamp in (datetime(2022, 10, 24, 9, 30),
+                  datetime(2022, 10, 24, 14, 45)):
+        assert rules.at(stamp).margin_model() == 'pre_margin'
+
+
+@requires_corpus
+def test_daily_variation_margin_does_not_settle_in_cash(variation_trail):
+    """One lot, twenty sessions, and one cash movement at the end.
+
+    VSDC settles *lai lo vi the* on T+1 (Phu luc 7 section C.I: reported by
+    16h50, cash moves the next day) and every Vietnamese broker statement
+    shows the deposit moving each session. Here it does not move at all
+    between the entry fill and the final settlement -- ``settle_daily`` exists
+    and has no session call site (D1) -- and the largest single day's
+    unsettled mark over the hold is **6,260,000 VND**, on 2022-11-16.
+
+    What arrives instead is one movement for the whole position's P&L. The two
+    agree in total, which is why this is not a conservation break; they
+    disagree in *when*, by up to 20 sessions, which is why an account replayed
+    against a real broker statement will not match.
+    """
+    assert variation_trail.deposit_moved_between_entry_and_close_out is False
+    assert variation_trail.largest_unsettled_daily_move == Decimal('6260000.0')
+    assert (sum(move for _, _, move in variation_trail.daily)
+            == variation_trail.realised_at_close_out
+            == Decimal('-1250000.0'))
+    assert variation_trail.result.failed_identities == ()
+
+
+# --------------------------------------------------------------------------
+# The cure window, and the calendar nobody shipped
+# --------------------------------------------------------------------------
+
+@requires_corpus
+def test_the_shipped_calendar_puts_the_cure_deadline_inside_tet(cure_run):
+    """A margin call whose deadline is a day the market is shut.
+
+    The call is raised at the close of 2022-01-28, the last session before Tet
+    2022. ``cure_by`` is the next session's open, and the shipped
+    ``weekday_trading_calendar`` -- which is what every default run gets,
+    because this repository ships no calendar data at all -- says that is
+    **2022-01-31**. The market, the depository and the broker were all closed
+    from 2022-01-31 to 2022-02-04.
+    """
+    arm = cure_run.arm('weekday-only')
+    assert arm.call_ts == datetime(2022, 1, 28, 14, 45)
+    assert arm.cure_by == datetime(2022, 1, 31, 8, 45)
+    assert arm.cure_deadline_is_a_trading_day is False
+    assert date(2022, 1, 31) in S.TET_2022_CLOSURE
+
+
+@requires_corpus
+def test_the_same_account_is_cured_or_forced_by_the_calendar_alone(cure_run):
+    """Same trades, same prices, same broker terms: two different outcomes.
+
+    Under the shipped weekday-only calendar the deadline had passed while the
+    market was closed, so the first mark after the reopen escalates to
+    ``FORCED`` -- and it does so **even though the trader paid 30,000,000 VND
+    into the segregated deposit on that same session**, which the log shows
+    accepted. Under a calendar that knows Tet, the deadline is the reopen
+    itself, the payment lands inside it, and no forced liquidation is ever
+    emitted.
+
+    Nothing about the market differed. The difference is entirely
+    ``settlement_calendar_id == 'weekday-only-UNSOURCED'``.
+    """
+    weekday = cure_run.arm('weekday-only')
+    measured = cure_run.arm('measured')
+
+    assert weekday.was_forced is True
+    assert weekday.forced_ts == datetime(2022, 2, 7, 8, 0)
+    assert type(weekday.strategy.transfer).__name__ == 'Transferred'
+
+    assert measured.was_forced is False
+    assert measured.cure_by == datetime(2022, 2, 7, 8, 45)
+    assert measured.cure_deadline_is_a_trading_day is True
+    assert type(measured.strategy.transfer).__name__ == 'Transferred'
+
+    # The cure worked in both arms: the account is OK by the close of the
+    # reopening session either way. Only one of them was force-closed first.
+    for arm in (weekday, measured):
+        row = arm.strategy.at(date(2022, 2, 7), 'close')
+        assert row['status'] == MarginStatus.OK.value
+
+
+@requires_corpus
+def test_the_documented_loop_cannot_cure_a_margin_call(cure_run_default_loop):
+    """``cure_by`` lands between the two advances the loop is built from.
+
+    ``advance_to`` documents a two-advance day and the runner implements it:
+    09:30 then 14:45. ``_cure_deadline`` returns the **next session's open**,
+    HNXDS 08:45. So the 09:30 advance marks, finds the deadline already past,
+    and escalates -- before ``on_session`` is called and before the caller can
+    submit anything. Under that loop the cure window is wall-clock non-empty
+    and decision-point empty, and **both** calendars force.
+
+    This is not a defect in the state machine. It is what "the deadline is the
+    open of the next session" means when the caller's first look at the market
+    is 45 minutes later, and it is why :func:`run_cure_across_tet` steps at
+    08:00. The regulated top-up deadline is 09h30 T+1 (QD 26 Dieu 13.1), so
+    the direction to move in is later, not earlier.
+    """
+    for arm in cure_run_default_loop.arms:
+        assert arm.was_forced is True
+        assert arm.forced_ts == datetime(2022, 2, 7, 9, 30)
+
+
+@requires_corpus
+def test_the_margin_view_never_reports_the_cure_deadline(cure_run):
+    """``session.margin().cure_by`` is ``None`` even at the instant of a call.
+
+    ``account_margin_requirement`` returns ``cure_by=None`` deliberately and
+    says why -- a deadline is state carried across days by
+    ``MarginMonitor``, not a property of one mark -- and that is right. The
+    gap is one level up: ``MarginMonitor.outstanding_call`` exists, is
+    correct, and **``ExchangeSession`` exposes no path to it**; the string
+    ``outstanding_call`` does not appear in ``exchange.py``. So the deadline
+    is stamped on the ``MARGIN_CALL`` event and nowhere else, and a strategy
+    that reads its state rather than its event stream -- which is how a broker
+    API is normally used, and the only thing available to a caller that
+    restarted -- cannot find out when it has to pay.
+    """
+    arm = cure_run.arm('measured')
+    assert arm.cure_by is not None
+    at_call = [m for m in arm.strategy.marks
+               if m['ts'] == arm.call_ts]
+    assert at_call and at_call[0]['status'] == MarginStatus.CALL.value
+    assert all(m['cure_by'] is None for m in arm.strategy.marks)
+
+
+# --------------------------------------------------------------------------
+# After the KRX cutover
+# --------------------------------------------------------------------------
+
+def test_the_session_never_asks_which_margin_model_applies():
+    """A 2026 position is margined by the pre-KRX formula, silently.
+
+    ``RuleSet.margin_model()`` is the rulebook's own answer to "which model
+    applies here", and from ``KRX_CUTOVER`` it **raises**: the post-KRX value
+    is not sourced, because QD 26's Phu luc 2 parameter table is unpublished.
+    The session never calls it. A VN30F2603 long carried through the real
+    2026-03-09 limit-down is margined ``IM + VM`` at 0.17 -- the pre-KRX
+    broker shape, ten months past the cutover -- the run completes, no
+    exception is raised, and ``indeterminate_report`` counts **zero**
+    undecided evaluations.
+
+    A run that cannot resolve a *band* answers INDETERMINATE and counts it. A
+    run that cannot resolve the *margin model* answers with last year's.
+    """
+    result, strategy, model, raised = S.run_post_krx_margin_model()
+
+    assert model is None
+    assert isinstance(raised, UnresolvedRule)
+    assert 'POST-KRX VALUE NOT SOURCED' in str(raised)
+
+    assert result.error is None
+    assert result.failed_identities == ()
+    assert result.indeterminate.indeterminate == 0
+
+    crash = strategy.at(date(2026, 3, 9), 'close')
+    assert crash['initial_margin'] == (Decimal('0.17') * Decimal('2')
+                                       * S.VN30F_MULTIPLIER
+                                       * Decimal('1766.0'))
+    assert crash['variation_margin'] == (Decimal('2') * S.VN30F_MULTIPLIER
+                                         * (Decimal('2015.0')
+                                            - Decimal('1766.0')))
+    assert crash['required'] == (crash['initial_margin']
+                                 + crash['variation_margin'])
+    assert crash['required'] == Decimal('109844000.000')
+
+
+def test_the_maturity_tax_helper_matches_the_statutory_structure():
+    """``0.001 x (contracts x multiplier x price x IM / 2)``, whole dong.
+
+    Written out so the expiry tests derive their expectation from the statute
+    rather than from the run they are checking.
+    """
+    assert S.maturity_tax(1, Decimal('1300'), Decimal('0.17')) == Decimal(
+        '11050')
+    assert S.maturity_tax(2, Decimal('1058.0'), Decimal('0.13')) == Decimal(
+        '13754')
+    # The row is two-sided: a short pays it too, on the same absolute size.
+    assert S.maturity_tax(-1, Decimal('972.5'),
+                          Decimal('0.13')) == Decimal('6321')
+
+
+def test_the_expiry_settlement_waits_for_the_venue_close():
+    """The rule the timing fix implements, stated against the rulebook.
+
+    HNXDS closes at 14:45. An advance to 09:30 on the expiry date is inside
+    the last trading session and must not settle; an advance to 14:45 is at
+    the close and must.
+    """
+    rules = Rulebook.load('vn-2020-2026').at(datetime(2022, 10, 20, 9, 30))
+    assert rules.session_close(Venue.HNXDS) == time(14, 45)
+    assert time(9, 30) < rules.session_close(Venue.HNXDS)

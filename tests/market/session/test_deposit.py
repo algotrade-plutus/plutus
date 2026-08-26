@@ -1304,6 +1304,79 @@ def test_withdrawal_is_bounded_by_assets_minus_mr_not_assets_minus_im():
     assert account.deposit_balance == Decimal('37000001')
 
 
+def test_an_opening_order_may_not_commit_what_a_withdrawal_may_not_pay_out():
+    """The admission bound is the withdrawal bound. VM funds neither.
+
+    The paired case to
+    :func:`test_withdrawal_is_bounded_by_assets_minus_mr_not_assets_minus_im`,
+    on exactly the same account: 110m of assets, IM 17m, VM 20m, MR 37m,
+    status ``OK``, ``free_deposit`` 93m and equity 73m.
+
+    That test pins that 73m is the most the account may **withdraw**. This one
+    pins that 73m is also the most it may **commit**, and before the fix it was
+    not: ``reserve_for_order`` tested ``required > free_deposit`` alone, so an
+    order needing 85m -- more than the equity, and 12m more than the account
+    was allowed to take out in cash at the very same instant -- was admitted.
+    Funding it puts MR at 122m against 110m of assets, utilisation 1.109, and
+    the next mark force-closes an account that had not moved.
+
+    That is the incoherence: ``reserve_for_order``'s own level-3 gate refuses
+    to open a position on a ``FORCED`` account, and this test's order is the
+    action that makes the account ``FORCED``.
+    """
+    account, _ = build_account(deposit=Decimal('110000000'))
+    account.apply_fill(fill(quantity=1, price=Decimal('1200')), None)
+    account.observe_marks({VN30F: Decimal('1000')}, TS)
+
+    view = account.margin({}, None, BrokerTerms(), TS)
+    assert view.status is MarginStatus.OK
+    assert view.free_deposit == Decimal('93000000')
+    assert view.equity == Decimal('73000000')
+
+    # 85m: comfortably inside free_deposit, well outside the equity.
+    refused = account.reserve_for_order(OrderId('O-2'), order(quantity=1),
+                                        Decimal('5000'), None, None, TS)
+    assert isinstance(refused, Rejected)
+    assert refused.rule is StatefulRule.INSUFFICIENT_DEPOSIT
+    assert refused.detail['required'] == Decimal('85000000')
+    # The bound that bit is the equity, not the loose figure.
+    assert refused.binding_constraint == Decimal('73000000')
+    assert refused.detail['openable'] == Decimal('73000000')
+    assert refused.detail['free_deposit'] == Decimal('93000000')
+    # Nothing was reserved: the account is exactly where it started.
+    assert account.margin({}, None, BrokerTerms(), TS).required == Decimal(
+        '37000000')
+
+    # And the mirror: an order inside the equity is still admitted, so the
+    # gate tightened rather than closed.
+    ok = account.reserve_for_order(OrderId('O-3'), order(quantity=1),
+                                   Decimal('4000'), None, None, TS)
+    assert isinstance(ok, Encumbrance)
+    assert ok.amount == Decimal('68000000')
+
+
+def test_the_admission_bound_is_unchanged_when_the_account_carries_no_loss():
+    """Guards against over-tightening: with VM zero the two bounds coincide.
+
+    ``balance - required`` collapses to ``balance - posted - resting`` exactly
+    when there is no unrealised loss, so an account in profit or flat sees the
+    behaviour it always saw. Without this, the fix above could have been a
+    silent tightening of every well-funded account in the suite.
+    """
+    account, _ = build_account(deposit=Decimal('110000000'))
+    account.apply_fill(fill(quantity=1, price=Decimal('1000')), None)
+    account.observe_marks({VN30F: Decimal('1200')}, TS)   # the position gains
+
+    view = account.margin({}, None, BrokerTerms(), TS)
+    assert view.variation_margin == Decimal('0')          # loss-only
+    assert view.free_deposit == view.equity == Decimal('89600000')
+
+    ok = account.reserve_for_order(OrderId('O-2'), order(quantity=1),
+                                   Decimal('5000'), None, None, TS)
+    assert isinstance(ok, Encumbrance)
+    assert ok.amount == Decimal('85000000')
+
+
 def test_a_flat_account_may_still_be_emptied():
     """No requirement, no bound. The withdrawal test is a utilisation test.
 

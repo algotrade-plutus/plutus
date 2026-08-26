@@ -150,7 +150,21 @@ class InstrumentSpec:
 
 @dataclass(frozen=True)
 class Order:
-    """An order as presented to an exchange for admission."""
+    """An order as presented to an exchange for admission.
+
+    ``on_margin`` marks a *lenh giao dich ky quy* -- a purchase funded partly
+    by broker credit. QD 87/QD-UBCK Dieu 13.5(e) requires a margin order ticket
+    to be **distinguishable** from an ordinary one, and this flag is how. It is
+    a flag and not a distinct ``OrderType`` member, which is a declared
+    deviation from the article's shape: in this package the order type carries
+    the time-in-force and the per-type terminal edges, so a "margin" type would
+    have to answer questions about resting and expiry that have nothing to do
+    with lending. See ``session/equity_margin.py``'s ``WIRING_PROVENANCE``
+    under ``margin_order_flag``.
+
+    A session with no equity margin account refuses an ``on_margin`` order
+    rather than silently treating it as a cash buy.
+    """
 
     ticker: str
     side: Side
@@ -158,6 +172,7 @@ class Order:
     order_type: OrderType = OrderType.LIMIT
     limit_price: Optional[Decimal] = None
     is_foreign: bool = False
+    on_margin: bool = False
 
 
 @dataclass(frozen=True)

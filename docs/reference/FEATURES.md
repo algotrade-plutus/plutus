@@ -16,10 +16,17 @@ had not been read.
 This file is the substitute for a memory the next session will not have.
 
 - **Repo:** `/Users/nadan/algotrade-research/plutus` · branch `rivf26-wp1-wp2-wp4`
-- **Suite:** `python -m pytest tests -q` → **1318 passed**, 0 failed, 2026-08-26 (1314
-  before this session; four tests added). **Note the word "passed", not "collected"** —
-  `python -m pytest tests --collect-only` reports **1365**, and the 47-test gap is a
-  live finding, not a rounding: see **D36**
+- **Suite:** `python -m pytest -q` → **2198 passed**, 0 failed, 2026-08-27 (2181 at the
+  start of the validation pass; 17 tests added, 6 corrected — several of which had been
+  *pinning defects as expected behaviour*). **Note the word "passed", not "collected"** —
+  the 47-test collected/passed gap recorded as **D36** was measured on the 1318-test tree
+  and has not been re-measured since; do not quote D36's numbers against this one
+- **Validated end to end:** 2026-08-27. Seven scenarios (`deriv-margin`, `equity-margin`,
+  `order-cycle`, `settlement`, `expiry-overnight`, `pair-trade`, `corporate-charges`) were
+  run against real corpus data and then adversarially audited. **11 defects fixed**
+  (D60–D70), **10 conflicts recorded rather than guessed** (§16.4), **1 auditor claim
+  refuted with measurement** (§16.4 item 8). Read §16.4 before trusting any derivatives
+  settlement or margin-timing number
 - **Last surveyed:** 2026-08-26, by five readers of the actual code (not of docstrings)
 - **Adversarially audited:** 2026-08-26 by four independent auditors; corrections applied
   and every count re-derived. **Read the [verification log](#19-verification-log) at the
@@ -51,7 +58,8 @@ This file is the substitute for a memory the next session will not have.
 | 14 | Data contract and adapters | [§14](#14-data-contract-and-adapters) |
 | 15 | Calendars | [§15](#15-calendars) |
 | 16 | **DEFERRED / FUTURE WORK** — author decisions 1–5 | [§16](#16-deferred--future-work) |
-| 17 | Known defects and docstring mismatches | [§17](#17-known-defects-and-docstring-mismatches) |
+| 16.4 | **CONFLICTS RECORDED RATHER THAN RESOLVED** — the 2026-08-27 validation pass | [§16.4](#164-conflicts-recorded-rather-than-resolved--validation-pass-2026-08-27) |
+| 17 | Known defects and docstring mismatches (**D60–D70 = the validation pass**) | [§17](#17-known-defects-and-docstring-mismatches) |
 | 18 | How to keep this document true | [§18](#18-how-to-keep-this-document-true) |
 | 19 | **Verification log** — what was audited, what was found | [§19](#19-verification-log) |
 
@@ -440,7 +448,7 @@ in `types.py`; `orders.py` holds no second copy.
 | VSDC derivatives clearing | **2,550 VND per novated contract, both legs**, from 2022-01-01 | `:1781` | IMPLEMENTED + SOURCED | HIGH |
 | Broker commission — flat | per-venue rows from `BrokerProfile` | `types.py:2488` | IMPLEMENTED + ASSUMED | Per firm, unsourced by nature |
 | Broker commission — **tiered** | `CommissionSchedule` + `assess_daily` | `charges.py:560-1239` | PARTIAL | Tier **shape** sourced (SSI/VPS wording); **arithmetic landed, never wired** — **no session call site supplies a `CommissionSchedule`**. (`commission=` *is* passed internally at `charges.py:1110`, `:1136`, `ledgers.py:1544`, `:1579` — plumbing, not a caller. The session calls `assess_charges` without it at `exchange.py:2014` and `estimate_charges` without it at `ledgers.py:1749`; `assess_daily` has only test callers) |
-| Derivatives PIT **at contract maturity** | only the tax, HNXDS only | `charges.py:1145-1181` | PARTIAL | **Implemented, sourced, tested and never wired.** Rulebook 8.1 / 12.3: derivatives PIT is due when the order is matched **or at contract maturity**, and a held-to-expiry contract is never matched out, so a fill-only model under-charges by one leg. Refuses non-HNXDS venues with `ValueError`; deliberately levies *only* the tax (exchange and clearing fees are not sourced for a final cash settlement). **Only callers are `tests/market/session/test_charges.py:374, 385, 393`** — `exchange.py:2405-2422` settles expiry and emits `EXPIRY_SETTLED` without calling it, so a held-to-expiry contract pays no transfer tax. §16.3 #16 |
+| Derivatives PIT **at contract maturity** | only the tax, HNXDS only | `charges.py:1145-1181`, wired at `exchange.py::_maturity_charges` | IMPLEMENTED + SOURCED | Rulebook 8.1 / 12.3: derivatives PIT is due when the order is matched **or at contract maturity**, and a held-to-expiry contract is never matched out, so a fill-only model under-charges by one leg. Refuses non-HNXDS venues with `ValueError`; deliberately levies *only* the tax (exchange and clearing fees are not sourced for a final cash settlement). **Wired 2026-08-27** — `_mark_derivatives` calls `_maturity_charges` on every settled expiry, debits the deposit through `_debit_charges` and reports `charges` / `charges_total` on the `EXPIRY_SETTLED` event. Measured: one VN30F2211 lot settling at 972.5 on 2022-11-17 pays **6,321 VND** that it previously paid nothing for. The 5,250 of exchange + clearing fee that a *traded* close pays is still not levied here, on purpose and for want of a source. Closed §16.3 #16 |
 | `ChargeBasis` — the finer, seven-member basis vocabulary | 7 members, 5 of them fill bases | `charges.py:268-291`, `FILL_BASES:297`, `basis_for:339` | IMPLEMENTED + SOURCED | Refines `types.ChargeBase` because "two rows share `ChargeBase.TRADE_VALUE` and do not share a basis": the exchange service price is a fraction of cash trade value on HSX and of futures **notional** on HNXDS, and the derivatives PIT is a fraction of the **margined** value. `CONTRACT_DAYS` / `SECURITY_MONTHS` are listed to make the map total and are **skipped rather than approximated** by every per-fill function (rulebook 12.2) |
 | `margined_value = notional × IM / 2` | the derivatives PIT base | `charges.py:228` | IMPLEMENTED + SOURCED | The `/2` **is in the published source** |
 | `_pit_rate_check` — refuses if the two statements of the derivatives PIT drift | a guard, not a rate | `charges.py:950` | IMPLEMENTED + SOURCED | A live detector, so the VSD ratio cannot fork between `margin.py` and the tax model |
@@ -507,10 +515,12 @@ retained batch-research path whose central quantity **does not exist** — do no
 | Margin withdrawal bound = `balance − MR / forced_close_utilisation` | `deposit.py::transfer_out` | IMPLEMENTED + SOURCED | Rulebook line 602, VSDC §VI and §IV.3, HIGH — **and now primary-sourced: QĐ 26 Điều 11.1 states the same three conditions verbatim.** Condition (2) — securities withdrawn ≤ posted — has no representation because collateral is cash-only. Condition (3) is **narrower than the source**: Điều 11.1.c bars withdrawal from an account suspended for margin breach, position-limit breach *or* payment default; we test only the first (**D35**) |
 | Segregated deposit; **no auto-transfer** | `:762-846` | IMPLEMENTED + SOURCED | Rulebook 6.3, HIGH. Segregation is an import boundary: the module cannot reach securities cash |
 | `DepositEntry` / `DerivativesAccount.entries` — a full audit trail of every deposit movement | `:231-246`, `:906-908` | IMPLEMENTED + SOURCED | `[design]` §7.4 — a `ForcedLiquidation` must state "the resulting deposit balance", which is not reportable from a scalar mutated in place. `amount` is signed; every entry carries `balance_after` |
-| `MarginMonitor` — carries a call across days, cure measured in **sessions** | `deposit.py::MarginMonitor` | IMPLEMENTED + ASSUMED | A5. `INDETERMINATE` advances **no state**: a deadline that passes during a blind stretch survives it. The docstring's old hedge (*"do not hard-code either number"*, resting on a LuatVietnam summary) is replaced by the sourced member-side deadlines — 16h30 wire, 09h30 T+1 top-up, 03 working days to substitute-member close-out |
+| `MarginMonitor` — carries a call across days, cure measured in **sessions** | `deposit.py::MarginMonitor` | IMPLEMENTED + ASSUMED | A5. `INDETERMINATE` advances **no state**: a deadline that passes during a blind stretch survives it. The docstring's old hedge (*"do not hard-code either number"*, resting on a LuatVietnam summary) is replaced by the sourced member-side deadlines — 16h30 wire, 09h30 T+1 top-up, 03 working days to substitute-member close-out. **A forced close now LATCHES until the account clears back to `WARNING`/`OK`** (added 2026-08-27, `validation/scenarios/deriv-margin.py` finding F1): the machine used to drop its call state on escalation, so an account force-closed at the 09:30 mark and still at 0.9335 at 14:45 the *same session* was handed a fresh call with a fresh next-session deadline — a de-escalating event sequence and an unearned second grace period. Measured on VN30F2210 from 2022-09-26. `MarginMonitor.in_forced_breach` reports the latch; it releases on a genuine return to the warning rung, so a later call still fires |
+| **Broker margin profiles wired into the session** — `broker_profile.firm` in the config | `exchange.py::parse_config`/`_broker_profile`, `types.BrokerProfile.from_margin_profile`, `ExchangeSession.build` | IMPLEMENTED + SOURCED (per firm) | Added 2026-08-27. `broker_profile: {"firm": "TCBS"}` resolves a shipped profile, converts it with `to_broker_terms()` and records the firm, the user-facing `margin_model`, its engine and `margin_model_is_assumed` in `SessionProvenance`. **Three refusals rather than a guess:** a profile whose `user_facing_model` selects `SCENARIO_GRID` raises `NotImplementedError` (that engine is `scenario_margin.py`, still not wired); naming a firm *and* a utilisation level in one payload raises; and a ladder whose first **closing** rung is not the third is refused — MBS's is `AR duy tri`(NOTIFY)/`AR xu ly`(LIQUIDATE)/`Nguong xu ly tai VSDC`, so the positional read in `to_broker_terms` would report its liquidation level (0.95 filled) as a `MARGIN_CALL`. Ten of the eighteen shipped profiles configure a session; the other eight refuse with a stated reason. **NOT mapped:** the profiles' own `initial_margin_ratio` (PLUTUS_DEFAULT 0.1785) — it is an absolute ratio and `margin_buffer` is an add-on above the *dated* VSD rate, so no date-free arithmetic connects them |
+| — the profile's **block-opening** rung, honoured at admission | `deposit.py::reserve_for_order`, `types.BrokerProfile.block_opening_utilisation` | IMPLEMENTED + SOURCED (behaviour) | Added 2026-08-27, finding F2. Every surveyed firm's Mức 1 is *"tối đa để được mở vị thế mới"* — a block on **opening** — and `BrokerTerms` can only hold it as `warning_utilisation`, turning a refusal into a notification. Measured: at 0.9314 utilisation, past PLUTUS_DEFAULT's own 0.80 block *and* its 0.90 call, a fifth VN30F2210 contract was **accepted**; it is now rejected with `binding_constraint = 0.80` while an offsetting sell is still admitted (QĐ 26 Điều 13.2.a). `None` for a session with no firm named, so behaviour without a profile is unchanged |
 | Intraday margin checkpoints **09h30 / 14h00 / 16h30** | — | **NOT BUILT** | Author decision 4 says MUST HAVE. The times are now primary-sourced (QĐ 26 Điều 13.2), superseding the "09:30 and 14:30" broker figure. `MarginMonitor.on_mark` is driven by whatever instants the caller marks at; there is no checkpoint schedule. Implementation shape unchanged from §16.1: **exchange/depository config keyed by date**, pre-KRX continuous / post-KRX three checkpoints |
 | Realised close-out into the deposit, measured from the VM reference | `:1392-1466` | IMPLEMENTED + SOURCED | `[design]` — No Vietnamese rule states it; the design property is that the deposit movement exactly cancels the VM being charged, so no double count is possible |
-| Expiry settlement | `:1468`, `exchange.py:2425` | PARTIAL | Prefers a published settlement price; falls back to the expiry-day close with `substituted=True` (A56). **A56 names two tiers; there are three** — see the next row |
+| Expiry settlement | `:1468`, `exchange.py::_mark_derivatives`, `_expiry_reached`, `_expiry_instant` | PARTIAL | Prefers a published settlement price; falls back to the expiry-day close with `substituted=True` (A56). **A56 names two tiers; there are three** — see the next row. **Timing corrected 2026-08-27:** the trigger was `ts.date() >= expiry`, so under the documented two-advance loop a position was extinguished at **09:30 on its own last trading day**, before the caller's decision point. A roll submitted that morning found nothing to close and its offsetting order was admitted as a **new naked position in a contract that had already cash-settled**, which then settled a second time at 14:45 for a cash flow of `-0.0`. `_expiry_reached` now tests the venue's own `session_close` (HNXDS 14:45), falling back to the date when the schedule is unresolvable, and `_expiry_instant` pins the price read to the expiry **date** whatever instant the advance noticed it at — the latter matters because an advance that first crossed the expiry on a later date read that later date's row, found none, and silently downgraded a settlement to INDETERMINATE. Pinned by `tests/validation/test_expiry-overnight.py::test_the_expiring_contract_is_still_tradable_on_its_last_trading_day` and `::test_each_contract_settles_exactly_once` |
 | **`SettlementResolver` — the three-tier settlement chain** | `expiry.py:1-18`, `:58`, `:78`, `:92`, `:106`; `verdicts.py:51-56` | PARTIAL | (1) `PUBLISHED` — real `quote_settlementprice` rows, with corrupt rows excluded (`price < 100000`, because their price is the HHMMSS of their own timestamp); (2) **`TWAP_30M`** — time-weighted mean of matched price 14:15–14:45, recovered empirically at a mean error of **0.74 index points**, and it **requires the raw tick archive**; (3) `CLOSE_PROXY` — `quote_close`, the only tier on Parquet. Carries a sourced **negative** finding: `quote_reference` is deliberately excluded because it equals the previous close on **1,731 of 1,968** VN30F pairs. **The session cannot distinguish an adapter-computed TWAP from a published row** (`exchange.py:2447` says so), and every expiry settles on `CLOSE_PROXY` without the archive |
 | **`Exchange.sustains()` — half the `Exchange` ABC contract** — `Viability`, `PositionEvent`, 5 `PositionEventKind` members | `exchanges/base.py:41-56`, `exchanges/derivatives.py:96-228`, `verdicts.py:59-64`, `:110-125`, `:127-147` | DEFERRED | `base.py:18` calls the admits/sustains asymmetry "the central empirical finding, visible here in the architecture". `sustains()` walks a position along a price path and reports `MARGIN_CALL`, `FORCED_LIQUIDATION`, `EXIT_BLOCKED`, `POSITION_LIMIT_EXCEEDED`, `EXPIRY_SETTLEMENT`. **Same adjudication as `margin.py`** — legacy batch path, tests a maintenance ratio that does not exist, retained because published figures were computed on it; the base implementation reports unconditional survival for equities. All four types are in `plutus.market.__all__` |
 | — **`EXIT_BLOCKED`**: the exchange refuses a stop-loss exit because the band is locked against it | `derivatives.py:194-198`, `:209-219` | DEFERRED | A long exits by selling, so a locked **floor** blocks it; a short by buying, so a locked **ceiling** blocks it. **This is the only band-lock-blocks-exit model in the repo** — the session path has no equivalent, and a session asking "do we model a trader trapped by a floor lock?" must be told: only here, only in the legacy batch path |
@@ -526,16 +536,32 @@ retained batch-research path whose central quantity **does not exist** — do no
 
 ---
 
-## 12. Equity margin lending — NOT BUILT, priority 1
+## 12. Equity margin lending — BUILT and WIRED
 
-**Status: NOT BUILT. Verified by grep — no `margin_lending`, `loan_ratio`,
-`maintenance_margin_ratio`, `MarginRegulation` or `BrokerMarginTerms` exists anywhere in
-`src/`.** The only `ký quỹ` in the codebase is derivatives clearing margin
+**Status corrected 2026-08-27. The "NOT BUILT / verified by grep" claim below was true
+when written and is now wrong twice over:** `session/margin_lending.py` (9,273 lines) is the
+policy — the two config objects, QĐ 87 Điều 2's algebra, the call and forced-sale state
+machine — and `session/equity_margin.py` is the wiring that joins it to `ExchangeSession`.
+The only `ký quỹ` that must still not be reused for it is derivatives clearing margin
 (`src/plutus/market/margin.py`, `src/plutus/market/session/deposit.py`,
-`src/plutus/market/exchanges/derivatives.py`), which is a **different product** and must
-not be reused.
+`src/plutus/market/exchanges/derivatives.py`) — a **different product**, different
+regulator, different custody chain, different call test.
 
-Author decision 1 makes this priority 1. The implementable specification —
+| Feature | Where | Status | Source / note |
+|---|---|---|---|
+| The policy: `MarginRegulation` / `BrokerMarginTerms`, Điều 2 algebra, `MarginCallMonitor`, `assess_margin_order`, forced-sale planning and proceeds | `margin_lending.py` | IMPLEMENTED + SOURCED (statutory half) / IMPLEMENTED + ASSUMED (commercial half) | Its own `PROVENANCE` tables grade every field. Nothing in it computes a session |
+| **The wiring** — funding a margin buy, the Điều 6.1 determination, executing the *bán giải chấp*, applying proceeds on settlement, interest accrual | `equity_margin.py::EquityMarginAccount` | IMPLEMENTED + ASSUMED | Nine choices in `WIRING_PROVENANCE`, each graded. Attached with `ExchangeSession.attach_equity_margin` or `build(equity_margin=…)` |
+| `Order.on_margin` — the distinguishable ticket | `protocol.py:152` | PARTIAL | QĐ 87 Điều 13.5(e) requires the ticket to be **distinguishable**; `assess_margin_order`'s docstring reads that as "must add a type". It is a **flag**, not an `OrderType` member. Declared in `WIRING_PROVENANCE::margin_order_flag` |
+| `StatefulRule.MARGIN_LENDING` — the credit refusal, kept apart from `INSUFFICIENT_CASH` | `types.py:552` | IMPLEMENTED + SOURCED | `[design]` — a client refused for buying power has cash and is refused credit; one member for both would make a funding-bound run and a lending-bound run indistinguishable |
+| **The forced sale EXECUTES** | `equity_margin.py::_submit_pending` | IMPLEMENTED + ASSUMED | Unlike the derivatives side (`detail['executed'] = False`), the tickets go through `session.submit` and face the band, the tick grid, the lot and the fill policy. Measured on the corpus: HPG 2022-10-31 is floor-locked and the *bán giải chấp* is `Rejected(BAND_LOCK)` — the Điều 8 right exists and cannot be exercised |
+| **Proceeds are applied on settlement, not on execution** | `equity_margin.py::_apply_settled_proceeds` | IMPLEMENTED + ASSUMED | Điều 8 is SILENT on timing. `value_to_restore` warns that a sale not applied to the debt moves the ratio by **nothing**; on T+2 that is a two-session hole where a liquidated account is still in breach. Measured: sale 2022-10-25 at 0.3313→0.3445, cured 2022-10-27 at 0.4198 |
+| Per-deal (`AccountingUnit.DEAL`), `ForcedSaleScope.BREACHING_POSITION`, `LiquidationOrder.BREACHING_FIRST` | — | NOT BUILT | The wiring **raises at construction** rather than running an account-level ratio and labelling it per-deal |
+| Firm-level Điều 9 caps, extensions, overdue-loan liquidation, securities as collateral | `margin_lending.py` (policy exists) | NOT WIRED | `firm=` is opt-in and the wiring never supplies one; no extension is granted; `LOAN_OVERDUE` is reachable only if a run outlives `base_term_days` (90). Author decision 2: securities-as-collateral is future work |
+
+Scenario and assertions: `validation/scenarios/equity-margin.py`,
+`tests/validation/test_equity-margin.py` (50 tests, 4 arms over HPG 2022-09-23 → 2022-11-04).
+
+The implementable specification —
 rules, dated, cited, graded, with statutory and broker terms separated into two config
 objects — is **`docs/reference/equity-margin-spec.md`**. Headline facts so a reader does
 not have to open it:
@@ -576,6 +602,7 @@ not have to open it:
 | `advance_to(ts)` — monotone clock, fixed internal order | `:750` | IMPLEMENTED + SOURCED | `[design]` — no Vietnamese document orders a simulator's internal passes. Ours: expire → fill → decide immediates → settle → accrue → mark derivatives → drain |
 | `holdings` / `cash` / `positions` / `margin` / `charges` | `:1018-1058` | IMPLEMENTED + SOURCED | `[design]` — a scope decision, not a market rule. Read models only. No P&L, no portfolio — that is the caller's |
 | `transfer(source, destination, amount)` | `:1074` | PARTIAL | Arrival immediate (A55). Refusals are counted but **emit no event** |
+| **Equity margin lending hooks** — `attach_equity_margin`, `securities_cash_ledger`, `_margin_gate`, `_run_equity_margin`, `build(equity_margin=…)` | `exchange.py::attach_equity_margin`, `::_margin_gate`, `::_run_equity_margin` | IMPLEMENTED + ASSUMED | §12. Four seams, and no more: the gate runs **after** `admits()` and **before** the reservation (an order off the tick grid is a tick-grid rejection whether or not the client could borrow); `_run_equity_margin` runs **after** `_settle` and `_mark_derivatives`, because `CB` includes settled cash and a tranche settling this instant must be in it before the account is graded. A session with **no** equity margin account **refuses** an `on_margin` order rather than treating it as a cash buy |
 | `provenance()` — rulebook id, fill-policy signature, pins, calendar id, liquidation rule | `:1123` | IMPLEMENTED + SOURCED | `[design]`. Pins are always reported, so a counterfactual run self-declares |
 | `indeterminate_report()` — evaluations, by field, by rule | `:1173` | PARTIAL | `evaluations` mixes two populations under one denominator; `by_rule` counts **only INDETERMINATE** rejections |
 | 12 `EventKind` members, all reachable; monotone `seq`; destructive single-consumer cursor | `types.py:779`, `exchange.py:998` | PARTIAL | No `RESTING` event and no margin-**clearance** event, both deliberate. Amend, cancel and transfer refusals **never reach the cursor** |
@@ -824,9 +851,12 @@ These are not deferrals. Nobody decided them.
     raises and every CW order becomes INDETERMINATE. The rulebook records that the
     floor-at-10đ branch alone fires on **16,275 of 46,090** warrant name-days, so this is
     not a corner case.
-16. **`charges.assess_at_maturity` is implemented, sourced, tested and never called.**
-    `exchange.py:2405-2422` settles expiry without it, so a held-to-expiry derivative pays
-    no transfer tax — the mirror of #12.
+16. ~~**`charges.assess_at_maturity` is implemented, sourced, tested and never called.**~~
+    **CLOSED 2026-08-27.** `ExchangeSession._maturity_charges` is the call site;
+    `_mark_derivatives` levies it on every settled expiry. Pinned by
+    `tests/validation/test_expiry-overnight.py::test_a_contract_carried_into_settlement_pays_the_transfer_tax`
+    and by the updated
+    `tests/market/session/test_exchange.py::test_the_position_settles_on_its_expiry_day_and_leaves_the_ledger`.
 17. **`FillPolicyConfig` cannot express the probabilistic policy's own parameters.** It
     carries only `kind` / `max_participation` / `seed` (`types.py:2545-2556`), so a
     config-built `probabilistic` policy can never set `p_touch` or `p_auction_margin`.
@@ -852,6 +882,151 @@ These are not deferrals. Nobody decided them.
     and for D35, and nobody has decided to add it.
 22. **Post-KRX margin (`Rm` / `Sm` / `Dm` / `MM`).** Specified, not built, decision not
     taken. See §11 and `post-krx-margin-spec.md`.
+23. **`CorporateActionEngine` is not wired into `ExchangeSession`.** Found 2026-08-27 and
+    recorded nowhere before. `grep -r 'CorporateActionEngine\|apply_due' src/` hits
+    **`corporate.py` and nothing else** — there is no `advance_to` call site, so a run
+    that crosses an ex-date applies nothing unless the caller drives the engine itself.
+    Measured consequence: a real ex-dividend (PLX, ex-date 2022-11-09, a 1,200đ/share
+    cash dividend implied by the published band) sits inside the `pair-trade` window and
+    is silently missed; a position held continuously across it would lose
+    300 × 1,200 = 360,000đ with no log row and no error. The run happens to be flat that
+    day, so "every đồng accounted for" is true of that run and would not be true of the
+    obvious variant. This is also why D65's band guard only helps a caller that supplies
+    a band. **Related, and cheap:** `state_at('PLX', 2022-11-09)` returns
+    `reference=29.45` (stale) with `ceiling=30.20, floor=26.30` — internally inconsistent
+    by 4.1%, and `reference == mid(ceiling, floor)` would be a cheap invariant nobody
+    checks.
+
+---
+
+## 16.4 CONFLICTS RECORDED RATHER THAN RESOLVED — validation pass, 2026-08-27
+
+Every item here is a defect a scenario audit found and this session **deliberately did not
+fix**, because the fix would require choosing between readings the sources do not settle.
+Standing rule 3. Each names what would have to be decided.
+
+1. **Derivatives cash settles T+0 against the repository's own dated T+1 rule.**
+   `RuleSet.settlement_rule(InstrumentKind.FUTURE)` returns `cycle_days=1,
+   delivery_on_next_session_open=True`, `Confidence.HIGH`, VSDC-cited
+   (`rulebook.py:1329`). Its only consumer, `exchange.py::_settles_at`, is called
+   **once**, inside the *securities* branch of `_apply_fill`. The derivatives branch never
+   calls it, and neither does `settle_expiry`. Measured across three scenarios: realised
+   close-outs and final settlements credit the deposit at the trade/expiry instant —
+   +28,440,000 on a Tết-2021 expiry made spendable one session early on an account in
+   `FORCED` breach; −6,470,000, +2,550,000, −1,250,000 elsewhere. **What must be decided:**
+   whether unsettled variation margin still counts as a margin asset in the interim. It
+   changes every derivatives utilisation number in the repository, and no source read here
+   settles it. Building the pending-deposit tranche without that answer would be inventing
+   the margin treatment, not implementing the settlement rule.
+2. **`settle_daily` has no session call site, so VM is cumulative rather than daily** (D1,
+   restated with the new measurement). `deposit.py`'s own docstring says **no cash moves**
+   in `settle_daily` — it only re-baselines `_settlement_reference` — so wiring the call
+   site fixes the cumulative-vs-daily half and **nothing else**; there is no code anywhere
+   in `src/` that pays daily VM cash. Direction is now measured and is one-sided: at one
+   corpus mark the model reports utilisation 1.2099 where VSDC's actual daily cash
+   settlement gives 1.371. **The simulator is consistently later to call than a real
+   clearing member.** Author's call, unchanged.
+3. **A limit order always fills at its own limit, never at the market.**
+   `fills.py:748` returns `FillDecision.fill(..., limit, ...)` even when `reach > 0`
+   (`TRADED_THROUGH`); `HardFillPolicy` does the same. Measured: a BUY 300 ACB @ 22.00 on
+   2022-10-21 filled at 22.00 when ACB's maximum matched price that day was **21.40**. The
+   module's own docstring cites QĐ 352 Điều 6.3 (*trade at the resting order's price*) in
+   defence — and Điều 6.3 makes the **resting** side set the price, so for an *aggressor*
+   the citation says the opposite of what the code does. Filling at the limit is
+   conservative for a strategy backtest and **anti**-conservative fed into a margin ladder:
+   it understates proceeds and manufactures calls. Measured cost in the equity-margin arms:
+   9,910,000đ, and on 2022-10-25 the forced sale made the ratio *worse* (0.3445 with it,
+   0.3569 without). **What must be decided:** what price to use given only a bar. The
+   sources are silent, and the honest answer may be `INDETERMINATE` over `[limit, extreme]`
+   rather than a number.
+4. **Every price in every corpus scenario is same-session look-ahead.**
+   `adapters/datahub.py::state_at` returns the whole-day bar for `ts.date()` at any
+   intraday instant, so `ctx.price()` at the 09:30 step hands the strategy that day's
+   **close**, and `_marks()` prices the 09:30 margin mark with it. Consequences measured:
+   every one of `pair-trade`'s 93 fills is `limit == fill_price == that session's close`
+   with `evidence=touched_at_limit`, which is why a "0/112 indeterminate" run and a 100%
+   fill rate coexist — and it exactly cancels conflict 3, since limit == close. Against the
+   tick archive the daily-close mark produces a **missed forced close** (2022-11-11 14:00,
+   true utilisation 1.0284), a **missed warning** (2022-11-15 09:30, 0.8445) and **two
+   forced-liquidation reports at instants when the account was `ok`** (2022-11-14 and
+   11-16 09:30). **The fix is not a margin-model change:** `quote_open`, `quote_high`,
+   `quote_low` and `quote_dailyvolume` are on disk and complete over the window (620 rows
+   each for open and volume across 31 names × 20 sessions) and `DataHubSource` reads none
+   of them. `exchange.py:1790` unconditionally declares them missing, which is an adapter
+   gap misattributed to the corpus. This is the single highest-value remaining fix and it
+   is an adapter change that moves every number in every scenario, so it wants its own
+   pass and the author's sign-off.
+5. **`DebitedAt.MONTHLY` and `DebitedAt.DAILY` charges are never levied** (§16.3 #5,
+   now quantified). `assess_daily` has **zero call sites in `src/`** and `charges.assess`
+   filters every non-`FILL` row out. Two dated, `Confidence.HIGH` rows are affected:
+   `vsdc_custody_equity` (0.27đ/share/month, from 2020-03-19, no end date) and
+   `vsdc_derivatives_position_management` (2,550đ/open contract/day, 2020-03-19 →
+   2022-01-01). For the Tết-2021 window the per-day fee is the **entire** VSDC leg — there
+   is no `vsdc_derivatives_clearing` row before 2022-01-01 — and 6 lots held 2021-02-05 →
+   2021-02-18 cost **76,500đ** on trading days or **198,900đ** on calendar days against a
+   levied **0**. **What must be decided:** the rulebook is silent on trading-vs-calendar
+   days for the per-day fee, and on proration for the monthly one. `rulebook.py:1772` also
+   records that brokers demonstrably billed the per-day fee through at least 2024-07-11
+   while the gazetted schedule ends it at 2022-01-01, so a run reproducing actual retail
+   costs and one applying the gazette disagree for three years — and the scenario named
+   `overnight` currently takes the gazetted branch with no annotation.
+6. **The 5% dividend withholding is never levied.** `corporate.py:1556` credits the cash
+   leg with a reason string saying it is GROSS of the withholding "which is a charge row
+   the rulebook does not carry". Rulebook §12.3:1112 **does** carry a `Cash dividend tax …
+   0.05` row, graded `low (uncited)` (this is D27). Measured: the applied ex-date run's
+   headline `net_pnl` is **62,500đ too high**. Implementing it means asserting an uncited
+   rate as a levied charge. **What must be decided:** obtain a citation, or grade the row
+   and levy it as LOW.
+7. **A forced sale is executed inside the client's statutory cure window**, 8 of the 9
+   escalated calls (D53, sharpened). `_breach_days` increments on the observation that
+   *issues* the call, so three breaches land on the third observation while three business
+   days elapse on the fourth. Exactly: `call:3` issued 2022-10-20 14:45 with deadline
+   2022-10-25 14:45; `CONSECUTIVE_BREACH_DAYS` fires 2022-10-24 14:45 and the ticket is
+   submitted 2022-10-25 09:30. `BrokerMarginTerms.__post_init__`'s
+   `consecutive ≤ max_cure_business_days` guard does not catch it because the error is in
+   the **counting**, not the parameter — it refuses `10 > 3` and permits `3 == 3` to fire a
+   day early. **What must be decided:** whether the unsourced broker term
+   (`consecutive_breach_days_before_sale`, which a broker could legitimately read as "three
+   consecutive closes in breach") is subordinate to the QĐ 87 Điều 7.1 window, i.e. whether
+   the sale must be blocked while an outstanding call is still inside its deadline. Two
+   clocks, one sourced and one not; picking would be choosing a reading.
+8. **`quote_settlementprice` is not usable as published by `expiry.py`.** Half of one
+   auditor's finding survives and half does not. **Does not survive:** the claim that the
+   table is a raw tick series whose last entry is the window maximum, so that
+   `PUBLISHED_FINAL_SETTLEMENT = 972.78` over-books by ~447,560đ. Re-measured across all
+   18 days in the corpus, the series' tick-to-tick increments **decay** through the window
+   (first-quarter mean |Δp| 0.032 → last-quarter 0.013 on 2022-11-17, and 14 of 16 clean
+   days show the same shape) and the implied underlying reconstructed under the
+   running-mean hypothesis is smooth and in range. That is the running-mean signature, and
+   D23 and the handoff stand: the last entry **is** the settlement. **Does survive:** the
+   table is keyed `VN30INDEX` on 14 of its 18 days and by contract code on only 4, so
+   `expiry.py::_published`'s `WHERE tickersymbol = ?` **misses every index-keyed expiry**,
+   including VN30F2211's on 2022-11-17. It also holds one corrupt day (2022-08-16,
+   VN30F2208, prices ~142,243 mixed with ~1,295 — the existing `price < 100000` filter
+   catches these) and only 18 days in total. **What must be decided:** whether a
+   `VN30INDEX`-keyed row *is* the settlement source for a VN30F contract. It probably is —
+   the VN30 futures final settlement is defined off the index — but the corpus is
+   inconsistent about what it keys, and mapping contract → underlying without a stated rule
+   risks silently substituting an index value for a futures settlement. **Not in the
+   session's path:** `DataHubSource` never populates `settlement_price` at all, so every
+   corpus expiry correctly takes the `CLOSE_PROXY` tier with `substituted=True` on the
+   event.
+9. **`FORCED_LIQUIDATION` collects nothing and the shortfall is never recovered.**
+   Declared as the Tier 1 / Tier 2 boundary (`detail['executed'] = False`, with its own
+   stated reason), so this is working as designed — but the cost is now measured and worth
+   recording beside the declaration: on 2021-02-08 an account required 113,916,000 against
+   a deposit of 99,939,344, short **13,976,656đ**; `FORCED_LIQUIDATION` fired at six
+   consecutive marks, the deposit did not move by one đồng at any of them, and the position
+   ran to expiry unfunded. A forced liquidation that changes nothing is a call effectively
+   missed. Two arms of `expiry-overnight` that differ only in trading calendar produce
+   **byte-identical** logs and snapshots and differ by exactly one event, for this reason.
+10. **The cure window cannot be exercised under the documented loop** (D40, reconfirmed).
+    `_cure_deadline` returns HNXDS 08:45 and the documented two-advance day puts the
+    caller's first decision point at 09:30, so the mark escalates before `on_session` is
+    called. A trader who pays on the morning of T+1 — which is what QĐ 26 Điều 13.1
+    requires — is force-closed first. The regulated deadline is **09h30 T+1**, so the
+    direction to move the default is later, not earlier; that is a broker-terms change and
+    the author's call.
 
 ---
 
@@ -897,6 +1072,40 @@ prove very little on their own** (standing rule 4).
 | D34 | **The position cap is exclusive; Điều 29.1.c is inclusive.** We reject on `after > cap`. Điều 29.1.c fires level 3 when the count *"đạt ngưỡng 100% giới hạn vị thế"* — **reaches** the cap — and Điều 29.3.b requires the account back *below* it, so an account resting exactly on the limit is suspended there and admitted here. One contract, in the permissive direction. Behaviour change; author's call | `deposit.py::reserve_for_order` |
 | D35 | **`transfer_out`'s suspension test is narrower than its source.** QĐ 26 Điều 11.1.c bars withdrawal from an account suspended for a margin breach, **a position-limit breach, or a payment default** — three grounds. We test only `status is FORCED`. Not fixable in isolation: the other two states do not exist anywhere in `deposit.py`, which has no account-level suspension flag at all, only per-order gates | `deposit.py::transfer_out` |
 | D36 | **The suite's own total is not stable across invocations: 1318 vs 1365, a gap of 47. Observation, not a diagnosis — do not repeat it as one.** Everything below was run from the repo root on 2026-08-26 and is reproducible. (a) `pytest tests -q` → **`1318 passed`**, exit 0, and the summary line names **no** skipped, deselected, xfailed or errored tests. Run twice, same number. (b) `pytest tests --collect-only` → **1365 collected**, twice, once with `-p no:cacheprovider`; the 1365 node ids are unique (`sort \| uniq -d` is empty). (c) `pytest tests -rs -q` prints **`collected 1365 items`** in its own header and is observed executing files that the 1318 runs did not reach. (d) Same split one level down: `pytest tests/market` → **863 passed**, `pytest tests/market --collect-only` → **910**. (e) The 47 are individually healthy: `pytest tests/market/test_margin_incidence.py tests/market/test_margin_incidence_account.py tests/market/test_equity_headline.py` → **47 passed** standalone. That triple summing to exactly 47 is suggestive and may be coincidence — **nobody has diffed the two node-id sets**. **Why it matters more than a bookkeeping slip:** a run that silently drops 47 tests and a run that keeps them print the same word, *passed*, and differ only in a number nobody checks. Standing rule 4, in its purest form. **Pre-existing** — the four tests added this session live in `test_deposit.py`, which runs in every variant, so the same split sat under the 1314 baseline (inferred; no baseline `--collect-only` was ever recorded). **The obvious candidate does not fit:** the corpus/tick `skipif` gates in `tests/market/conftest.py` would surface as *skipped*, both corpus roots resolve on this machine, and skips do not change a collected count. **How to settle it:** dump collected node ids (`pytest tests --collect-only -q -q`, keep `::` lines, sort) and executed node ids (`pytest tests -v`, extract `^tests/…::…`, sort), then `diff`. The 47 names are the answer. Until someone does, the header and §19 counts say "passed", never "collected" | `tests/market/conftest.py`; `tests/market/test_margin_incidence.py`, `test_margin_incidence_account.py`, `test_equity_headline.py` |
+| D40 | **A margin call cannot be cured under the loop `advance_to` documents.** `MarginMonitor._cure_deadline` returns `calendar.next_session_open(...)` — HNXDS **08:45** — and the documented two-advance day puts the caller's first decision point at 09:30. So the 09:30 advance marks, finds the deadline past, and escalates to `FORCED` **before `on_session` is called**. Measured on the corpus (`validation/scenarios/expiry-overnight.py::run_cure_across_tet`): five VN30F2202 lots called at the close of 2022-01-28 are force-closed at 2022-02-07 09:30 under *both* trading calendars, and a 30,000,000 VND payment made that session arrives after the event. Stepping at 08:00 instead cures it. The regulated top-up deadline is **09h30 T+1** (QĐ 26 Điều 13.1), so the direction to move the default in is later, not earlier | `deposit.py::MarginMonitor._cure_deadline`, `validation/runner.py::DEFAULT_OPEN` |
+| D41 | ~~**`ExchangeSession` exposes no path to `MarginMonitor.outstanding_call`.**~~ **CLOSED 2026-08-27.** `ExchangeSession.outstanding_call()` and `ExchangeSession.in_forced_breach()` are the accessors. Pinned by `test_exchange.py::test_a_cured_margin_call_is_closed_out_in_the_event_log`. Original text below | `exchange.py::outstanding_call` |
+| D41-orig | **`ExchangeSession` exposed no path to `MarginMonitor.outstanding_call`.** `account_margin_requirement` returns `cure_by=None` deliberately and correctly (a deadline is state across days, not a property of one mark), and `MarginMonitor.outstanding_call` holds the real value — but the string `outstanding_call` does not occur in `exchange.py`. The deadline is therefore stamped on the `MARGIN_CALL` event and **nowhere else**, so a caller that reads its state rather than its event stream, or that restarted, cannot find out when it has to pay | `exchange.py`, `deposit.py::MarginMonitor.outstanding_call` |
+| D42 | **The session never asks the rulebook which margin model applies.** `RuleSet.margin_model()` **raises** `UnresolvedRule` at every date from `KRX_CUTOVER` (*"POST-KRX VALUE NOT SOURCED"*), and it has **no caller anywhere in `src/`**. A VN30F2603 long carried through the real 2026-03-09 limit-down is margined `IM + VM` at 0.17 — the pre-KRX broker shape, ten months past the cutover — the run completes, nothing raises, and `indeterminate_report` counts **zero**. A run that cannot resolve a *band* answers INDETERMINATE and counts it; a run that cannot resolve the *margin model* answers with last year's. Related: `broker_profile.MarginModel.SCENARIO_GRID` / `MarginLayer.OVERNIGHT` are defined and name `scenario_margin` as their engine, and no module under `session/` imports it — **there is no overnight margin layer at any date**, which is finding F-1's other half | `rulebook.py::margin_model`, `exchange.py::_mark_derivatives`, `broker_profile.py:1049-1115` |
+| D43 | **No admission rule is keyed on `InstrumentSpec.expiry`.** An order in a contract whose last trading day has passed is refused only when the *data* runs out — on the corpus it comes back `band_limit` / `INDETERMINATE` / `band_source='absent'`, i.e. "no row", not "delisted". A source that kept publishing a price past the expiry would have the order **admitted** and a position opened in a contract the exchange has removed. `ExpiryTrigger.INSTRUMENT_EXPIRY` is declared in `types.py:500` and fired nowhere (already noted there as a partial); this is the admission half of it | `exchange.py::submit`, `types.py:500` |
+| D44 | **`MarginView.initial_margin` already contains `resting_order_margin`.** `account_margin_requirement` sets `initial_margin = initial + resting_margin` and `posted_margin = initial`. A reader who computes `initial_margin + variation_margin + resting_order_margin` double-counts every resting order; the true identity is `required == posted_margin + resting_order_margin + variation_margin`. Naming only — no behaviour is wrong — but it is a trap that costs a wrong number rather than an error | `deposit.py::account_margin_requirement` |
+| D45 | **The corpus inverts `ceil`/`floor` on the two VN30F sessions either side of Tết 2021.** VN30F2102 on **2021-02-08** publishes `ceiling 1060.2 / floor 1219.6` and on **2021-02-09** `1015.6 / 1168.4`, so every order on the last two sessions before the break is refused on `band_limit`. This is the swapped-band defect reaching the derivatives rows, and the rejection carries `detail == {'band_source': 'published'}` with no hint that the published band is impossible. A **data** defect, but it means any scenario placed on those dates measures the corpus and not the rulebook, and the simulator could reasonably refuse an inverted band under a rule of its own | `adapters/datahub.py::_build_state`; corpus `quote_ceil` / `quote_floor` |
+| D50 | **`margin_lending.py` labels no price with a currency unit, and the three cash venues quote in thousands of đồng.** `CollateralLot.last_close`, `assess_margin_order(price=…)` and `MarginCollateralPosition.price` are unlabelled `Decimal`s, while `MarginAccountState.cash` comes off a ledger denominated in đồng. `charges.trade_value` is the **only** place `CURRENCY_UNIT` is applied, and it is on the order path, not the margin path. Passing an HSX quote of `22.70` straight through makes `PV` one thousandth of `CB`: an account that borrowed 92 m and holds 181.6 m of stock reports `EB` = 100,181,600, a ratio of **0.0999 instead of 0.5146**, and on the way *down* the ratio **rises**, because the only term moving is the one that is right. Nothing raises; `CollateralLot` accepts any positive `Decimal`. Fixed **at the wiring boundary** (`equity_margin.py::EquityMarginAccount._dong`, which resolves the venue per ticker and returns `None` — hence UNPRICED, hence INDETERMINATE — when it cannot); the underlying type contract is still unit-free and the next caller will hit it. Pinned by `test_equity-margin.py::test_pv_is_in_dong_not_in_the_quoted_thousands` (24 of 50 tests fail without the fix) | `margin_lending.py`; `equity_margin.py::_dong` |
+| D51 | **A forced-sale ticket is not a board lot, and `plan_forced_sale` says so on purpose.** *"Quantities are in whole shares and are not rounded to a board lot. Lot sizes are the exchange's and belong to the order layer that submits these tickets."* Until `equity_margin.py::_to_lot` existed, that order layer did not, and **every** *bán giải chấp* on the corpus — 1,459, 913, 1,070, 1,633, 1,762 shares — came back `Rejected(ROUND_LOT)` while the margin event log said a sale had been instructed and the account went on breaching. Rounded **up** now, because `value_to_restore` is a minimum, capped at the sellable quantity floored to a lot. Pinned by `test_every_forced_sale_ticket_is_a_whole_board_lot` (7 tests fail without it) | `margin_lending.py::plan_forced_sale`; `equity_margin.py::_to_lot` |
+| D52 | ~~**The harness trade log has no `ACCEPTED` row for any order the *session* places.**~~ **CLOSED 2026-08-27.** `_translate_events` now skips `ACCEPTED`/`REJECTED` only when the log already holds that order's row, so a strategy's orders are logged exactly once and a broker's are logged at all. It was worse than the original text: `REJECTED` was skipped too, so a *bán giải chấp* the exchange refused at the floor lock had **zero** rows of any kind. `order_lifecycle` now holds on every equity-margin arm. Pinned by `test_equity-margin.py::test_a_broker_initiated_order_reaches_the_trade_log` and `::test_a_forced_sale_into_a_floor_locked_market_does_not_execute`. Original text below | `validation/runner.py::_translate_events` |
+| D52-orig | **The harness trade log had no `ACCEPTED` row for any order the *session* places.** `validation/runner.py:381` skips `ACCEPTED`/`REJECTED` events because `StrategyContext` has already logged them from `submit()`'s return value — true for every order a **strategy** places, false for every order the **broker** places, and a *bán giải chấp* is the first of those in this simulator. The fill rows then join to nothing and `validation/identities.py:332` reports `order_lifecycle` broken on every equity-margin arm (the orders themselves are fine; the log is incomplete). One condition in `_translate_events` fixes it; the file belongs to the harness. Asserted rather than worked around by `test_equity-margin.py::test_a_broker_initiated_order_is_missing_from_the_trade_log` | `validation/runner.py:381`, `validation/identities.py:332` |
+| D53 | **`CURE_WINDOW_EXPIRED` — the only *statutory* forced-sale trigger — is unreachable at a firm whose cure target equals its call level.** `BrokerMarginTerms` correctly refuses `consecutive_breach_days_before_sale` above the QĐ 87 Điều 7.1 ceiling, so the consecutive clock is capped at 3; and the breach counter increments on the observation that **issues** the call, so three breaches land on the third observation while three business days elapse on the fourth. The broker term therefore fires one session earlier, every time, whenever the breach is uninterrupted. Not a bug in either object — an interaction — but a run that reported "no cure window ever expired" would be reporting two broker terms as if they were the law. The one lawful configuration that reaches it is `cure_target_ratio > maintenance_margin_ratio`: a ratio landing between the two resets the counter without curing the call. Both arms are run and asserted | `margin_lending.py::MarginCallMonitor.observe`, `::BrokerMarginTerms.__post_init__` |
+| D54 | **An equity margin account whose `determination_time` sits after the caller's last advance is silently inert.** It lends, never computes a ratio, never calls, never sells — with nothing raised and every identity holding. Reportable through `EquityMarginAccount.missed_determinations`, which is a property and not an exception because the account cannot know the run has ended. A scenario that does not check it can publish a clean run that graded nothing | `equity_margin.py::on_advance` |
+| D55 | **`MarginEventKind` has 18 members and `types.EventKind` has 3 margin members, so the session cursor is lossy for equity margin.** `LOAN_DISBURSED`, `LOAN_REPAID`, `INTEREST_ACCRUED`, `FORCED_SALE_NOTICED` and `FORCED_SALE_RESULT_SENT` reach `EquityMarginAccount.events` and **not** the session's event stream; the rest arrive under `MARGIN_CALL` / `MARGIN_WARNING` / `FORCED_LIQUIDATION` with `pool=SECURITIES` and `detail['equity_margin_event']` naming the real kind. `MarginEvent`'s own docstring says the two streams merge as new members; until they do, a caller polling only the session cursor cannot see a disbursement or an accrual | `equity_margin.py::EQUITY_MARGIN_EVENT_KIND`, `types.py::EventKind` |
+| D56 | **A margin loan is drawn at accept and reconciled at the order's terminal state, so an unfilled order carries a real `DB` for at least one determination.** QĐ 87 Điều 2 khoản 8 values the order at market price **at trade time**, and a limit order has no trade price when it is funded — so the draw is sized on the reservation price. Measured under `hard` on the corpus: the 2022-09-23 determination reports `DB = 92,000,000` against `PV = 0` for an order that never filled, and the draw is repaid in full at the next advance. The ratio is still right (`AB` is the client's own money either way) and the encumbrance makes the cash unspendable, but the loan book shows a loan against no collateral for a session. Declared in `WIRING_PROVENANCE::loan_sized_on_reserve_price` | `equity_margin.py::gate`, `::_reconcile` |
+
+**Found by the seven-scenario validation pass, 2026-08-27.** D60–D69 were found by running real
+algorithms against the assembled simulator and auditing the result adversarially. D60–D66 are
+**fixed**, each with a regression test that fails without the fix; D67–D69 are recorded and NOT
+fixed, with the reason.
+
+| # | Defect | Where |
+|---|---|---|
+| D60 | ~~**The derivatives funding gate admitted an order that breached on arrival.**~~ **FIXED 2026-08-27.** `reserve_for_order` tested `required > free_deposit` alone, and `free_deposit = balance − posted − resting` **excludes VM by construction**. So an account at utilisation 0.8876 with 11,237,608 of equity was admitted an order requiring 14,497,600 — more than its entire equity — and stood at 1.0326 and `FORCED` in the same instant, on a mark that had not moved. The gate a few lines above *refuses to open a position on a FORCED account*, so the method forbade a state and permitted the one action that creates it. The contradiction was visible inside one module at one instant: `transfer_out` refused to pay out 11,237,608 while this admitted a commitment of 14,497,600. **Fix:** the order must also clear `openable = balance × forced_close_utilisation − required`, the mirror of `transfer_out`'s bound, which includes VM. With VM zero and the threshold 1.00 the two bounds are arithmetically identical, so a well-funded account sees no change. Pinned by `test_deposit.py::test_an_opening_order_may_not_commit_what_a_withdrawal_may_not_pay_out` (+ an over-tightening guard). `test_deriv-margin.py::test_the_firms_first_rung_refuses_a_new_position_and_admits_an_offset` **had pinned the defect as expected behaviour** and is corrected | `deposit.py::reserve_for_order` |
+| D61 | ~~**A margin call was opened in the event log and never closed.**~~ **FIXED 2026-08-27.** `_EVENT_FOR_MARGIN_STATUS` had no `OK` member, so `MarginMonitor.on_mark`'s clearance view — which it computes and returns — was dropped by `continue`. Found independently by `deriv-margin`, `expiry-overnight` and `order-cycle`. On the corpus a call fired 2022-10-03, was cured the same session, and the next thing the stream said was a *warning* three sessions later: a reader saw an unanswered call with an expired deadline followed by a de-escalation, and the `transfer_in` that paid for it carried no link back. **Fix:** `EventKind.MARGIN_CALL_CLEARED`, emitted with the discharged call's `cure_by` and `cured_at` so it joins to the `MARGIN_CALL` that opened it. Pinned by `test_exchange.py::test_a_cured_margin_call_is_closed_out_in_the_event_log` | `exchange.py::_mark_derivatives`, `types.py::EventKind` |
+| D62 | ~~**`deposit_segregation` was structurally vacuous on every derivatives run.**~~ **FIXED 2026-08-27.** Found by four scenarios. Two independent causes: `journal.drain_deposit` built derivatives cash rows from `DepositEntry`, which carries no `charge_kind` and no `fill_id`, so the identity's join **matched nothing, ever**; and `_on_levy` never wrote `detail['pool']`, so the third clause was unreachable. One auditor proved it by relabelling all three of a run's derivatives charge rows `pool='securities'` and re-running — `passed=True, breaches=()`. The identity reported a pass having evaluated **0 of its 3 clauses**. **Fix:** `drain_deposit` re-attaches the itemisation from `session.charges()` by `(ts, total)`, consumed one-for-one; `_on_levy` writes the charge's own pool; a fourth clause reports a charge with no cash row at all, scoped by `RunLogs.charge_baseline` so a chained pair does not false-positive. Pinned by three tests in `test_identities.py` and by `test_expiry-overnight.py::test_every_derivatives_charge_row_is_joinable_to_the_charge_that_made_it`. `test_pair-trade.py::test_one_identity_passes_because_it_found_nothing_to_check` asked to be inverted when the join reached `[13, 13]`; it has been | `validation/journal.py`, `validation/identities.py` |
+| D63 | ~~**No identity checked settlement completeness, and `unsettled_at_end()` under-reported.**~~ **FIXED 2026-08-27.** Two scenarios showed the cost: 46,072,026đ created as an obligation and never delivered, with the audit reporting *nine of nine held*; and a futures position carried past its last trading day with margin posted and 2,500,000đ owed, every identity passing. Separately `SettlementLog.unsettled_at_end()` keyed on a **set**, so two identical tranches from one order collapsed and one settlement discharged both — created 2, settled 1, reported **0**. **Fix:** a tenth identity `settlement_completeness` (due-and-undelivered, plus settled-before-DVP), and the key counts with multiplicity. On joining the suite it immediately found D64. Pinned by four tests in `test_identities.py` and two in `test_logs.py` | `validation/identities.py::settlement_completeness`, `validation/logs.py::unsettled_at_end` |
+| D64 | ~~**A corporate action left one orphan and one ghost in the settlement log.**~~ **FIXED 2026-08-27.** `HoldingsLedger.apply_corporate_action` rescales an unsettled parcel in place and correctly preserves its `settles_at` — but the settlement log's economic key includes the quantity, so a parcel rescaled 1,500 → 2,025 produced a **creation row that never settled** and a **settlement row that was never created**. Found by D63's new identity on a run the scenario calls correct. **Fix:** `SettlementAction.TRANCHE_ADJUSTED`, written by a new journal wrapper, carrying the post-event quantity and `detail['quantity_before']` so it bridges the two keys. Pinned by `test_logs.py::test_a_rescaled_tranche_is_not_reported_as_an_orphan` and by the corporate-charges suite | `validation/journal.py::_on_corporate_action` |
+| D65 | ~~**A fill was booked 8.31 units below the published floor, at a price off the quotation grid.**~~ **FIXED 2026-08-27.** `RestingOrderPolicy.SCALE` scaled a VIB sell resting at the published ceiling of 53.40 to `38.14285714285714285714285714` — 26 significant digits, off the 0.05 grid, and below the published floor of 46.45 — and the fill pass matched it, levying 14,418 exchange fee and 53,400 PIT on a 53,400,000 trade value the exchange could not have printed. `book.amend` deliberately does not re-run admission, so nothing downstream re-checked band, tick or lot. **Fix:** `order_tick` (separate from the reference's `tick`, resolving the scenario's own finding F-10 that one parameter served two incompatible roundings) and an optional `band`; a scaled price outside a supplied band falls back to `_cancel`, the idiom this branch already uses for a degenerate quantity. **A guard that could not be run is now NAMED in `RestingOrderOutcome.reason` rather than skipped silently.** Pinned by two tests in `test_corporate.py`. ⚠️ **The hole is only closed for a caller that supplies a band** — the engine cannot resolve one for itself, and `CorporateActionEngine` has no call site in `exchange.py` at all (see §16.3 #23) | `corporate.py::_scale` |
+| D66 | ~~**One day of interest was forgiven on every equity-margin repayment.**~~ **FIXED 2026-08-27.** `_accrue` multiplies elapsed days by the loan's *current* principal, and it ran inside step 4 of `on_advance` — after step 2 had applied that day's settled proceeds. So a repayment landing earlier in the same pass retroactively cut the interest for a day the money had already been borrowed for. Measured: 2022-10-27 accrued 25,549 on a post-sweep principal of 69,079,147 for a day on which 92,000,000 was owed; correct ACT/365 is 34,027. Forgiven 8,478 / 11,119 / 9,032 across the three live arms. Trivial in đồng, but silent, systematic and always in the broker's disfavour. **Fix:** accrual is step 0, before anything in the pass can repay. Pinned by `test_equity-margin.py::test_the_debt_falls_by_exactly_the_settled_tranche`, which had asserted the defect (`principal < 70,000,000`) | `equity_margin.py::on_advance` |
+| D67 | ~~**The cash log reported zero financing cost on a financed run.**~~ **FIXED 2026-08-27.** `CashLedger._repay` trues an advance up to its final interest at the settlement instant by writing straight to `_interest_accrued`, bypassing `accrue_interest` — the method the journal wraps. On a clock coarser than one day that top-up is the *whole* charge: a two-step run reported `by_movement()['advance_interest_accrued'] == 0` against a ledger carrying **143,503.39146**. `CashLog.by_movement()` calls itself "the itemisation an audit reads first", and it lied. Unreachable in the shipped arms because the runner steps twice a day; any weekly or event-driven clock hits it. **Fix:** `_on_cash_settle_due` diffs `Cash.interest_accrued` across the call and emits the residue. Pinned by `test_settlement.py::test_the_financing_cost_reaches_the_cash_log_on_a_coarse_clock` | `validation/journal.py::_on_cash_settle_due` |
+| D68 | ~~**The derivatives final settlement was dated by when the caller polled.**~~ **FIXED 2026-08-27.** `_expiry_instant` exists specifically to pin the settlement **price** read to the expiry date and its docstring says so; the cash movement, the maturity tax and the `EXPIRY_SETTLED` event all used `ts`, the observing advance. One contract, one code, one price, two settlement *dates*: `2022-11-17T14:45` for a run that stepped to 14:50 on the expiry day, `2022-11-18T09:20` for the same position in a run whose next step was the next morning. A settlement log dated by observation cannot answer "was this settled on time". **Fix:** one `struck` instant for price, cash, charges and event; the same-date branch returns the venue close rather than `ts`, clamped to `ts` on an unresolved clock. Pinned by `test_exchange.py::test_the_settlement_is_dated_by_the_expiry_not_by_when_the_caller_polled` | `exchange.py::_expiry_instant`, `::_mark_derivatives` |
+| D69 | ~~**A skipped identity was indistinguishable from a passing one.**~~ **FIXED 2026-08-27.** `encumbrance_zero` returns `passed=True, detail='not applicable'` whenever live orders exist. A measured run ending with one order live and **47,233,456đ of committed cash** printed `identities 9/9 held`. **Fix:** `IdentityResult.skipped`, counted separately by `ScenarioResult.summary()` and exposed as `skipped_identities`. `passed` stays `True` so a live order at the end does not fail an otherwise sound run; the headline no longer claims the check was made. Pinned by `test_identities.py::test_a_skipped_encumbrance_check_is_marked_skipped_not_merely_passed` | `validation/identities.py`, `validation/runner.py` |
+| D70 | **Sub-đồng money in a rescaled reservation.** `corporate._scale` re-took a cash reservation at `enc.amount × qty_ratio × price_ratio` with no quantize; both ratios are exact Decimal quotients, so a measured run reported `committed_cash 43978090.45206159960258320914` and an available balance with 20 decimal places, on a currency with **no subunit**. `encumbrance_matches` held throughout because it compares the reservation to itself and both sides were equally fractional. **FIXED 2026-08-27**, rounded up (never under-reserve). Pinned by `test_corporate-charges.py::test_the_scaled_cash_reservation_grows_with_the_order` | `corporate.py::_scale` |
 
 ---
 
@@ -1066,3 +1275,71 @@ remains unread, and is therefore where the next false grade will be:** QĐ 61/Q�
 QĐ 12/QĐ-HĐTV (the *pre-KRX* regime, which is what the code implements and what every
 corpus date falls in), QĐ 96/QĐ-VSD, and §12's commercial mirrors. If a row here disagrees
 with the code, the code wins and §18 rule 6 applies.
+
+---
+
+### 2026-08-27 — the end-to-end validation pass
+
+**What was done.** Seven scenarios were written and run against the real corpus, each
+exercising something the simulator claims to do, and each was then handed to an
+adversarial auditor briefed to break it rather than confirm it: `deriv-margin` (a
+derivatives margin call and its cure), `equity-margin` (*ký quỹ* lending, calls and *bán
+giải chấp*), `order-cycle` (29 lifecycle legs), `settlement` (T+2 across Tết and the
+2022-08-29 regime change), `expiry-overnight` (futures expiry and overnight holding),
+`pair-trade` (equity against derivatives in one session), `corporate-charges` (ex-dates,
+rights, and the charge table).
+
+**The headline, stated plainly.** The **money is right**. Across all seven scenarios the
+cash conserves to the đồng in both pools, every movement traces to a logged cause,
+encumbrance returns to exactly zero, and the two pools never touch except through matched
+transfers. Six auditors rebuilt the balances independently of the identity suite — from
+causes, not from the ledgers the logs are built from — and none found a đồng that appeared
+or vanished without a row. **No accounting hole was found.**
+
+**What was wrong was the audit trail and the timing**, and that is the more useful result:
+
+- a margin call was opened and **never closed** in any log (D61);
+- the identity that guards **segregation** passed on every derivatives run having
+  evaluated **zero of its three clauses** (D62);
+- there was **no settlement-completeness identity at all**, so 46m đồng of undelivered
+  obligation and a futures position carried past its expiry both passed nine of nine
+  (D63);
+- a **corporate action** left an orphan and a ghost in the settlement log (D64);
+- an opening order was admitted that put the account **past its own forced-close level in
+  the same instant**, on a mark that had not moved (D60);
+- the derivatives final settlement was **dated by when the caller polled** (D68).
+
+**The pattern worth carrying forward.** Six of the eleven fixed defects were invisible to
+a green suite *and* invisible to the identity suite, because the check that would have
+caught them either did not exist, could not fire, or reported a skip as a pass. Three
+tests were found **pinning defects as expected behaviour** and are corrected:
+`test_deriv-margin.py::test_the_firms_first_rung…` asserted the admission hole was
+`Accepted`; `test_pair-trade.py::test_one_identity_passes_because_it_found_nothing_to_check`
+asserted the vacuous join and asked in its own words to be inverted when it was fixed;
+`test_equity-margin.py::test_the_debt_falls_by_exactly_the_settled_tranche` asserted the
+forgiven interest day. Standing rule 4 in its sharpest form: **a test can be worse than no
+test**, because it makes the defect look decided.
+
+**One auditor claim was refuted with measurement.** It was reported that
+`quote_settlementprice` is a raw VN30 index tick series whose last entry is the window
+maximum, and therefore that the scenario's `PUBLISHED_FINAL_SETTLEMENT = 972.78`
+over-books by ~447,560đ with the wrong sign. Re-measured across all 18 days in the corpus:
+the series' tick-to-tick increments **decay** through the window — first-quarter mean |Δp|
+0.032 against last-quarter 0.013 on 2022-11-17, and 14 of 16 uncorrupted days show the
+same shape — and the implied underlying reconstructed under the running-mean hypothesis is
+smooth and in range. That is the running-mean signature. D23 and the handoff stand. The
+*other* half of the same finding does survive and is now §16.4 item 8: the table is keyed
+`VN30INDEX` on 14 of 18 days, so `expiry.py::_published`'s contract-code lookup misses
+every index-keyed expiry.
+
+**What was deliberately not fixed, and why.** Ten items, all in §16.4. The binding reason
+in every case is the same: the fix would require choosing between readings the sources do
+not settle — whether unsettled VM is a margin asset (T+1 derivatives settlement); what
+price a marketable order gets given only a bar; trading days or calendar days for a
+per-day fee; whether an unsourced broker term is subordinate to a sourced statutory
+window. **The highest-value one is §16.4 item 4**: `quote_open`, `quote_high`, `quote_low`
+and `quote_dailyvolume` are on disk and complete, `DataHubSource` reads none of them, and
+`exchange.py:1790` declares them missing — an adapter gap misattributed to the corpus.
+Closing it would fix the look-ahead in every scenario *and* the margin-timing errors
+measured against the tick archive, and it moves every number in the repository, so it
+wants its own pass.

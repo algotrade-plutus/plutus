@@ -1293,8 +1293,10 @@ class DerivativesAccount:
                           ) -> Union[Encumbrance, Rejected]:
         """Reserve deposit margin for a resting derivative order.
 
-        Three tests, in this order, each with its own rule so the rejection log
-        stays countable:
+        Four tests, in this order, each with its own rule so the rejection log
+        stays countable. The third fires only when the caller configured the
+        session from a firm's margin profile; without one, three run and
+        behaviour is unchanged:
 
         1. **Position limit** (rulebook 6.4). Tested against the *worst-case*
            net the account could reach if its live orders filled --
@@ -1332,8 +1334,33 @@ class DerivativesAccount:
            retained because it is what the code and its tests call this gate;
            it is **not** a citation to Dieu 29's level 3, which is the
            position-limit ladder.
-        3. **Free deposit**. Rejected with ``binding_constraint`` =
-           ``free_deposit``.
+        3. **The broker profile's own block-opening rung**, when the session
+           was configured from one. ``BrokerTerms`` has three percentages and
+           no actions, so the first rung of every surveyed firm's ladder --
+           *"toi da de duoc mo vi the moi"*, a hard block on **opening** --
+           projects onto ``warning_utilisation`` and becomes a notification.
+           Reading :attr:`BrokerProfile.block_opening_utilisation` restores
+           it. Offsetting orders (``increment == 0``) pass, as at test 2.
+        4. **Funding**, against the tighter of two bounds, with
+           ``binding_constraint`` = whichever bound bit.
+
+           * ``free_deposit`` -- ``balance - posted - resting`` -- asks
+             whether the deposit is unencumbered enough. It excludes VM.
+           * ``openable`` -- ``balance x forced_close_utilisation -
+             required`` -- asks whether the account still sits below its own
+             forced-close level **once this order is funded**. It includes
+             VM, because ``required`` does.
+
+           The second test is the mirror of :meth:`transfer_out`'s withdrawal
+           bound and was added after a measured incoherence: on
+           ``free_deposit`` alone, test 2 above refused to open a position on
+           a ``FORCED`` account while this test admitted the order that made
+           the account ``FORCED``, in the same instant, with no price move.
+           At the same moment ``transfer_out`` refused to pay out 11,237,608
+           of equity while this method committed 14,497,600 of it. Both
+           questions are "how much of this deposit is not already spoken
+           for"; both now get the same answer. With VM zero and the threshold
+           at 1.00 the two bounds coincide exactly.
 
         **The margin charged is the increment, not the gross.** Rulebook 6.3
         is explicit that offsetting trades on the same trading account attract
@@ -1439,6 +1466,34 @@ class DerivativesAccount:
                         'contract_code': code},
             )
 
+        # The broker's OWN first rung, when one was declared. Every surveyed
+        # firm's Muc 1 is a block on *opening* -- PLUTUS_DEFAULT names it
+        # "Muc 1 -- toi da de duoc mo vi the moi", TCBS "Ty le duy tri" -- and
+        # ``BrokerProfile.to_broker_terms`` can only project it onto
+        # ``warning_utilisation``, which turns a refusal into a notification.
+        # Carried as ``block_opening_utilisation`` so this gate can read it
+        # without importing the profile module, and ``None`` (the default, and
+        # the answer for a firm whose first rung is not a block, e.g.
+        # VNDIRECT) leaves behaviour exactly as it was.
+        block = getattr(profile, 'block_opening_utilisation', None)
+        if (increment > 0 and block is not None
+                and view.utilisation is not None
+                and view.utilisation >= block):
+            return Rejected(
+                rule=StatefulRule.INSUFFICIENT_DEPOSIT,
+                binding_constraint=block,
+                ts=ts,
+                order_id=order_id,
+                detail={'reason': 'the broker profile blocks opening a new '
+                                  'position at this utilisation; an '
+                                  'offsetting order is still admitted',
+                        'block_opening_utilisation': block,
+                        'utilisation': view.utilisation,
+                        'required': view.required,
+                        'deposit_balance': view.deposit_balance,
+                        'contract_code': code},
+            )
+
         # Both dated factors of ``IM = ratio x contracts x price x multiplier``
         # resolve at ``ts``, not at build time. The multiplier used to be an
         # account-wide default of VN30F's 100,000, which over-reserved every
@@ -1449,16 +1504,78 @@ class DerivativesAccount:
         multiplier = self.multiplier_for(code, ts)
         required = rate * Decimal(increment) * multiplier * price
 
-        if required > view.free_deposit:
+        # ``required > 0`` guards the funding test, and it is load-bearing.
+        # ``_worst_case_net`` is monotone, so a purely offsetting order has
+        # ``increment == 0`` and ``required == 0`` -- it consumes no deposit at
+        # all. ``free_deposit`` is ``balance - posted - resting`` and goes
+        # NEGATIVE as soon as the mark pushes IM past the balance, which is
+        # exactly the state a breaching account is in. Without this guard
+        # ``0 > -820733`` is True and the close is refused: the account is
+        # told it is in breach, told to reduce, and then refused the
+        # reduction, and it can only close once the breach has cured itself.
+        # That defeats both of this method's own documented promises -- "an
+        # order that closes a position reserves zero" above, and the level-3
+        # gate below, which excepts ``increment == 0`` because QD 26 Dieu
+        # 13.2.a requires the offsetting trade to be allowed on a breaching
+        # account. A resource nobody consumes cannot be unaffordable.
+        #
+        # **Two bounds, and the order must clear both.**
+        #
+        # ``free_deposit`` is ``balance - posted - resting``: the deposit not
+        # already backing a position or a resting order. It answers "is this
+        # deposit unencumbered enough", and it EXCLUDES VM by construction.
+        #
+        # ``openable`` is ``balance x threshold - required``, the exact mirror
+        # of :meth:`transfer_out`'s withdrawal bound, and it INCLUDES VM
+        # because ``required`` does. It answers the second question, which
+        # this gate used not to ask at all: does the account still sit below
+        # its own forced-close level once this order is funded?
+        #
+        # Asking only the first is incoherent, and the incoherence was
+        # measured. The level-3 gate a few lines above **refuses to open a
+        # position when the status is FORCED** -- yet on ``free_deposit``
+        # alone an account at utilisation 0.8876 with 11,237,608 of equity was
+        # admitted an order requiring 14,497,600, more than its entire equity,
+        # and stood at 1.0326 and FORCED at the same instant with no price
+        # move at all. A gate that forbids a state and simultaneously permits
+        # the one action that creates it is not enforcing anything.
+        #
+        # The contradiction was visible inside this one module: at that same
+        # instant ``transfer_out`` refused to pay out 11,237,608 while this
+        # method committed 14,497,600. You could not WITHDRAW the equity and
+        # could COMMIT more than it. Both questions are "how much of this
+        # deposit is not already spoken for", so both now take the same
+        # answer, and VM -- money already lost and owed -- funds neither.
+        #
+        # Nothing new is sourced here. ``threshold`` is the broker's own
+        # ``forced_close_utilisation``, already used by ``transfer_out``,
+        # which already tests the state its action CREATES (``after is
+        # FORCED``). This makes admission symmetric with withdrawal.
+        #
+        # Where VM is zero and the threshold is 1.00 the two bounds are
+        # arithmetically identical -- ``balance - required`` collapses to
+        # ``balance - posted - resting`` -- so an account carrying no
+        # unrealised loss at a default profile sees exactly the old
+        # behaviour.
+        threshold = self.terms.forced_close_utilisation
+        openable = view.deposit_balance * threshold - view.required
+        if openable < _ZERO:
+            openable = _ZERO
+        bound = min(view.free_deposit, openable)
+        if required > _ZERO and required > bound:
             return Rejected(
                 rule=StatefulRule.INSUFFICIENT_DEPOSIT,
-                binding_constraint=view.free_deposit,
+                binding_constraint=bound,
                 ts=ts,
                 order_id=order_id,
                 detail={'required': required,
+                        'openable': openable,
                         'free_deposit': view.free_deposit,
+                        'forced_close_utilisation': threshold,
+                        'utilisation': view.utilisation,
                         'deposit_balance': view.deposit_balance,
                         'posted_margin': view.posted_margin,
+                        'variation_margin': view.variation_margin,
                         'resting_order_margin': view.resting_order_margin,
                         'contract_code': code,
                         'pool': Pool.DERIVATIVES},
@@ -1786,11 +1903,24 @@ class MarginMonitor:
         self._cure_by: Optional[datetime] = None
         self._call_opened_at: Optional[datetime] = None
         self._last_status: MarginStatus = MarginStatus.OK
+        #: A forced close has been reported and the account has not since come
+        #: back to ``WARNING`` or ``OK``. See :meth:`on_mark`.
+        self._forced = False
 
     @property
     def outstanding_call(self) -> Optional[datetime]:
         """``cure_by`` of an unanswered call, else ``None``."""
         return self._cure_by
+
+    @property
+    def in_forced_breach(self) -> bool:
+        """A forced close has been reported and nothing has cured it.
+
+        Distinct from ``last_status is FORCED``: an account that slips from
+        the forced rung back to the call rung without ever reaching the
+        warning rung is still being processed, not merely called again.
+        """
+        return self._forced
 
     @property
     def last_status(self) -> MarginStatus:
@@ -1816,10 +1946,16 @@ class MarginMonitor:
         ``FORCED``         ``EventKind.FORCED_LIQUIDATION``, which must also
                            state the selection rule, the contracts closed, the
                            price used and the resulting deposit balance
-        ``OK``             nothing -- an ``OK`` view can only appear here as
-                           the *clearance* of an outstanding call, and there is
-                           no ``EventKind`` for a clearance
+        ``OK``             ``EventKind.MARGIN_CALL_CLEARED``. An ``OK`` view
+                           can only appear here as the *clearance* of an
+                           outstanding call
         =================  ==================================================
+
+        A ``WARNING`` that clears a call is **both**: the rung it landed on
+        and the call it discharged. The caller cannot derive the second from
+        the returned view -- ``cure_by`` is ``None`` on every clearance -- so
+        it must read :attr:`outstanding_call` *before* calling this method and
+        compare. ``exchange.py`` does exactly that.
 
         Escalation to ``FORCED`` has two independent paths, and both are real:
         utilisation reaching the broker's forced-close level (its own trigger),
@@ -1838,6 +1974,25 @@ class MarginMonitor:
         survives it and bites on the first session that has data, which is the
         conservative direction and is also what a clearing member does when
         its own price feed is down.
+
+        **A forced close latches until the account clears the call rung.**
+        Found by the derivatives-margin validation scenario, 2026-08-27. The
+        machine used to drop the whole call state when it escalated, so an
+        account force-closed at the 09:30 mark and still at 0.9335 utilisation
+        at the 14:45 mark of the *same session* was handed a brand-new margin
+        call with a brand-new next-session deadline. Measured on the corpus:
+        4 lots of VN30F2210 from 2022-09-26 at a 100,000,000 deposit produced
+        ``margin_call`` 2022-10-03 09:30 -> ``forced_liquidation`` 2022-10-04
+        09:30 -> ``margin_call`` 2022-10-04 14:45, ``cure_by`` moving from
+        2022-10-04 08:45 to 2022-10-05 08:45. Two things were wrong with that:
+        the event sequence **de-escalated**, which the table above does not
+        contemplate; and the account was granted a second cure window it had
+        not earned, on an exposure that had got *worse* since the first one
+        expired. No firm in the survey publishes a route back from *"xu ly"*
+        to *"goi ky quy bo sung"* that does not pass through the maintenance
+        rung. So the latch clears on ``OK`` or ``WARNING`` -- the account
+        genuinely came back -- and until then a ``CALL``-level mark reports
+        ``FORCED``, because the position is still being processed.
         """
         if view.status is MarginStatus.INDETERMINATE:
             return ()
@@ -1859,17 +2014,27 @@ class MarginMonitor:
                 self._cure_by = None
                 self._call_opened_at = None
                 ladder = MarginStatus.FORCED
+                self._forced = True
             # else: still inside the window. Not news.
         elif ladder is MarginStatus.FORCED:
             out = (replace(view, cure_by=None),)
+            self._forced = True
         elif ladder is MarginStatus.CALL:
-            self._cure_by = self._cure_deadline(ts, rules)
-            self._call_opened_at = ts
-            out = (replace(view, cure_by=self._cure_by),)
+            if self._forced:
+                # Still in breach, still being processed. Not a fresh call.
+                out = (replace(view, status=MarginStatus.FORCED,
+                               cure_by=None),)
+                ladder = MarginStatus.FORCED
+            else:
+                self._cure_by = self._cure_deadline(ts, rules)
+                self._call_opened_at = ts
+                out = (replace(view, cure_by=self._cure_by),)
         elif ladder is MarginStatus.WARNING:
             if self._last_status is not MarginStatus.WARNING:
                 out = (view,)
 
+        if ladder in (MarginStatus.OK, MarginStatus.WARNING):
+            self._forced = False
         self._last_status = ladder
         return out
 

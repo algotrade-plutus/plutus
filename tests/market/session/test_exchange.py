@@ -607,6 +607,53 @@ def test_no_auto_transfer_but_an_explicit_one_moves_both_balances():
     assert session.margin().status is MarginStatus.OK
 
 
+def test_a_cured_margin_call_is_closed_out_in_the_event_log():
+    """A call that is answered gets a row saying so. Three scenarios' finding.
+
+    ``deriv-margin``, ``expiry-overnight`` and ``order-cycle`` each found the
+    same hole independently: ``MarginMonitor.on_mark`` computes the clearance
+    and returns it, and the session **dropped it**, because
+    ``_EVENT_FOR_MARGIN_STATUS`` had no ``OK`` member. The call was opened in
+    the log and never closed.
+
+    What that cost a reader: on the corpus, a call fired 2022-10-03, was cured
+    the same session, and the next thing the stream said was a *warning* three
+    sessions later -- so the log showed an unanswered call with an expired
+    deadline followed by a de-escalation. The cure was invisible, and the
+    ``transfer_in`` that paid for it carried no link back.
+
+    The cleared row names the deadline it beat, so it joins to the call that
+    opened it.
+    """
+    session = two_venue_session()
+    session.advance_to(datetime(2024, 6, 3, 9, 30))
+    session.submit(buy(ticker='VN30F2406', quantity=1, price='1250'))
+    session.advance_to(datetime(2024, 6, 3, 14, 0))
+
+    called = session.advance_to(datetime(2024, 6, 4, 14, 0))
+    call, = [e for e in called if e.kind is EventKind.MARGIN_CALL]
+    deadline = session.outstanding_call()
+    assert deadline is not None                      # and now it is readable
+    assert call.detail['cure_by'] == deadline
+
+    # Pay it, inside the window.
+    session.transfer(Pool.SECURITIES, Pool.DERIVATIVES, Decimal('20000000'))
+    assert session.margin().status is MarginStatus.OK
+
+    cleared = session.advance_to(datetime(2024, 6, 5, 14, 0))
+    rows = [e for e in cleared if e.kind is EventKind.MARGIN_CALL_CLEARED]
+    assert len(rows) == 1
+    assert rows[0].pool is Pool.DERIVATIVES
+    assert rows[0].detail['cure_by'] == deadline     # joins to the call
+    assert rows[0].detail['cured_at'] == datetime(2024, 6, 5, 14, 0)
+    assert rows[0].detail['status'] is MarginStatus.OK
+    # The call is discharged, in state as well as in the log.
+    assert session.outstanding_call() is None
+    assert session.in_forced_breach() is False
+    # And no second call was invented on the way past.
+    assert not [e for e in cleared if e.kind is EventKind.MARGIN_CALL]
+
+
 def test_a_transfer_out_of_the_deposit_cannot_strand_an_open_position():
     """``free_deposit`` is the bound, so posted margin cannot be withdrawn."""
     session = two_venue_session()
@@ -2120,6 +2167,14 @@ def test_the_position_settles_on_its_expiry_day_and_leaves_the_ledger():
     Marked from the variation-margin reference -- 1250, the opening price,
     since no daily settlement has run -- to the final settlement at 1300, so
     one contract at 100,000 VND a point pays 5,000,000 into the deposit.
+
+    The deposit then pays the **derivatives transfer tax at maturity**
+    (rulebook 8.1 / 12.3): 130,000,000 notional x 0.17 / 2 = 11,050,000
+    margined, at 0.1% = 11,050 VND. A contract carried into settlement is
+    never matched out, so levying the tax only on fills under-charged it by
+    one leg -- see ``_maturity_charges``. The settlement *event* still
+    reports the 5,000,000 cash flow alone; the tax is a separate deposit
+    movement, as it is on a fill.
     """
     session = opened_future(build(rows=expiry_rows()))
     deposit_before = session.margin().deposit_balance
@@ -2134,8 +2189,51 @@ def test_the_position_settles_on_its_expiry_day_and_leaves_the_ledger():
 
     assert 'VN30F2406' not in session.positions()
     assert session.margin().deposit_balance == (deposit_before
-                                                + Decimal('5000000'))
+                                                + Decimal('5000000')
+                                                - Decimal('11050'))
     assert session.margin().required == Decimal('0')
+
+
+def test_the_settlement_is_dated_by_the_expiry_not_by_when_the_caller_polled():
+    """One contract, one price, two poll times, **one** settlement date.
+
+    The defect, measured by the ``order-cycle`` scenario: ``_expiry_instant``
+    exists specifically to pin the *price read* to the expiry date and its
+    docstring says so -- but the cash movement, the maturity tax and the
+    event all used ``ts``, the observing advance. The same position settled
+    ``2022-11-17T14:45`` in a run that stepped to 14:50 on the expiry day and
+    ``2022-11-18T09:20`` in one whose next step was the following morning.
+    The price was pinned; the money was not, so the settlement log recorded
+    when the simulator was asked rather than when VSDC paid.
+
+    Here: a caller that sleeps through the expiry and polls two days later
+    still gets a settlement stamped at the expiry session's close.
+    """
+    late = opened_future(build(rows=expiry_rows()))
+    events = late.advance_to(datetime(2024, 6, 24, 9, 30))   # two days late
+    settled = [e for e in events if e.kind is EventKind.EXPIRY_SETTLED]
+    assert len(settled) == 1
+    assert settled[0].ts == datetime(2024, 6, 20, 14, 45), (
+        'the settlement is struck at the expiry close, not at the poll')
+    assert settled[0].price == Decimal('1300')
+
+    # The cash movement carries the same instant, not the poll instant.
+    entries = [e for e in late._derivatives.entries
+               if e.ts.date() == JUN_EXPIRY]
+    assert entries, 'no deposit movement dated on the expiry day'
+    assert all(e.ts == datetime(2024, 6, 20, 14, 45) for e in entries)
+    assert not [e for e in late._derivatives.entries
+                if e.ts.date() > JUN_EXPIRY]
+
+    # And the on-time poll agrees with it to the second: same date, same
+    # amount, same tax. That is the whole claim -- the answer stopped
+    # depending on the question's timing.
+    prompt = opened_future(build(rows=expiry_rows()))
+    on_time = [e for e in prompt.advance_to(datetime(2024, 6, 20, 14, 45))
+               if e.kind is EventKind.EXPIRY_SETTLED][0]
+    assert on_time.ts == settled[0].ts
+    assert on_time.amount == settled[0].amount
+    assert prompt.margin().deposit_balance == late.margin().deposit_balance
 
 
 def test_the_close_proxy_substitution_is_recorded_and_never_silent():

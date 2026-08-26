@@ -975,6 +975,16 @@ class CashLedger:
     ) -> Decimal:
         """How much may still be drawn, over the selected pending tranches.
 
+        **Zero at a firm that does not offer the product**, whatever the
+        tranches hold. ``terms.advance_on_sale_enabled`` is the fact about the
+        firm (:meth:`AdvanceTerms.from_broker` says so in terms), and
+        :meth:`request_advance` already refuses outright when it is unset, so
+        without this guard the two methods answered differently about the same
+        firm: a caller sizing an order off ``advanceable()`` would be told it
+        had headroom and then be refused ``INSUFFICIENT_CASH`` for spending
+        it. A read model that disagrees with the action it describes is worse
+        than no read model.
+
         The bound is ``max_advanceable_fraction x net_proceeds`` less what has
         already been drawn, floored to whole dong (:func:`_floor_dong` -- a
         cap must not be exceeded by its own rounding), summed over the
@@ -1002,6 +1012,8 @@ class CashLedger:
                 exclude matured tranches", which is the right answer for a
                 caller that only wants the headline number.
         """
+        if not self._terms.advance_on_sale_enabled:
+            return Decimal('0')
         rows = self._select(tranche=tranche, order_id=order_id)
         return sum((self._headroom(row, now) for row in rows), Decimal('0'))
 
