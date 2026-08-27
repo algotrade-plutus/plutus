@@ -149,7 +149,7 @@ from plutus.market.session.types import (TIME_IN_FORCE, DataField, FillDecision,
                                          OrderRecord, TimeInForce)
 
 __all__ = [
-    'NO_MARKET_IMPACT', 'MATCHING_PHASES', 'POLICY_SEPARATOR',
+    'NO_MARKET_IMPACT', 'MATCHING_PHASES', 'POLICY_SEPARATOR', 'BOOK_WALK_KIND',
     'DRAW_PRECISION', 'HONOURED_CONFIG_FIELDS',
     'FillPolicy', 'BaseFillPolicy', 'SoftFillPolicy', 'HardFillPolicy',
     'ProbabilisticFillPolicy',
@@ -191,6 +191,14 @@ MATCHING_PHASES: FrozenSet[SessionPhase] = frozenset({
 #: Separator between the policy signature and the reason body in a stamped
 #: ``FillDecision.reason``. See the module docstring.
 POLICY_SEPARATOR = ': '
+
+#: The depth-sweep policy's config token. Declared **here** rather than
+#: imported from ``session/book_walk.py`` on purpose: that module imports this
+#: one, so naming the kind here is what lets :func:`build_fill_policy` refuse
+#: it with a useful sentence without creating an import cycle. The policy
+#: itself lives in ``book_walk.py`` and is constructed directly, never from a
+#: config -- see :func:`build_fill_policy`.
+BOOK_WALK_KIND = 'book_walk'
 
 
 # --------------------------------------------------------------------------
@@ -2249,6 +2257,23 @@ def build_fill_policy(config: FillPolicyConfig) -> FillPolicy:
             assumption must not be given another.
     """
     kind = (config.kind or '').strip().lower()
+    if kind == BOOK_WALK_KIND:
+        # Registered so the name is *known* and the refusal can say why, rather
+        # than reporting a real policy as an unknown one. It is not buildable
+        # from a config and never will be: it needs a book provider (a
+        # ``DepthSource`` over a depth root) and a queue policy, neither of
+        # which ``FillPolicyConfig`` can carry, and defaulting either would be
+        # exactly the silent substitution this function exists to refuse.
+        raise ValueError(
+            f'the {BOOK_WALK_KIND!r} fill policy cannot be built from a config '
+            f'block: it sweeps a reconstructed order book, so it needs a book '
+            f'provider and a queue assumption that FillPolicyConfig has no '
+            f'field for. Construct it and hand it over directly -- '
+            f'ExchangeSession.build(..., fill_policy=BookWalkFillPolicy('
+            f'DepthSource(root), queue=OptimisticQueue(), '
+            f'max_participation=None, max_staleness=None)) -- from '
+            f'plutus.market.session.book_walk'
+        )
     if kind not in _FIELDS_BY_KIND:
         raise ValueError(
             f'unknown fill policy {config.kind!r}; known kinds are '
