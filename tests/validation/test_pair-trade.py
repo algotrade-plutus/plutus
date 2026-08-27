@@ -892,8 +892,15 @@ def test_neither_leg_can_be_adjudicated_on_the_daily_corpus(hard_arm):
 
 
 def test_the_soft_arm_says_what_it_assumed(result):
-    """The other half of PT-5: the main run declares its own policy."""
-    assert result.provenance.fill_policy_kind == 'soft'
+    """The other half of PT-5: the main run declares its own policy.
+
+    The signature is now ``soft(max_participation=uncapped)`` and the bare
+    token ``'soft'`` is no longer produced by anything. That is deliberate on
+    the policy's side: ``soft`` became a capped policy, so a record written
+    while the configured cap was being silently discarded must not be
+    confusable with a repaired uncapped run.
+    """
+    assert result.provenance.fill_policy_kind == 'soft(max_participation=uncapped)'
     assert result.indeterminate.indeterminate == 0
     fills = result.logs.trades.of(TradeAction.FILLED)
     assert len(fills) == 93

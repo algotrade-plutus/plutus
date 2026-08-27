@@ -988,36 +988,82 @@ def test_a_broker_initiated_order_reaches_the_trade_log(hold):
 
 
 @requires_corpus
-def test_hard_fills_make_the_whole_scenario_vacuous_and_still_green(hard):
-    """The control that must NOT be read as a pass.
+def test_the_hard_arm_is_no_longer_vacuous_because_the_adapter_serves_volume(
+        hard):
+    """The control that used to be a green run exercising nothing. It trades.
 
-    The Parquet corpus carries no high, no low and no volume, so ``hard``
-    cannot compute a participation cap and answers INDETERMINATE on the one
-    evaluation it makes. Nothing fills, the loan is unwound at the order's
-    expiry, the account holds its opening cash for 31 sessions at a ratio of
-    exactly 1 -- and **all nine identities hold**. A green run that exercised
-    nothing.
+    **What this test used to assert, and it was true when it was written:**
+    ``indeterminate.rate == 1``, no ``FILLED`` row anywhere, ``margin_debt ==
+    0``, a margin ratio of exactly 1 for 31 sessions and no call issued --
+    with all nine identities holding. ``DataHubSource`` served four columns,
+    the session synthesised an interval with ``VOLUME`` missing, and ``hard``
+    could not compute a participation cap, so it answered INDETERMINATE on
+    every evaluation it made.
+
+    ``DataHubSource`` now implements the ``IntervalSource`` seam and serves
+    ``quote_dailyvolume``, so the cap is computable and the strict policy
+    decides. The whole scenario changes shape: **3 fills**, a **69,079,147d**
+    margin debt carried rather than unwound, ratios that move with HPG's
+    23.00 -> 14.15 fall, and **6 margin calls issued**. This is the arm that
+    actually exercises margin lending, and until the adapter served volume it
+    could not.
+
+    ``OPEN``, ``HIGH`` and ``LOW`` are still withheld -- see
+    ``test_the_hard_arm_still_decides_without_the_days_extremes`` -- so the
+    fills are decided on the close alone. That is a smaller gap than the one
+    this test used to record, and it is not none.
     """
-    assert hard.result.indeterminate.rate == Decimal('1')
-    assert not hard.result.logs.trades.of(TradeAction.FILLED)
+    assert hard.result.indeterminate.rate == Decimal('0')
+    fills = hard.result.logs.trades.of(TradeAction.FILLED)
+    assert len(fills) == 3
     assert not hard.result.failed_identities
-    assert hard.account.margin_debt == Decimal('0')
-    assert all(a.margin_ratio == Decimal('1')
+    assert hard.account.margin_debt == Decimal('69079147.0')
+    assert all(a.margin_ratio < Decimal('1')
                for a in hard.account.determinations[1:])
-    assert not hard.account.events_by_kind(MarginEventKind.CALL_ISSUED)
+    assert len(hard.account.events_by_kind(MarginEventKind.CALL_ISSUED)) == 6
 
 
 @requires_corpus
-def test_the_unwound_loan_is_repaid_in_full_when_the_order_never_fills(hard):
-    """A draw against an order that executed nothing leaves no debt behind."""
+def test_the_hard_arm_still_decides_without_the_days_extremes(hard):
+    """The residual gap, counted rather than described.
+
+    ``indeterminate`` is now zero on this arm and ``is_clean`` is still
+    ``False``: every fill was taken from an interval that named ``open``,
+    ``high``, ``low`` and ``book_size`` absent, and each of those is a
+    ``fill.decided_without.<field>`` count. A reader checking
+    ``indeterminate == 0`` would call this run clean; that predicate is the
+    one the fidelity audit found wrong on every failure it examined.
+    """
+    report = hard.result.indeterminate
+    assert report.indeterminate == 0
+    silent = getattr(report, 'silent_ignorance', {})
+    assert silent.get('fill.decided_without.high') == 3
+    assert silent.get('fill.decided_without.low') == 3
+    assert silent.get('fill.decided_without.open') == 3
+    assert 'fill.decided_without.volume' not in silent
+    assert getattr(report, 'is_clean', False) is False
+
+
+@requires_corpus
+def test_the_drawn_loan_is_now_held_rather_than_unwound(hard):
+    """A draw against an order that *did* execute leaves debt behind.
+
+    The mirror of what this file used to assert: ``draw.principal == 0``,
+    because nothing filled and the whole 92,000,000d disbursement was handed
+    straight back. The order fills now, so 69,079,147d of it becomes
+    principal and only the unused 22,920,853d is returned -- and the two
+    still sum to the disbursement, which is the identity that has to hold
+    either way.
+    """
     draw = hard.account.draws[0]
     assert draw.disbursed == Decimal('92000000')
-    assert draw.principal == Decimal('0')
+    assert draw.principal == Decimal('69079147.0')
     assert draw.reconciled
     debits = [e for e in hard.result.logs.cash
               if e.movement is CashMovement.OTHER_DEBIT]
     assert len(debits) == 1
-    assert -debits[0].amount == Decimal('92000000')
+    assert -debits[0].amount == Decimal('22920853.0')
+    assert -debits[0].amount + draw.principal == draw.disbursed
 
 
 @requires_corpus

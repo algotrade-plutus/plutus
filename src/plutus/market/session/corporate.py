@@ -1767,10 +1767,18 @@ class CorporateActionEngine:
         reservation would have to re-run admission, which is ``exchange.py``'s
         composition, not the book's). The re-take preserves the *value* of a
         cash reservation and the *quantity* of a share reservation across the
-        adjustment, so section 12 invariant 4 still holds. What it does not
-        preserve is the accept-time ``original_amount``: the re-taken
-        reservation's history restarts at the adjustment, and the pre-event
-        numbers live on :class:`CorporateActionApplied` instead.
+        adjustment. What it does not preserve is the accept-time
+        ``original_amount``: the re-taken reservation's history restarts at the
+        adjustment, and the pre-event numbers live on
+        :class:`CorporateActionApplied` instead.
+
+        **And the record is rewritten from the ledger in the same breath**,
+        via ``OrderBookOfRecord.set_encumbrances`` -- which is what actually
+        makes section 12 invariant 4 hold. Moving the ledger alone left the
+        ``OrderRecord`` reporting its accept-time reservation for the rest of
+        a scaled order's life; measured on HPG 2021-05-31 with the order still
+        ``RESTING``, the record said 46,012,420 of committed cash where the
+        ledger said 43,978,091.
         """
         before_qty = record.remaining_quantity
         before_price = record.order.limit_price
@@ -1887,6 +1895,29 @@ class CorporateActionEngine:
                     estimated_charges=_whole_dong(
                         enc.estimated_charges * value_ratio),
                     order_quantity=remaining_after)
+
+        # **The record is rewritten from the ledger, in the same breath.**
+        #
+        # ``book.amend`` does not touch encumbrances, so the release/re-take
+        # above left the ``OrderRecord`` still carrying its accept-time
+        # reservation while the ledger carried the scaled one -- and
+        # ``OrderRecord.encumbered_cash`` exists precisely so section 12
+        # invariant 4 can be summed over live orders. Measured on HPG
+        # 2021-05-31 with the order still RESTING: the record said 46,012,420
+        # of committed cash where the ledger said 43,978,091, 2,034,329 apart,
+        # for as long as the scaled order rested. The share leg diverged the
+        # other way -- a record saying 1,000 committed against a ledger saying
+        # 2,000 -- which *under*-reports what the account has promised, so a
+        # caller summing records would think it could sell the parcel twice.
+        #
+        # :meth:`OrderBookOfRecord.set_encumbrances` is the method that exists
+        # for exactly this, and the partial-fill path in ``exchange.py`` was
+        # its only caller. The ledger is read back rather than the tuple
+        # rebuilt here, so the record is a *copy* of the ledger and not a
+        # second opinion: the arithmetic happens in one place and the record
+        # cannot drift from it by a rounding.
+        book.set_encumbrances(record.order_id,
+                              account.encumbrances.of(record.order_id))
 
         # An admissibility guard this branch could not run is NAMED, never
         # silently skipped. The three are independent, and a scaled order that

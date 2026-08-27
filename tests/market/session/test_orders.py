@@ -1048,3 +1048,125 @@ def test_a_terminal_order_cannot_be_re_encumbered(book):
     book.cancel(order_id, T0)
     with pytest.raises(ValueError, match='reserves nothing'):
         book.set_encumbrances(order_id, [a_cash_encumbrance(order_id)])
+
+
+# --------------------------------------------------------------------------
+# The meter: invariant 4, per order, at any instant
+# --------------------------------------------------------------------------
+
+class FakeLedger:
+    """The one method :meth:`encumbrance_divergence` asks a ledger for.
+
+    A stand-in rather than the real ``EncumbranceLedger`` because ``orders.py``
+    does not import ``ledgers.py`` and must not; the meter takes ``of`` as a
+    callable for exactly that reason, and a stub is what makes the claim
+    testable here rather than only in ``test_corporate.py``.
+    """
+
+    def __init__(self):
+        self._held = {}
+
+    def hold(self, *encumbrances):
+        for enc in encumbrances:
+            self._held.setdefault(enc.order_id, []).append(enc)
+
+    def drop(self, order_id):
+        self._held.pop(order_id, None)
+
+    def of(self, order_id):
+        return tuple(self._held.get(order_id, ()))
+
+
+def test_a_record_and_a_ledger_that_agree_report_no_divergence(book):
+    """Empty is the passing answer, and it is the only passing answer."""
+    ledger = FakeLedger()
+    order_id = OrderId('PLU-DIV-1')
+    enc = a_cash_encumbrance(order_id, '95500')
+    book.accept(an_order(), Venue.HSX, T0, order_id=order_id,
+                encumbrances=[enc])
+    book.rest(order_id, T0)
+    ledger.hold(enc)
+
+    assert book.encumbrance_divergence(ledger.of) == ()
+
+
+def test_a_ledger_that_moved_without_the_record_is_named_by_the_meter(book):
+    """**The failure the totals could not see.**
+
+    ``validation/identities.py``'s ``encumbrance_matches`` compares two *sums*,
+    and a run samples them at the end, when nothing is live and both sides are
+    zero. A record that overstated by 2,034,329 dong for the whole life of a
+    resting order therefore read as clean -- an ignorance meter reading zero
+    during known ignorance. This is the per-order form, and it names the order,
+    the resource and both numbers, because *which side is high* is the
+    diagnosis: a record above the ledger overstates a promise, a record below
+    it under-reports one.
+    """
+    ledger = FakeLedger()
+    order_id = OrderId('PLU-DIV-2')
+    enc = a_cash_encumbrance(order_id, '95500')
+    book.accept(an_order(), Venue.HSX, T0, order_id=order_id,
+                encumbrances=[enc])
+    book.rest(order_id, T0)
+    # The ledger re-took a smaller reservation and nobody told the record --
+    # the shape of the corporate-action SCALE defect.
+    ledger.hold(a_cash_encumbrance(order_id, '93000'))
+
+    row, = book.encumbrance_divergence(ledger.of)
+    assert row.order_id == order_id
+    assert row.state is OrderState.RESTING
+    assert row.resource is ResourceKind.CASH
+    assert (row.record_amount, row.ledger_amount) == (Decimal('95500'),
+                                                      Decimal('93000'))
+    assert row.is_clean is False
+    assert 'record 95500' in str(row) and 'ledger 93000' in str(row)
+
+
+def test_the_meter_sweeps_terminal_orders_too(book):
+    """A terminal record reserves nothing by construction, so a reservation the
+    ledger still holds for one is a leak -- and it is the leak the summed form
+    hides best, because it only shows while every other order is flat.
+
+    The control is the same order with the ledger released: terminal on both
+    sides is clean, not merely quiet.
+    """
+    ledger = FakeLedger()
+    order_id = OrderId('PLU-DIV-3')
+    enc = a_cash_encumbrance(order_id, '95500')
+    book.accept(an_order(), Venue.HSX, T0, order_id=order_id,
+                encumbrances=[enc])
+    book.rest(order_id, T0)
+    ledger.hold(enc)
+    book.cancel(order_id, T0)          # the hook is a Recorder: nothing moves
+
+    row, = book.encumbrance_divergence(ledger.of)
+    assert row.state is OrderState.CANCELLED
+    assert (row.record_amount, row.ledger_amount) == (Decimal('0'),
+                                                      Decimal('95500'))
+
+    ledger.drop(order_id)
+    assert book.encumbrance_divergence(ledger.of) == ()
+
+
+def test_the_meter_reports_a_share_leg_in_quantity_not_in_amount(book):
+    """``CASH`` is denominated in ``amount`` and ``SHARES`` in ``quantity``,
+    and a meter that compared only the money would read zero across a sell
+    whose committed quantity had doubled underneath it -- which is exactly
+    what a 1->2 split does to a resting sell."""
+    ledger = FakeLedger()
+    order_id = OrderId('PLU-DIV-4')
+    held = Encumbrance.take(order_id, Pool.SECURITIES, ResourceKind.SHARES, T0,
+                            quantity=1000, ticker='FPT')
+    book.accept(an_order(side=Side.SELL), Venue.HSX, T0, order_id=order_id,
+                encumbrances=[held])
+    book.rest(order_id, T0)
+    ledger.hold(Encumbrance.take(order_id, Pool.SECURITIES,
+                                 ResourceKind.SHARES, T0, quantity=2000,
+                                 ticker='FPT'))
+
+    row, = book.encumbrance_divergence(ledger.of)
+    assert row.resource is ResourceKind.SHARES
+    assert (row.record_quantity, row.ledger_quantity) == (1000, 2000)
+    assert (row.record_amount, row.ledger_amount) == (Decimal('0'),
+                                                      Decimal('0'))
+    assert row.ticker == 'FPT'

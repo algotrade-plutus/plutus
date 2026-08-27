@@ -694,20 +694,27 @@ def test_the_margin_view_never_reports_the_cure_deadline(cure_run):
 # After the KRX cutover
 # --------------------------------------------------------------------------
 
-def test_the_session_never_asks_which_margin_model_applies():
-    """A 2026 position is margined by the pre-KRX formula, silently.
+def test_the_session_now_asks_which_margin_model_applies_and_counts_the_answer():
+    """A 2026 position is still margined ``IM + VM`` intraday -- and it says so.
 
-    ``RuleSet.margin_model()`` is the rulebook's own answer to "which model
-    applies here", and from ``KRX_CUTOVER`` it **raises**: the post-KRX value
-    is not sourced, because QD 26's Phu luc 2 parameter table is unpublished.
-    The session never calls it. A VN30F2603 long carried through the real
-    2026-03-09 limit-down is margined ``IM + VM`` at 0.17 -- the pre-KRX
-    broker shape, ten months past the cutover -- the run completes, no
-    exception is raised, and ``indeterminate_report`` counts **zero**
-    undecided evaluations.
+    **What this used to assert, under the name
+    ``test_the_session_never_asks_which_margin_model_applies``:**
+    ``indeterminate == 0``. ``RuleSet.margin_model()`` raises from the KRX
+    cutover -- the post-KRX mechanism is not sourced in the rulebook -- and
+    the session never called it, so a VN30F2603 long carried through the real
+    2026-03-09 limit-down was margined on the pre-KRX broker shape ten months
+    past the cutover with nothing in any published number saying so.
 
-    A run that cannot resolve a *band* answers INDETERMINATE and counts it. A
-    run that cannot resolve the *margin model* answers with last year's.
+    The session asks now. The intraday mark still runs on ``IM + VM``,
+    because refusing to margin an open position is not a safer answer than
+    margining it on last year's mechanism, and every mark it takes that way
+    is counted under ``rule.margin_model.unsourced``. The **overnight** layer
+    is where the refusal bites: with no firm named there is no
+    ``margin_model_overnight`` to ask, so the end-of-day requirement is
+    INDETERMINATE and moves the scalar.
+
+    The intraday arithmetic below is unchanged and is asserted unchanged: the
+    repair is about what the run *says*, not about restating the number.
     """
     result, strategy, model, raised = S.run_post_krx_margin_model()
 
@@ -717,7 +724,15 @@ def test_the_session_never_asks_which_margin_model_applies():
 
     assert result.error is None
     assert result.failed_identities == ()
-    assert result.indeterminate.indeterminate == 0
+
+    report = result.indeterminate
+    silent = getattr(report, 'silent_ignorance', {})
+    assert silent.get('rule.margin_model.unsourced', 0) > 0
+    assert report.indeterminate == len(result.overnight) > 0
+    assert all(r.amount is None for r in result.overnight)
+    assert {g for r in result.overnight for g in r.gaps} == {
+        'margin_model_overnight.unstated'}
+    assert getattr(report, 'is_clean', False) is False
 
     crash = strategy.at(date(2026, 3, 9), 'close')
     assert crash['initial_margin'] == (Decimal('0.17') * Decimal('2')
@@ -729,6 +744,119 @@ def test_the_session_never_asks_which_margin_model_applies():
     assert crash['required'] == (crash['initial_margin']
                                  + crash['variation_margin'])
     assert crash['required'] == Decimal('109844000.000')
+
+
+@pytest.fixture(scope='module')
+def overnight_layer():
+    return S.run_post_krx_overnight_layer()
+
+
+def test_the_overnight_layer_names_the_one_input_each_arm_is_missing(
+        overnight_layer):
+    """Three arms, one varied input each, and none of them guesses.
+
+    This is the engine the fidelity audit found unreachable:
+    ``scenario_margin.py``, 1,069 executable lines, **zero call sites** in
+    ``src/`` or ``validation/``. Every arm here is post-KRX, so the rulebook
+    has stopped answering and the *profile* decides -- which is survey
+    finding F-1 made operational.
+
+    A caller told only "indeterminate" cannot act. Each arm's ``gaps`` names
+    the input, and the remedy is different in each case: name a firm, serve
+    the index, or nothing.
+    """
+    no_firm, withheld, served = overnight_layer
+
+    assert no_firm.model == 'UNSTATED'
+    assert no_firm.overnight is None
+    assert no_firm.gaps == ('margin_model_overnight.unstated',)
+
+    assert withheld.model == 'SCENARIO_GRID'
+    assert withheld.overnight is None
+    assert withheld.gaps == ('underlying_close:VN30',)
+
+    assert served.model == 'SCENARIO_GRID'
+    assert served.overnight is not None
+    assert served.gaps == ()
+
+
+def test_the_two_layers_are_different_numbers_and_the_gap_is_the_vm(
+        overnight_layer):
+    """``IM + VM`` 109,844,000d intraday against ``Max(Rm+Sm-OA, MM)``
+    60,044,000d overnight, on the same account at the same close.
+
+    The difference is **exactly** the variation margin, 49,800,000d, and that
+    is not a coincidence: Phu luc 2 section 6.2 has no ``VM`` term, because
+    QD 26 Dieu 20 settles *lai lo vi the* as a separate daily cash movement
+    on T+1. The two models are each internally consistent.
+
+    **Mixing them is not**, and the run says so rather than leaving it to a
+    reader: ``settle_daily`` has no session call site (FEATURES.md D1), so
+    this simulator never pays the T+1 cash, and a grid number quoted without
+    that payment reports an account owing 49,800,000d less than it does. That
+    is the one *permissive* assumption in the layer and it is counted as
+    ``variation_margin_unsettled``.
+    """
+    _, _, served = overnight_layer
+    assert served.intraday == Decimal('109844000.000')
+    assert served.overnight == Decimal('60044000.00000')
+    assert served.difference == Decimal('-49800000.00000')
+
+    crash = served.strategy.at(served.close_day, 'close')
+    assert served.difference == -crash['variation_margin']
+
+    assert 'variation_margin_unsettled' in served.assumptions
+    assert 'minimum_margin_factor_derived' in served.assumptions
+    silent = getattr(served.result.indeterminate, 'silent_ignorance', {})
+    assert silent.get('margin.overnight.assumed.variation_margin_unsettled')
+
+
+def test_an_uncomputable_overnight_layer_is_counted_not_substituted(
+        overnight_layer):
+    """The requirement the run could not compute never becomes the other one.
+
+    Both refusing arms hold the same position at the same price as the arm
+    that computes, and their intraday number is available and identical. It
+    is not reported as the overnight one. ``indeterminate`` moves by one per
+    session and the gap key says which input to go and get.
+    """
+    no_firm, withheld, served = overnight_layer
+    assert no_firm.intraday == withheld.intraday == served.intraday
+
+    for arm, key in ((no_firm, 'margin_model_overnight.unstated'),
+                     (withheld, 'underlying_close')):
+        report = arm.result.indeterminate
+        assert report.indeterminate == len(arm.result.overnight)
+        silent = getattr(report, 'silent_ignorance', {})
+        assert silent[f'margin.overnight.uncomputed.{key}'] == report.indeterminate
+        assert arm.result.provenance.overnight_determinate == 0
+        assert arm.result.provenance.overnight_indeterminate > 0
+
+    assert served.result.indeterminate.indeterminate == 0
+    assert served.result.provenance.overnight_determinate > 0
+
+
+def test_the_grids_minimum_margin_floor_reproduces_the_published_factor(
+        overnight_layer):
+    """``MM = P x MF`` with ``MF`` = 5,000d per VN30 contract, to the dong.
+
+    ``ContractLeg`` takes ``R``, the half relative spread, and no firm
+    publishes one; what the profile publishes is ``MF`` itself. The layer
+    inverts ``R = MF / (M x St)`` and ``scenario_margin`` multiplies it
+    straight back, so the round trip has to be exact or a 5,000d floor comes
+    back as 4999.999999999999999999999999 -- arithmetically harmless and, in
+    a margin report, indistinguishable from a bug. Two contracts, 10,000d,
+    and the floor does not bind against a 60,044,000d risk margin.
+    """
+    _, _, served = overnight_layer
+    row = [r for r in served.result.overnight
+           if r.as_of == served.close_day][-1]
+    group = row.detail.groups[0]
+    assert group.minimum_margin == Decimal('10000')
+    assert group.minimum_margin_binds is False
+    assert group.basis_margin == Decimal('0')
+    assert group.offsetting_amount is None
+    assert row.amount == group.risk_margin
 
 
 def test_the_maturity_tax_helper_matches_the_statutory_structure():

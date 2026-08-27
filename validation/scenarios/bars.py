@@ -89,7 +89,21 @@ is a choice a reader may disagree with:
    Everything else carries ``locked_side=None``. The divergence is measured
    by ``order_cycle.lock_proxy_divergence``, not hidden.
 
-Nothing here is written back into the simulator.
+Nothing here is written back into the simulator -- but **one of the three gaps
+it was written to demonstrate has since been closed upstream**, and this
+module is no longer the only way to reach it: ``adapters/datahub.py``
+implements the ``IntervalSource`` seam and serves ``quote_dailyvolume``
+alongside close, ceiling, floor and reference. So a participation cap is now
+computable from the shipped adapter, and ``hard`` decides orders on the real
+corpus that it used to refuse.
+
+``quote_open``, ``quote_max`` and ``quote_min`` are still **not** served by
+the shipped adapter, so the day's extremes remain this module's own, and the
+band-lock proxy above and the continuous-touch refusal in ``HardFillPolicy``
+both still turn on them. The synthetic-print hazard the module warns about
+below does not arise through ``quote_dailyvolume``: there are zero rows with
+``quantity = 0`` at any date, so an absent row is our ignorance and never a
+market fact reading as one.
 """
 
 from __future__ import annotations

@@ -205,15 +205,26 @@ nothing to check, and a charge schedule row that is never levied.
    them (``unsettled == 0``); the rule does not. Not fixed: a new
    ``AdmissionRule`` member is a rulebook-level change.
 
-5. **OPEN -- neither leg of this pair can be adjudicated on the daily corpus,
-   and the report cannot say which field was missing.** Under ``hard`` the same
-   two orders are ``INDETERMINATE`` at a continuous touch -- the bars carry no
-   high, no low and no volume, so an order that was never touched and one that
-   filled look identical -- and ``indeterminate_report().by_field`` is
-   ``{}``, because the continuous-touch refusal names no ``DataField``. So the
-   headline for the whole scenario is that **every fill in the main run is a
-   ``soft`` model output, not an observation**: at a 0.6667 indeterminate rate
-   under ``hard``, both legs simply expire unfilled. :func:`run_hard_arm`.
+5. **OPEN, and narrowed -- neither leg of this pair can be adjudicated on the
+   daily corpus, and the report cannot say which field was missing.** Under
+   ``hard`` the same two orders are ``INDETERMINATE`` at a continuous touch,
+   and ``indeterminate_report().by_field`` is ``{}``, because the
+   continuous-touch refusal names no ``DataField``. So the headline for the
+   whole scenario is that **every fill in the main run is a ``soft`` model
+   output, not an observation**: at a 0.6667 indeterminate rate under
+   ``hard``, both legs simply expire unfilled. :func:`run_hard_arm`.
+
+   **What changed, and what did not.** ``adapters/datahub.py`` now serves
+   ``quote_dailyvolume``, so the participation cap is computable and the
+   *volume* half of this finding is closed -- ``hard`` fills elsewhere on this
+   corpus now (``order_cycle``'s HPG order, ``equity-margin``'s whole hard
+   arm). It changes nothing **here**, and that is the diagnosis rather than a
+   disappointment: both of these limits sit exactly at the day's close, so
+   ``_price_test`` answers ``AT`` and ``HardFillPolicy`` refuses the touch --
+   time priority is unrecoverable from a bar. Deciding it needs
+   ``quote_open``, ``quote_max`` and ``quote_min``, which are on disk and
+   still not served. The remaining finding is therefore about the **day's
+   extremes**, not about volume.
 
 6. **OPEN -- the 09:30 margin mark uses the same session's close.** On a daily
    run the whole day's bar is the interval, which ``_interval_for`` declares,
@@ -1126,14 +1137,21 @@ def findings() -> Tuple[Dict[str, Any], ...]:
                   'adapters/datahub.py',
          'what': 'neither leg of this pair can be adjudicated on the daily '
                  'corpus, and indeterminate_report().by_field is empty, so a '
-                 'report cannot even name the field that was missing',
+                 'report cannot even name the field that was missing. NARROWED'
+                 ': the adapter now serves quote_dailyvolume, so this is no '
+                 'longer about volume -- it is about the day\'s extremes',
          'evidence': 'hard arm over 2022-10-21: 2 of 3 evaluations '
                      'INDETERMINATE (rate 0.6667), by_field {}, by_rule {}, '
                      'both orders expire unfilled, missing_fields empty on '
-                     'the INDETERMINATE trade rows. Every fill in the main '
-                     'run is therefore a soft model output, not an '
-                     'observation',
+                     'the INDETERMINATE trade rows -- unchanged by the volume '
+                     'repair, because both limits sit AT the day\'s close and '
+                     'HardFillPolicy refuses a continuous touch. Every fill '
+                     'in the main run is therefore still a soft model output, '
+                     'not an observation',
          'fix': None,
+         'needs': 'quote_open, quote_max and quote_min through the '
+                  'IntervalSource seam; all three are on disk for every '
+                  'ticker-day of this window',
          'regression': 'run_hard_arm'},
         {'id': 'PT-6', 'status': 'open', 'severity': 'medium',
          'where': 'src/plutus/market/session/exchange.py _interval_for and '

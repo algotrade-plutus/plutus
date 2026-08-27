@@ -345,7 +345,15 @@ class Leg:
     initial_deposit: str = '0'
     opening_holdings: Mapping[str, int] = field(default_factory=dict)
     tickers: Tuple[str, ...] = TICKERS
-    max_participation: str = '0.10'
+
+    #: ``None`` means **no cap**, and it is a real option now. This field used
+    #: to be a plain ``str`` defaulting to ``'0.10'`` and, for a ``soft`` leg,
+    #: that value was silently discarded: ``FillPolicyConfig`` could not tell
+    #: it from its own default, so ``build_fill_policy`` read it as "nobody
+    #: asked" and built an uncapped policy. Every ``policy='soft'`` leg here
+    #: was therefore uncapped while claiming 10%. It is honoured now, so a leg
+    #: that means uncapped has to say so.
+    max_participation: Optional[str] = '0.10'
     note: Optional[str] = None
 
 
@@ -552,8 +560,15 @@ def legs() -> Tuple[Leg, ...]:
             steps=(Step(DAY1, _buy('HPG', 1000,
                                    order_type=OrderType.AT_THE_OPENING)),),
             open_time=ato[0], close_time=ato[1],
-            sessions=(DAY1, DAY2), policy='soft',
-            note='an ATO reaching its own cross fills at the published open'),
+            sessions=(DAY1, DAY2), policy='soft', max_participation=None,
+            note=('an ATO reaching its own cross fills at the published open. '
+                  'Uncapped, and it has to be: this leg asks a price and '
+                  'lifecycle question, and no capped policy can answer a '
+                  'cross at all -- the corpus publishes no per-auction volume '
+                  'anywhere, so the cap is uncomputable and every capped arm '
+                  'returns INDETERMINATE naming VOLUME. It used to read '
+                  'max_participation=0.10 and run uncapped anyway, because '
+                  'that value was indistinguishable from an unwritten one')),
 
         Leg(name='ato-expired-at-cross',
             steps=(Step(DAY1, _buy('HPG', 1000,
@@ -567,8 +582,12 @@ def legs() -> Tuple[Leg, ...]:
             steps=(Step(DAY1, _buy('HPG', 1000,
                                    order_type=OrderType.AT_THE_CLOSE)),),
             open_time=atc[0], close_time=atc[1],
-            sessions=(DAY1, DAY2), policy='soft',
-            note='an ATC reaching its own cross fills at the published close'),
+            sessions=(DAY1, DAY2), policy='soft', max_participation=None,
+            note=('an ATC reaching its own cross fills at the published '
+                  'close. Uncapped for the same reason as the ATO leg above: '
+                  'the corpus has no per-auction volume, so a cap cannot be '
+                  'computed at a cross and the question this leg asks is '
+                  'about the price and the lifecycle, not the size')),
 
         Leg(name='atc-expired-at-cross',
             steps=(Step(DAY1, _buy('HPG', 1000,
@@ -851,15 +870,26 @@ def partial_fill_then_cancel(source: Optional[PhasedBarSource] = None
     reset between them; only the logs are separate, which is why the assertion
     is on the second run's log.
 
-    A consequence worth reading rather than glossing: the 09:30 advance
-    evaluates the same day's bar again, so the order fills a **second** cap's
-    worth before it is cancelled. The participation cap is per evaluated
-    interval, so a day sampled twice permits twice the daily cap. That is the
-    declared over-generosity of running a daily bar on an intraday clock, and
-    it is visible in the numbers here rather than hidden.
+    **The 09:30 advance fills nothing, and that is the repair.** It used to
+    fill a *second* cap's worth -- 130,000 of a 650,600-share day, 20% of
+    everything that traded, under a policy whose published assumption is "at
+    most 0.10 of the volume observed in the evaluated interval, aggregated
+    across all of the caller's live orders". This docstring used to call that
+    "the declared over-generosity of running a daily bar on an intraday
+    clock". It was not declared anywhere the policy's own assumptions string
+    could be read against it, and it was not a property of the resolution: the
+    session threw its filled-quantity counter away at the end of each
+    ``advance_to``, so the same day's volume was re-offered to the same order
+    once per advance. Splitting one order into ten and advancing the clock ten
+    times were the same evasion, and only the first was closed.
+    ``ExchangeSession`` now carries that counter per ``(ticker, bar)``, so the
+    second advance sees the day's allowance already spent.
 
     HPX on 2022-11-10 traded 650,600 shares between 21.15 and 21.50, so at a
-    10% cap one interval sizes 65,000 shares against a 200,000-share order.
+    10% cap the day sizes 65,000 shares against a 200,000-share order --
+    once, whatever the clock does inside the day. The edge this scenario
+    exists for survives it: the order is ``PARTIALLY_FILLED`` at 65,000 when
+    the second run cancels the remaining 135,000.
     """
     src = source or build_source()
     order_ids: List[str] = []
@@ -930,13 +960,21 @@ def combined_identities(one: ScenarioResult, two: ScenarioResult,
 def adapter_gap(source: Optional[PhasedBarSource] = None) -> Dict[str, Any]:
     """The same order, the same day, judged on both sources. Returned as data.
 
-    ``DataHubSource`` selects four columns of the corpus and drops
-    ``quote_open``, ``quote_max``, ``quote_min`` and ``quote_dailyvolume``,
-    all of which are present for every ticker-day of this window. The session
-    then synthesises an interval with ``OPEN``, ``HIGH``, ``LOW`` and
-    ``VOLUME`` named missing, and ``HardFillPolicy`` cannot compute a
-    participation cap -- so it answers ``INDETERMINATE`` wherever it would
-    otherwise fill.
+    **The gap this measured has half closed, and the measurement is what
+    shows which half.** ``DataHubSource`` used to select four columns --
+    ``quote_close``, ``quote_ceil``, ``quote_floor``, ``quote_reference`` --
+    and the session synthesised an interval with ``OPEN``, ``HIGH``, ``LOW``
+    and ``VOLUME`` named missing; ``HardFillPolicy`` could not compute a
+    participation cap and answered ``INDETERMINATE`` wherever it would
+    otherwise have filled. It now implements the ``IntervalSource`` seam and
+    serves ``quote_dailyvolume``, so on this window the two sources reach the
+    same verdict.
+
+    ``quote_open``, ``quote_max`` and ``quote_min`` are still dropped, and
+    that is the remaining half: ``hard`` cannot return a definite
+    ``NO_FILL`` for a limit the day's low never reached, so it decides on the
+    close alone. Every fill it takes that way is counted under
+    ``fill.decided_without.<field>`` in ``indeterminate_report()``.
 
     That has been written up as a property of the corpus. This function
     measures it as a property of the adapter: the identical order, on the
@@ -983,7 +1021,8 @@ def adapter_gap(source: Optional[PhasedBarSource] = None) -> Dict[str, Any]:
         'window': f'{DAY1} .. {DAY3}, HPG buy 1000 @ 13.50',
         'corpus_columns_dropped_by_datahub': [
             'quote_open', 'quote_max (the daily high)',
-            'quote_min (the daily low)', 'quote_dailyvolume'],
+            'quote_min (the daily low)'],
+        'corpus_columns_datahub_now_serves': ['quote_dailyvolume'],
         'phased_bar_source': summarise(rich),
         'shipped_datahub_source': summarise(thin_result),
     }

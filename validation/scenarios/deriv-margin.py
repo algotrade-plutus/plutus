@@ -152,13 +152,22 @@ this scenario's assertions red.
 WHAT THIS SCENARIO DOES NOT CLAIM
 ---------------------------------
 
-* The **fill policy is ``soft``**, deliberately and not for convenience.
-  ``hard`` on the Parquet corpus is 100% INDETERMINATE -- the bars carry no
-  high, no low and no volume, so a marketable order that was never touched and
-  one that was fully filled are the same row -- and the entry would never fill.
-  ``soft`` fills at the limit when the close touched it, which is a *model
-  output*, and the trade log carries ``evidence='touched_at_limit'`` on every
-  fill so a reader can see it.
+* The **fill policy is ``soft``**, deliberately and not for convenience. The
+  entry here is priced *at* the day's close, and ``hard`` refuses a continuous
+  touch because time priority is unrecoverable from a bar -- so the entry
+  would never fill and there would be no position to margin. ``soft`` fills at
+  the limit when the close touched it, which is a *model output*, and the
+  trade log carries ``evidence='touched_at_limit'`` on every fill so a reader
+  can see it.
+
+  This paragraph used to say ``hard`` is *"100% INDETERMINATE -- the bars
+  carry no high, no low and no volume"*. The volume third of that is no longer
+  true: ``adapters/datahub.py`` serves ``quote_dailyvolume``, and ``hard``
+  fills on this corpus wherever the close traded **through** a limit (see
+  ``order_cycle`` and ``equity-margin``). It changes nothing here, because the
+  refusal at this entry is the touch and not the cap, and deciding a touch
+  needs ``quote_max`` and ``quote_min``, which are on disk and still not
+  served.
 * The **utilisation ladder is unsourced** in shape and in levels except at its
   top rung (``FEATURES.md`` A1-A3; QD 26 Dieu 13 is binary and prints no
   percentage). What the profiles supply is what each firm published, which is
@@ -855,6 +864,45 @@ def findings() -> Tuple[Dict[str, Any], ...]:
                 'describes. Recorded because a report built by joining the '
                 'two streams shows a margin call on a healthy account and a '
                 'forced liquidation on an empty one'},
+        {'id': 'F10', 'status': 'fixed',
+         'where': 'exchange.py _overnight_margin, session/overnight.py, '
+                  'scenario_margin.py',
+         'what': 'the overnight margin layer had no runtime path at all: '
+                 'scenario_margin.py -- 1,069 executable lines implementing '
+                 'QD 26 Phu luc 2, unit-tested and checked against TCBS\'s '
+                 'own worked example -- had zero call sites anywhere in src/ '
+                 'or validation/, and every derivatives run nevertheless '
+                 'reported a full margin history with indeterminate=0',
+         'evidence': 'this window now produces 19 end-of-day requirements, '
+                     'one per session, and the last of them -- the expiry -- '
+                     'is a DETERMINATE ZERO with flat=True, because the '
+                     'contract cash-settled in the same advance and nothing '
+                     'is carried past that close. Component '
+                     '"margin.derivatives.overnight" appears in exercised. '
+                     'The model is PRE_KRX_CONTINUOUS and not the grid, '
+                     'because RuleName.MARGIN_MODEL records one mechanism and '
+                     'no separate end-of-day model to 2025-05-04 -- running '
+                     'the grid on a 2022 account would report a number under '
+                     'a regulation that did not exist',
+         'fix': 'the layer is dated by the rulebook and modelled by the '
+                'broker profile (survey finding F-1); where a parameter is '
+                'unavailable it is INDETERMINATE with the input named, never '
+                'the intraday number under a different label'},
+        {'id': 'F11', 'status': 'declared',
+         'where': 'session/overnight.py, against deposit.py settle_daily',
+         'what': 'past the KRX cutover the two layers are different numbers '
+                 'and the gap is exactly the variation margin, because Phu '
+                 'luc 2 section 6.2 has no VM term -- QD 26 Dieu 20 settles '
+                 'position P&L as a separate T+1 cash movement this simulator '
+                 'does not make (F5, D1)',
+         'evidence': 'measured in expiry-overnight.run_post_krx_overnight_'
+                     'layer: 109,844,000d intraday against 60,044,000d '
+                     'overnight on one 2-lot VN30F position, a 49,800,000d '
+                     'gap equal to the unsettled loss',
+         'fix': 'not made here -- settling VM in cash is F5. Every grid '
+                'result computed over a non-zero VM carries the '
+                'variation_margin_unsettled assumption, which is the one '
+                'permissive flag the layer raises'},
     )
 
 

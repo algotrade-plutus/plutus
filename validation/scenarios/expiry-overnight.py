@@ -32,9 +32,16 @@ separately by a plausible implementation:
 decision a Vietnamese derivatives trader is charged extra for and warned
 about most, and it is where this simulator's declared boundaries bite:
 
-* the *requirement* over the close is computed by the same continuously
-  updated ``MR = IM + VM`` the account faces at 09:30 -- there is no separate
-  end-of-day model, and :func:`run_flat_versus_overnight` measures that;
+* the *requirement* over the close is now computed as its **own layer**,
+  once per session after the venue's close, by the model the dated rulebook
+  and the broker profile between them select
+  (:meth:`~plutus.market.session.exchange.ExchangeSession.overnight_margin`).
+  On this pre-KRX window that model is the continuous ``MR = IM + VM`` on the
+  held book, because the regime has no separate end-of-day model to select --
+  :func:`run_flat_versus_overnight` measures that. Past the cutover it is QD
+  26 Phu luc 2's 21-scenario grid, and
+  :func:`run_post_krx_overnight_layer` measures a **49,800,000d** gap between
+  the two layers on one 2-lot position;
 * the *cash* the requirement stands for never moves. ``settle_daily`` has no
   session call site (FEATURES.md D1), so ``VM`` is the cumulative
   since-entry loss rather than the day's, and the whole of it arrives in one
@@ -117,8 +124,10 @@ __all__ = [
     'run_expiry_and_roll', 'run_overnight_across_tet',
     'run_flat_versus_overnight', 'run_variation_settlement_trail',
     'run_cure_across_tet', 'run_post_krx_margin_model',
+    'run_post_krx_overnight_layer',
     # results
     'ExpiryRun', 'OvernightPair', 'VariationTrail', 'CureRun', 'CureOutcome',
+    'OvernightLayer',
     # helpers
     'maturity_tax', 'settlement_rows', 'margin_events', 'unmarked_gaps',
 ]
@@ -292,20 +301,40 @@ class _FuturesMarket:
     closes: Mapping[date, Decimal]
     expiry: date
     band: Decimal = Decimal('0.07')
+    underlying: str = ''
+    underlying_closes: Mapping[date, Decimal] = field(default_factory=dict)
+    """The **underlying index**, served under its own ticker.
 
-    def _reference(self, day: date) -> Decimal:
-        days = sorted(self.closes)
+    Empty by default and that default is load-bearing: the post-KRX overnight
+    requirement is computed on the underlying's close (QD 26 Phu luc 2
+    section 1.1's ``S``), so a source that carries the future and not the
+    index makes the layer INDETERMINATE. That is the ordinary case -- the
+    wired Parquet corpus does carry ``VN30``, but a caller's own adapter may
+    not -- and it is worth being able to run both arms.
+    """
+
+    def _series(self, ticker: str) -> Optional[Mapping[date, Decimal]]:
+        if ticker == self.ticker:
+            return self.closes
+        if self.underlying and ticker == self.underlying:
+            return self.underlying_closes
+        return None
+
+    def _reference(self, series: Mapping[date, Decimal],
+                   day: date) -> Decimal:
+        days = sorted(series)
         index = days.index(day)
-        return self.closes[days[index - 1]] if index else self.closes[day]
+        return series[days[index - 1]] if index else series[day]
 
     def state_at(self, ticker: str, ts: datetime) -> Optional[MarketState]:
-        if ticker != self.ticker:
+        series = self._series(ticker)
+        if series is None:
             return None
         day = ts.date()
-        last = self.closes.get(day)
+        last = series.get(day)
         if last is None:
             return None
-        reference = self._reference(day)
+        reference = self._reference(series, day)
         return MarketState(
             ticker=ticker, ts=datetime.combine(day, time.min),
             reference=reference,
@@ -316,12 +345,20 @@ class _FuturesMarket:
 
     def states(self, ticker: str, start, end, *,
                resolution: Resolution = Resolution.DAILY):
-        for day in sorted(self.closes):
+        series = self._series(ticker)
+        if series is None:
+            return
+        for day in sorted(series):
             state = self.state_at(ticker, datetime.combine(day, time.min))
             if state is not None and start <= state.ts <= end:
                 yield state
 
     def instrument(self, ticker: str) -> InstrumentSpec:
+        if self.underlying and ticker == self.underlying:
+            return InstrumentSpec(
+                ticker=ticker, exchange_code='HSX',
+                kind=InstrumentKind.INDEX, trading_unit=1,
+                daily_trading_limit=self.band)
         return InstrumentSpec(
             ticker=ticker, exchange_code='HNXDS', kind=InstrumentKind.FUTURE,
             trading_unit=1, daily_trading_limit=self.band,
@@ -769,23 +806,32 @@ def run_flat_versus_overnight(*, source: Any = None, lots: int = 2,
                               ) -> OvernightPair:
     """Two accounts, one market: is the overnight requirement a different one?
 
-    Per finding F-1 the **overnight** requirement is meant to be the scenario
-    grid and the **intraday** ladder ``IM + VM``. What this measures is what
-    the session actually does:
+    Per finding F-1 the **overnight** requirement is the CCP submission and
+    the **intraday** ladder is ``IM + VM``, and which model serves each layer
+    is the broker profile's answer, not the session's. What this measures is
+    what the session does on **this** window, which is 2022 and therefore
+    pre-KRX:
 
     * an account flat at 14:45 carries **no** requirement over the close, and
-      an account holding two lots carries one -- so the two are different, but
-      only because one of them has a position;
-    * the holder's requirement at 14:45 is produced by the *same* call, on the
-      *same* basis, as its requirement at 09:30. There is no post-close
-      recomputation, no underlying-close basis, and no scenario-grid term. The
-      one user-facing margin number is the intraday one at every instant.
+      an account holding two lots carries one;
+    * the holder's requirement at 14:45 is the continuous one on the held
+      book. That is not the session failing to compute a second model -- it is
+      the dated rulebook's answer: ``RuleName.MARGIN_MODEL`` resolves to
+      ``'pre_margin'`` to 2025-05-04 at HIGH confidence, one mechanism
+      recomputed in-session, and **no separate end-of-day model exists in that
+      regime**. Running QD 26's grid here would report a number under a
+      regulation that did not exist.
 
-    ``broker_profile.MarginModel.SCENARIO_GRID`` and ``MarginLayer.OVERNIGHT``
-    exist and name ``scenario_margin`` as their engine; no module under
-    ``session/`` imports it, and ``RuleSet.margin_model()`` -- the rulebook's
-    own answer to "which model applies here" -- has no caller either. See
-    :func:`run_post_krx_margin_model` for what that costs after the cutover.
+    **What this docstring used to say, and it was true when it was written:**
+    *"There is no post-close recomputation, no underlying-close basis, and no
+    scenario-grid term. The one user-facing margin number is the intraday one
+    at every instant."* ``scenario_margin`` had zero call sites anywhere in
+    ``src/`` and ``RuleSet.margin_model()`` had no caller either. Both are
+    wired now -- ``session/overnight.py`` is the seam and
+    ``ExchangeSession.overnight_margin()`` the reader. Past the cutover the
+    grid runs and the two layers are genuinely different numbers; see
+    :func:`run_post_krx_overnight_layer`, which measures the gap at
+    **49,800,000d** on a 2-lot position.
     """
     src = source if source is not None else datahub_source()
     window = _corpus_sessions(src, OVERNIGHT_2022)
@@ -950,14 +996,28 @@ def run_post_krx_margin_model(*, lots: int = 2,
         margin_model@2026-03-09T09:30:00 is unknown: POST-KRX VALUE NOT
         SOURCED.
 
-    The rulebook is right to raise: QD 26's Phu luc 2 is the scenario grid,
-    the requirement is computed once after the close on the *underlying's*
-    close, and Phu luc 2's parameter table is unpublished. What this run
-    measures is that **the session never asks**. A VN30F2603 position carried
-    through the 2026-03-09 limit-down is margined by ``IM + VM`` at 0.17 --
-    the pre-KRX broker formula, applied 10 months past the cutover -- and
-    nothing raises, nothing is flagged, and ``indeterminate_report`` counts
-    zero.
+    **What this run used to measure is that the session never asked.** A
+    VN30F2603 position carried through the 2026-03-09 limit-down was margined
+    by ``IM + VM`` at 0.17 -- the pre-KRX broker formula, ten months past the
+    cutover -- and nothing raised, nothing was flagged, and
+    ``indeterminate_report`` counted zero.
+
+    It asks now, in two separate places, and they answer different questions:
+
+    * the **intraday** mark asks ``RuleSet.margin_model()``, still runs on
+      ``IM + VM`` because refusing to margin an open position is not the safer
+      answer, and records ``rule.margin_model.unsourced`` once per mark;
+    * the **overnight** layer takes the rulebook's refusal as the signal to
+      ask the *profile* instead. With no firm named there is nothing to ask,
+      so the end-of-day requirement is INDETERMINATE and moves the scalar.
+      :func:`run_post_krx_overnight_layer` varies that one input.
+
+    A conflict worth stating rather than resolving here: the rulebook's
+    post-KRX row says the COMS formula *"could not be obtained"* and cites a
+    document *"never read"*, while ``scenario_margin.py`` implements QD 26 and
+    its Phu luc 2 from a signed package read end to end. Both cannot be true.
+    Re-dating that row is a sourcing decision about a gazetted instrument and
+    is not taken in a validation scenario.
 
     Returns ``(result, strategy, margin_model, raised)`` where
     ``margin_model`` is the rulebook's answer if it has one and ``raised`` is
@@ -986,3 +1046,117 @@ def run_post_krx_margin_model(*, lots: int = 2,
     except UnresolvedRule as exc:
         raised = exc
     return result, strategy, model, raised
+
+
+@dataclass(frozen=True)
+class OvernightLayer:
+    """One arm of :func:`run_post_krx_overnight_layer`.
+
+    ``intraday`` and ``overnight`` are the **two layers of one account on one
+    day**, which is the whole content of survey finding F-1: they are not two
+    firms' answers, they are two models a single firm runs at two moments,
+    and until this scenario existed the second had never been computed at
+    all.
+    """
+
+    label: str
+    result: ScenarioResult
+    strategy: HoldOvernight
+    close_day: date
+    #: ``MR = IM + VM`` as the client ladder saw it at that close.
+    intraday: Decimal
+    #: The end-of-day requirement, or ``None`` when it was INDETERMINATE.
+    overnight: Optional[Decimal]
+    model: str
+    gaps: Tuple[str, ...]
+    assumptions: Tuple[str, ...]
+
+    @property
+    def difference(self) -> Optional[Decimal]:
+        """Overnight minus intraday, in dong. ``None`` when undetermined."""
+        if self.overnight is None:
+            return None
+        return self.overnight - self.intraday
+
+
+def run_post_krx_overnight_layer(*, lots: int = 2,
+                                 initial_deposit: Any = 900_000_000
+                                 ) -> Tuple[OvernightLayer, ...]:
+    """Post-KRX: what does the account actually owe over the close? Three arms.
+
+    :func:`run_post_krx_margin_model` measures that the *rulebook* refuses to
+    name the mechanism after the cutover. This measures what the session does
+    with that refusal, and it is where ``scenario_margin.py`` -- 1,069
+    executable lines with **zero call sites** when the fidelity audit ran --
+    is finally exercised.
+
+    The three arms differ in exactly one input each, so each names one thing
+    a user would have to fix:
+
+    ``no firm``
+        No margin profile at all. Past the cutover the rulebook has no answer
+        and there is no firm to ask, so the overnight requirement is
+        **INDETERMINATE** -- ``margin_model_overnight.unstated``. It is *not*
+        ``IM + VM`` wearing a different label, and that is the point: before
+        this layer existed, a 2026 position was margined on the pre-KRX
+        formula, the run completed, and ``indeterminate_report()`` counted
+        zero.
+    ``SSI, index withheld``
+        SSI publishes the richest VSDC parameter mirror in the survey, so the
+        model is known -- and the source carries the future and not the index.
+        INDETERMINATE again, this time naming ``underlying_close``. Phu luc 2
+        section 1.1's ``S`` is the underlying's close and substituting the
+        futures price would fold the basis into all 21 scenarios.
+    ``SSI, index served``
+        Everything present. The 21-scenario grid runs, and the number it
+        produces is compared against the ``IM + VM`` the same account faced
+        at the same close.
+
+    **The index series here is the futures series, and that is a stated
+    simplification rather than a measurement.** No VN30 index close for March
+    2026 is in any corpus this repository can reach, and inventing a basis
+    would invent precisely the quantity Phu luc 2 section 3's ``Sm`` exists
+    to charge for. Setting the basis to zero makes the comparison isolate the
+    *model*: same price series, two engines, and every dong of difference is
+    the difference between ``IM + VM`` and ``Max(Rm + Sm - OA, MM)``.
+
+    The deposit is large enough that no arm is force-closed: the question is
+    what the requirement *is*, and an account being liquidated half-way
+    through would stop the layer having anything to compute.
+    """
+    days = POST_KRX_2026.sessions
+    closes = {day: Decimal(price)
+              for day, price in zip(days, POST_KRX_CLOSES)}
+    arms: List[OvernightLayer] = []
+    for label, firm, serve_index in (
+            ('no firm', None, False),
+            ('SSI, index withheld', 'SSI', False),
+            ('SSI, index served', 'SSI', True)):
+        src = _FuturesMarket(
+            ticker='VN30F2603', closes=closes, expiry=date(2026, 3, 19),
+            underlying='VN30',
+            underlying_closes=dict(closes) if serve_index else {})
+        session = build_session(
+            start=POST_KRX_2026.start, end=POST_KRX_2026.end,
+            venues=['HNXDS'], source=src, initial_deposit=initial_deposit,
+            fill_policy='soft',
+            broker_profile=None if firm is None
+            else {'firm': firm, 'warn': False})
+        strategy = HoldOvernight('VN30F2603', days[0], lots)
+        result = run_scenario(Scenario(
+            name=f'{POST_KRX_2026.name}:{label}', window=POST_KRX_2026,
+            session=session, strategy=strategy, source=src,
+            note='The overnight layer, post-KRX, with one input varied.'))
+        close_day = days[-2]
+        row = strategy.at(close_day, 'close')
+        intraday = _ZERO if row is None else row['required']
+        matching = [r for r in result.overnight if r.as_of == close_day]
+        latest = matching[-1] if matching else None
+        arms.append(OvernightLayer(
+            label=label, result=result, strategy=strategy,
+            close_day=close_day, intraday=intraday,
+            overnight=None if latest is None else latest.amount,
+            model='none' if latest is None else latest.model,
+            gaps=() if latest is None else latest.gaps,
+            assumptions=() if latest is None else latest.assumptions))
+    return tuple(arms)

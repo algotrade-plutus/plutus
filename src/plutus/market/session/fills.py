@@ -70,7 +70,13 @@ every shipped policy obeys them:
 3. **max_participation** is a fraction of the volume observed in the evaluated
    interval and it **aggregates across all of the caller's own live orders in
    that instrument** -- passed in as ``already_filled``. Per-order would let a
-   caller split one order into ten and evade the cap.
+   caller split one order into ten and evade the cap; per-advance would let the
+   same caller evade it by advancing the clock instead, which is why
+   ``ExchangeSession`` carries that counter per *bar* and not per call.
+   **All three shipped policies carry it**, ``soft`` optionally (default
+   ``None``, uncapped) and ``hard`` mandatorily; ``soft`` did not carry it at
+   all until :func:`build_fill_policy` was found to be discarding a configured
+   cap for it in silence.
 
 Auctions and continuous session are different mechanics
 ------------------------------------------------------------------------
@@ -125,7 +131,8 @@ document and no corpus available here can supply a value for it.
 
 import hashlib
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, is_dataclass, replace
+from dataclasses import fields as dataclass_fields
 from datetime import datetime
 from decimal import ROUND_FLOOR, Decimal, localcontext
 from enum import Enum
@@ -143,13 +150,14 @@ from plutus.market.session.types import (TIME_IN_FORCE, DataField, FillDecision,
 
 __all__ = [
     'NO_MARKET_IMPACT', 'MATCHING_PHASES', 'POLICY_SEPARATOR',
-    'DRAW_PRECISION',
+    'DRAW_PRECISION', 'HONOURED_CONFIG_FIELDS',
     'FillPolicy', 'BaseFillPolicy', 'SoftFillPolicy', 'HardFillPolicy',
     'ProbabilisticFillPolicy',
     'FillQuestion', 'DivergenceRow', 'DivergenceReport', 'compare_policies',
     'probabilistic_sweep',
     'auction_fill_price', 'build_fill_policy', 'draw_key', 'fill_draw',
-    'floor_to_lot', 'participation_cap', 'policy_of', 'stamp_policy',
+    'floor_to_lot', 'parse_fill_policy_config', 'participation_cap',
+    'policy_of', 'stamp_policy',
 ]
 
 
@@ -207,7 +215,9 @@ class FillPolicy(Protocol):
     Policy family       What it uses, all of it already here
     ==================  =================================================
     deterministic-soft  ``interval.close`` / ``high`` / ``low`` against
-                        ``order.order.limit_price``. No volume needed.
+                        ``order.order.limit_price``, and ``interval.volume``
+                        only if the caller asked for a cap (it is optional
+                        for this family and required for the next).
     deterministic-hard  the same, plus ``interval.volume`` for the
                         participation cap, plus ``already_filled`` to
                         aggregate the cap across the caller's own orders.
@@ -564,10 +574,19 @@ def participation_cap(
     ``None`` means *the cap cannot be computed*, which is a different answer
     from zero and must not be collapsed into it: zero says "you have used your
     share", ``None`` says "the data does not say what the share is". The caller
-    turns ``None`` into an ``INDETERMINATE`` naming ``DataField.VOLUME``. This
-    is not hypothetical -- both shipped adapters leave ``volume`` unsupplied on
-    every corpus here, so a volume-capped policy is honestly undecidable on
-    today's data, and reporting that is the point.
+    turns ``None`` into an ``INDETERMINATE`` naming ``DataField.VOLUME``.
+
+    **Where that still happens, corrected.** This used to say that both
+    shipped adapters leave ``volume`` unsupplied on every corpus here, and
+    therefore that a volume-capped policy was undecidable everywhere. That was
+    a statement about the adapters, not about the data:
+    :class:`~plutus.market.adapters.datahub.DataHubSource` now serves
+    ``quote_dailyvolume`` through the ``IntervalSource`` seam, on 62.9% of
+    ticker-days in the Parquet root and on every liquid name measured. ``None``
+    is still reached, and honestly: on the ticker-days with no volume row, on
+    every instrument with no volume to publish (the indices), on
+    :class:`~plutus.market.adapters.tick.TickSource`, which serves no
+    intervals at all, and on any caller's own source that does not.
 
     Rounds **down**: a fractional allowance is not a share of a lot.
     """
@@ -667,132 +686,33 @@ def policy_of(decision: FillDecision) -> Optional[str]:
 
 
 # --------------------------------------------------------------------------
-# SoftFillPolicy -- the baseline arm
-# --------------------------------------------------------------------------
-
-class SoftFillPolicy(BaseFillPolicy):
-    """Fill if the price traded at or through the limit, full size.
-
-    **This is what every backtester does today**, and that is exactly why it
-    ships: it is the comparison arm without which "hard fills cost you 1.4
-    Sharpe" is a number with nothing to be relative to. It is not the
-    recommended policy and its docstring should not be read as endorsing it.
-
-    What it assumes, all of it unstated in the tools that do this by default:
-
-    - that the caller's order was at the front of the queue at its price, on
-      every interval, in every instrument -- i.e. that ``TOUCHED_AT_LIMIT`` is
-      as good as ``TRADED_THROUGH``;
-    - that the caller's size was available, whatever it was, with no reference
-      to the volume that actually traded;
-    - that a market-family order executes at the observed price with no depth.
-
-    Each is recorded on the decision it produced: a soft fill carries
-    ``FillEvidence.TOUCHED_AT_LIMIT`` when that is what it rested on, so the
-    share of a soft backtest resting on the queue assumption is countable after
-    the fact rather than invisible.
-
-    ``INDETERMINATE`` is still reachable, and it matters that it is: when the
-    interval carries no traded price at all, even this policy has nothing to
-    assert. A policy that could never say "I do not know" would make the
-    ``INDETERMINATE`` rate a property of the data alone.
-    """
-
-    kind: ClassVar[str] = 'soft'
-
-    @property
-    def assumptions(self) -> Tuple[str, ...]:
-        return super().assumptions + (
-            'Soft fills: an order fills in full whenever the market traded at '
-            'or through its limit, with no queue-position and no volume test. '
-            'This is the optimistic bound, not a forecast.',
-        )
-
-    def _continuous(self, order, interval, rules, *, already_filled,
-                    instrument) -> FillDecision:
-        side = order.order.side
-        limit = order.order.limit_price
-
-        if limit is None:
-            # Market family (MTL/MOK/MAK, and core/order.py's synthetic MKT).
-            # The backtester answer: it executes, at whatever printed.
-            price = _point_price(interval)
-            if price is None:
-                return FillDecision.indeterminate(
-                    'a market-family order needs an observed traded price and '
-                    'this interval carries none',
-                    [DataField.CLOSE, DataField.LAST],
-                )
-            return FillDecision.fill(order.remaining_quantity, price,
-                                     FillEvidence.TRADED_THROUGH)
-
-        observed, field = _extreme_toward(side, interval)
-        if observed is None:
-            observed = _point_price(interval)
-            if observed is None:
-                return FillDecision.indeterminate(
-                    'this interval carries no traded price, so not even an '
-                    'at-or-through test can be made',
-                    [field, DataField.CLOSE, DataField.LAST],
-                )
-
-        reach = _reach(side, observed, limit)
-        if reach < 0:
-            return FillDecision.no_fill(
-                f'the market never reached {limit} on the '
-                f'{"buy" if side is Side.BUY else "sell"} side '
-                f'(best observed {observed})'
-            )
-        evidence = (FillEvidence.TRADED_THROUGH if reach > 0
-                    else FillEvidence.TOUCHED_AT_LIMIT)
-        return FillDecision.fill(order.remaining_quantity, limit, evidence)
-
-    def _auction(self, order, interval, rules, *, already_filled,
-                 instrument) -> FillDecision:
-        clearing, field = _clearing_price(order, interval)
-        if clearing is None:
-            return FillDecision.indeterminate(
-                'no published cross price for this auction, so whether it '
-                'crossed at all cannot be established',
-                [field] if field is not None else (),
-            )
-
-        limit = order.order.limit_price
-        if limit is None:
-            # ATO/ATC, or an unmodelled MTL residue. The backtester answer for
-            # all of them is the cross price.
-            return FillDecision.fill(order.remaining_quantity, clearing,
-                                     FillEvidence.AUCTION_PRICE)
-
-        if _reach(order.order.side, clearing, limit) < 0:
-            return FillDecision.no_fill(
-                f'the auction cleared at {clearing}, past a limit of {limit}')
-        return FillDecision.fill(order.remaining_quantity, clearing,
-                                 FillEvidence.AUCTION_PRICE)
-
-
-# --------------------------------------------------------------------------
 # The size half, shared by every policy that bounds its own claim
 # --------------------------------------------------------------------------
 
 class _CappedFillPolicy(BaseFillPolicy):
     """Conventions 2 and 3, in one place, for every policy that applies them.
 
-    ``hard`` and ``probabilistic`` differ on *whether* an order filled; they
-    must not differ on *how much* filled once that question is answered, or the
-    divergence between the two arms stops being attributable to the evidence
-    standard. So the participation cap, the round-lot floor, the fill-or-kill
-    all-or-nothing rule and the daily-bar auction refusal live here rather than
-    once per policy.
+    ``soft``, ``hard`` and ``probabilistic`` differ on *whether* an order
+    filled; they must not differ on *how much* filled once that question is
+    answered, or the divergence between the arms stops being attributable to
+    the evidence standard. So the participation cap, the round-lot floor, the
+    fill-or-kill all-or-nothing rule and the daily-bar auction refusal live
+    here rather than once per policy.
+
+    **All three shipped policies derive from it.** ``soft`` did not, and that
+    was the defect: it had no cap field, so a configured ``max_participation``
+    reached it and vanished. A second, private sizing path in ``soft`` would
+    have reintroduced the drift this class exists to prevent, so it inherits
+    the same one and merely defaults to ``None``.
 
     Not public: it is an implementation detail of the shipped policies, and a
     third-party policy satisfies :class:`FillPolicy` structurally without it.
     """
 
-    #: ``None`` means uncapped -- the caller has chosen ``soft``'s size
-    #: assumption. Only ``ProbabilisticFillPolicy`` may set it; ``hard``
-    #: requires a cap, because "fill only what the data supports" without a
-    #: size bound is not the hard standard.
+    #: ``None`` means uncapped -- the caller has taken the assumption that
+    #: their own size was available. ``soft`` and ``ProbabilisticFillPolicy``
+    #: may set it; ``hard`` requires a cap, because "fill only what the data
+    #: supports" without a size bound is not the hard standard.
     max_participation: Optional[Decimal] = None
 
     @staticmethod
@@ -880,9 +800,10 @@ class _CappedFillPolicy(BaseFillPolicy):
         instrument or from the venue and the interval's date, and a lot that
         cannot be established is a third ``INDETERMINATE`` here -- see
         :meth:`BaseFillPolicy._lot`. The order of the three is deliberate and
-        unchanged: the cap is computed first, so a run on today's corpus (where
-        both adapters leave ``volume`` unsupplied) reports the missing volume,
-        which is the absence a data fix could actually close.
+        unchanged: the cap is computed first, so a run on a source that does
+        not serve volume reports the missing volume, which is the absence a
+        data fix could actually close -- and did, for
+        :class:`~plutus.market.adapters.datahub.DataHubSource`.
         """
         if self.max_participation is None:
             return FillDecision.fill(order.remaining_quantity, price, evidence,
@@ -911,9 +832,17 @@ class _CappedFillPolicy(BaseFillPolicy):
                 [DataField.VOLUME],
             )
         if cap <= 0:
+            # Three distinguishable situations, and the old single sentence --
+            # "already exhausted by this caller's own fills" -- was a false
+            # claim in two of them: an interval that traded nothing at all, and
+            # one whose whole volume is too small for one share of the cap.
+            # The numbers are put in the reason rather than a diagnosis, so the
+            # sentence is true in all three.
             return FillDecision.no_fill(
-                'the participation cap for this instrument is already '
-                'exhausted by this caller\'s own fills in this interval'
+                f'a participation cap of {self.max_participation} of the '
+                f'{interval.volume} traded in this interval leaves nothing for '
+                f'this order after {already_filled} already filled in this '
+                f'instrument'
             )
 
         lot = self._lot(rules, interval, instrument)
@@ -946,6 +875,200 @@ class _CappedFillPolicy(BaseFillPolicy):
         return FillDecision.fill(quantity, price, evidence,
                                  confidence=confidence)
 
+
+# --------------------------------------------------------------------------
+# SoftFillPolicy -- the baseline arm
+# --------------------------------------------------------------------------
+
+class SoftFillPolicy(_CappedFillPolicy):
+    """Fill if the price traded at or through the limit. Optionally capped.
+
+    **This is what every backtester does today**, and that is exactly why it
+    ships: it is the comparison arm without which "hard fills cost you 1.4
+    Sharpe" is a number with nothing to be relative to. It is not the
+    recommended policy and its docstring should not be read as endorsing it.
+
+    What it assumes, all of it unstated in the tools that do this by default:
+
+    - that the caller's order was at the front of the queue at its price, on
+      every interval, in every instrument -- i.e. that ``TOUCHED_AT_LIMIT`` is
+      as good as ``TRADED_THROUGH``;
+    - **at ``max_participation=None`` only**, that the caller's size was
+      available, whatever it was, with no reference to the volume that
+      actually traded;
+    - that a market-family order executes at the observed price with no depth.
+
+    Each is recorded on the decision it produced: a soft fill carries
+    ``FillEvidence.TOUCHED_AT_LIMIT`` when that is what it rested on, so the
+    share of a soft backtest resting on the queue assumption is countable after
+    the fact rather than invisible.
+
+    ``INDETERMINATE`` is still reachable, and it matters that it is: when the
+    interval carries no traded price at all, even this policy has nothing to
+    assert. A policy that could never say "I do not know" would make the
+    ``INDETERMINATE`` rate a property of the data alone.
+
+    Why this is a ``_CappedFillPolicy``
+    ------------------------------------------------------------------
+    It used to be a bare :class:`BaseFillPolicy` with no size question at all,
+    and :func:`build_fill_policy` therefore **silently discarded** a
+    configured ``max_participation``: ``fill_policy: {kind: soft,
+    max_participation: 0.10}`` produced an uncapped run, with no error, no
+    warning, and nothing in the provenance record to show that the field the
+    caller wrote had been thrown away. That is the exact failure this package
+    exists to refuse, and it was invisible to ``indeterminate_report()``
+    because an uncapped policy never reaches the ``VOLUME`` branch that would
+    have counted it.
+
+    Of the two possible repairs -- teach ``soft`` the cap, or make
+    ``build_fill_policy`` refuse ``soft`` together with a cap -- the first is
+    the honest one, and it is also the more restrictive direction, which is
+    the one a backtest may err in. A refusal would have rejected every
+    ``soft`` config ever written, since at the time the config field could not
+    distinguish a written 0.10 from an unwritten one at all. It can now
+    (``Optional[Decimal] = None``), and a written cap of any value reaches
+    this class.
+
+    Sizing lives in :class:`_CappedFillPolicy` rather than being reimplemented
+    here for the reason that class exists: the arms of the comparison must
+    differ on *whether* an order filled and never on *how much*, or the
+    divergence between them stops being attributable to the evidence standard.
+
+    ``max_participation=None`` -- the constructor default, and what
+    :func:`compare_policies` gets from a bare ``SoftFillPolicy()`` -- restores
+    the original uncapped baseline exactly: :meth:`_CappedFillPolicy._sized_fill`
+    short-circuits to the full remaining quantity, so no cap is computed, no
+    volume is consulted, no round lot is resolved and no auction attribution is
+    refused. The optimistic bound is still available and is still the default;
+    it is now *chosen* rather than imposed by an omission.
+    """
+
+    kind: ClassVar[str] = 'soft'
+
+    def __init__(self, max_participation: Optional[Decimal] = None) -> None:
+        """
+        Args:
+            max_participation: the fraction of observed interval volume this
+                caller may claim across all of its live orders in one
+                instrument, or ``None`` for the uncapped optimistic bound.
+                ``None`` is the default because an uncapped ``soft`` is the
+                comparison arm every other policy is measured against, and a
+                silently-capped one would not be that arm. It is carried in
+                :attr:`signature` either way, so no result can be reported
+                without it.
+
+        Raises:
+            TypeError: if given a ``float``. House rule: every rate is a
+                ``Decimal``.
+            ValueError: outside ``(0, 1]``. Zero would make the policy fill
+                nothing while still reporting itself as a fill policy, and
+                above 1 claims more than the whole market traded. ``None`` is
+                accepted and means uncapped -- unlike ``hard``, for which
+                "fill only what the data supports" without a size bound is not
+                the hard standard.
+        """
+        self.max_participation: Optional[Decimal] = (
+            self._validated_participation(max_participation,
+                                          allow_uncapped=True))
+
+    @property
+    def signature(self) -> str:
+        """``soft(max_participation=uncapped)``, or the cap when there is one.
+
+        The cap is named **even when there is none**, and the bare token
+        ``'soft'`` is deliberately no longer produced by anything. Two runs at
+        different caps are two different assumptions and will produce different
+        fills, so a signature carrying only the kind cannot reproduce either;
+        and a bare ``'soft'`` could not be told apart from a record written
+        while the cap was being discarded, which is precisely the period whose
+        results must not look like the fixed ones.
+        """
+        cap = ('uncapped' if self.max_participation is None
+               else str(self.max_participation))
+        return f'{self.kind}(max_participation={cap})'
+
+    @property
+    def assumptions(self) -> Tuple[str, ...]:
+        size = (
+            'Size: uncapped -- an order fills in full, with no reference to '
+            'the volume that actually traded. This is the optimistic bound, '
+            'not a forecast.'
+            if self.max_participation is None else
+            f'Participation cap: at most {self.max_participation} of the '
+            f'volume observed in the evaluated interval, aggregated across all '
+            f'of the caller\'s live orders in the instrument. A modelling '
+            f'convention, not a sourced rule.'
+        )
+        return super().assumptions + (
+            'Soft fills: an order fills whenever the market traded at or '
+            'through its limit, with no queue-position test. This is the '
+            'optimistic bound on the touch, not a forecast.',
+            size,
+        )
+
+    def _continuous(self, order, interval, rules, *, already_filled,
+                    instrument) -> FillDecision:
+        side = order.order.side
+        limit = order.order.limit_price
+
+        if limit is None:
+            # Market family (MTL/MOK/MAK, and core/order.py's synthetic MKT).
+            # The backtester answer: it executes, at whatever printed.
+            price = _point_price(interval)
+            if price is None:
+                return FillDecision.indeterminate(
+                    'a market-family order needs an observed traded price and '
+                    'this interval carries none',
+                    [DataField.CLOSE, DataField.LAST],
+                )
+            return self._sized_fill(order, interval, rules, price,
+                                    FillEvidence.TRADED_THROUGH,
+                                    already_filled=already_filled,
+                                    instrument=instrument)
+
+        observed, field = _extreme_toward(side, interval)
+        if observed is None:
+            observed = _point_price(interval)
+            if observed is None:
+                return FillDecision.indeterminate(
+                    'this interval carries no traded price, so not even an '
+                    'at-or-through test can be made',
+                    [field, DataField.CLOSE, DataField.LAST],
+                )
+
+        reach = _reach(side, observed, limit)
+        if reach < 0:
+            return FillDecision.no_fill(
+                f'the market never reached {limit} on the '
+                f'{"buy" if side is Side.BUY else "sell"} side '
+                f'(best observed {observed})'
+            )
+        evidence = (FillEvidence.TRADED_THROUGH if reach > 0
+                    else FillEvidence.TOUCHED_AT_LIMIT)
+        return self._sized_fill(order, interval, rules, limit, evidence,
+                                already_filled=already_filled,
+                                instrument=instrument)
+
+    def _auction(self, order, interval, rules, *, already_filled,
+                 instrument) -> FillDecision:
+        clearing, field = _clearing_price(order, interval)
+        if clearing is None:
+            return FillDecision.indeterminate(
+                'no published cross price for this auction, so whether it '
+                'crossed at all cannot be established',
+                [field] if field is not None else (),
+            )
+
+        limit = order.order.limit_price
+        if limit is not None and _reach(order.order.side, clearing, limit) < 0:
+            return FillDecision.no_fill(
+                f'the auction cleared at {clearing}, past a limit of {limit}')
+        # A ``limit`` of ``None`` here is an ATO/ATC, or an unmodelled MTL
+        # residue. The backtester answer for all of them is the cross price.
+        return self._sized_fill(order, interval, rules, clearing,
+                                FillEvidence.AUCTION_PRICE,
+                                already_filled=already_filled,
+                                instrument=instrument)
 
 # --------------------------------------------------------------------------
 # HardFillPolicy -- what is defensible going live
@@ -981,10 +1104,13 @@ class HardFillPolicy(_CappedFillPolicy):
     ``interval.volume`` is absent the cap cannot be computed and the decision
     degrades to ``INDETERMINATE`` naming ``DataField.VOLUME``; where the lot
     cannot be resolved it degrades likewise, with no field named because a lot
-    is a rulebook fact rather than a bar (:meth:`BaseFillPolicy._lot`). On both
-    shipped adapters volume is unsupplied, so on today's corpus this policy is
-    undecidable wherever it would otherwise fill -- which is the honest reading
-    of the data, and the number the paper should print.
+    is a rulebook fact rather than a bar (:meth:`BaseFillPolicy._lot`). This
+    docstring used to say that both shipped adapters leave volume unsupplied
+    and that ``hard`` was therefore undecidable wherever it would otherwise
+    fill. That was a fact about the adapters and it has been fixed:
+    :class:`~plutus.market.adapters.datahub.DataHubSource` serves
+    ``quote_dailyvolume``, so on the daily corpus ``hard`` now *fills*.
+    ``TickSource`` serves no intervals, so a tick run still degrades.
 
     The order of those two tests is deliberate and is a modelling choice worth
     naming: **price is tested before size**. An order the market never reached
@@ -1363,10 +1489,11 @@ class ProbabilisticFillPolicy(_CappedFillPolicy):
                 choice materially changes which decisions are answerable and
                 must therefore be made by the caller rather than by this class.
                 A ``Decimal`` in ``(0, 1]`` applies ``hard``'s participation
-                cap, which on today's corpus turns every would-be fill into an
-                ``INDETERMINATE`` naming ``DataField.VOLUME`` -- both shipped
-                adapters leave ``volume`` unsupplied. ``None`` takes ``soft``'s
-                size assumption instead (the caller's whole size was
+                cap, which turns a would-be fill into an ``INDETERMINATE``
+                naming ``DataField.VOLUME`` wherever the source does not serve
+                volume -- ``TickSource``, and the ticker-days ``DataHubSource``
+                has no ``quote_dailyvolume`` row for. ``None`` takes the
+                uncapped size assumption instead (the caller's whole size was
                 available), which isolates the touch as the only axis on which
                 this arm differs from ``hard``. Whichever is chosen is recorded
                 in :attr:`signature`.
@@ -1951,61 +2078,270 @@ def compare_policies(
 # Selection
 # --------------------------------------------------------------------------
 
+#: Every ``FillPolicyConfig`` field :func:`build_fill_policy` knows how to
+#: honour, by name. A field on that dataclass and **not** in this set is a
+#: field the constructed policy would silently discard, and
+#: :func:`build_fill_policy` raises rather than build one -- see
+#: :func:`_refuse_fields_that_cannot_be_honoured`.
+#:
+#: This is a tripwire, not documentation. The defect it exists to prevent is
+#: not hypothetical: ``max_participation`` reached ``build_fill_policy`` and
+#: vanished into a ``SoftFillPolicy()`` for as long as both existed, and
+#: nothing failed. Adding a field to ``FillPolicyConfig`` now breaks this
+#: function until somebody wires it, which is the only kind of guard that
+#: survives the person who wrote it.
+HONOURED_CONFIG_FIELDS: FrozenSet[str] = frozenset({
+    'kind', 'max_participation', 'seed',
+})
+
+#: Which ``FillPolicyConfig`` fields each kind can actually act on. A field
+#: **set** in the config and not listed for the selected kind is refused, so
+#: ``{kind: soft, seed: 7}`` -- soft makes no draws, so the seed could not
+#: change a single decision -- is an error rather than a run whose config file
+#: describes something that never happened.
+_FIELDS_BY_KIND: Mapping[str, FrozenSet[str]] = {
+    'soft': frozenset({'kind', 'max_participation'}),
+    'hard': frozenset({'kind', 'max_participation'}),
+    'probabilistic': frozenset({'kind', 'max_participation', 'seed'}),
+}
+
+#: Fields whose *unset* value is ``None``, and therefore whose ``None`` is not
+#: an instruction the built policy has to honour.
+#:
+#: ``max_participation`` is in this set now, and putting it there is the whole
+#: repair of a defect that ran for as long as the field existed. It used to be
+#: a non-optional ``Decimal`` defaulting to ``0.10``, so there was **no value
+#: it could hold meaning "the caller did not ask for a cap"**; this module
+#: therefore read the literal value 0.10 as "unset", which made ``{kind:
+#: soft}`` and ``{kind: soft, max_participation: 0.10}`` the same request and
+#: every ``soft`` run that wrote 0.10 an uncapped one. The field is
+#: ``Optional[Decimal] = None`` in ``types.py`` now: ``None`` is unset, and
+#: every written value, 0.10 included, is honoured.
+_UNSET_IS_NONE: FrozenSet[str] = frozenset({'seed', 'max_participation'})
+
+
+def _refuse_fields_that_cannot_be_honoured(config: FillPolicyConfig,
+                                           kind: str) -> None:
+    """Raise if the config carries anything the built policy would discard.
+
+    Two sweeps, because there are two ways a field goes missing:
+
+    1. a field on ``FillPolicyConfig`` that this module has never heard of --
+       caught by comparing the dataclass's own fields against
+       :data:`HONOURED_CONFIG_FIELDS`, so a field added upstream cannot ship
+       silently discarded;
+    2. a field this module knows but the *selected kind* cannot act on --
+       caught against :data:`_FIELDS_BY_KIND`.
+
+    Raises:
+        ValueError: naming the field, the kind, and what to do instead. Never a
+            warning: a warning in a batch run is a discarded field with extra
+            steps.
+    """
+    if is_dataclass(config):
+        declared = {f.name for f in dataclass_fields(config)}
+        unknown = sorted(declared - HONOURED_CONFIG_FIELDS)
+        if unknown:
+            raise ValueError(
+                f'FillPolicyConfig carries {unknown} which build_fill_policy '
+                f'does not pass to any policy, so a run configured with them '
+                f'would silently ignore them. Wire them here (and into the '
+                f'policy signatures, so a result records them) or remove them '
+                f'from the config type'
+            )
+
+    honoured = _FIELDS_BY_KIND[kind]
+    for name in sorted(HONOURED_CONFIG_FIELDS - honoured):
+        value = getattr(config, name, None)
+        if name in _UNSET_IS_NONE and value is None:
+            continue
+        raise ValueError(
+            f'fill_policy.{name}={value!r} cannot be honoured by the '
+            f'{kind!r} fill policy, which does not use it, and a configured '
+            f'field that the constructed policy discards would make the '
+            f'config file describe a run that did not happen. Remove '
+            f'fill_policy.{name} or choose a kind that uses it'
+        )
+
+
 def build_fill_policy(config: FillPolicyConfig) -> FillPolicy:
     """The policy named by ``fill_policy.kind`` in the session config.
+
+    **Every field the config carries is honoured or refused, never dropped.**
+    That is a repair, not a description of how it always worked:
+    ``max_participation`` used to be discarded outright for ``kind: soft``,
+    which returned a bare ``SoftFillPolicy()`` with no cap field to put it in.
+    A user who wrote ``fill_policy: {kind: soft, max_participation: 0.10}`` got
+    an uncapped run, no error, no warning, and a provenance record saying
+    ``soft`` with no cap in it. ``soft`` now takes a cap
+    (:class:`SoftFillPolicy`), and :func:`_refuse_fields_that_cannot_be_honoured`
+    raises for anything else that could go the same way -- including a field
+    added to ``FillPolicyConfig`` later and not wired here.
 
     **What a config file can and cannot select.** ``FillPolicyConfig`` carries
     ``kind``, ``max_participation`` and ``seed``, and nothing else, so a
     config-built ``probabilistic`` policy always runs at the default
     ``p_touch`` and never models the auction margin. That is a real limitation
     and it is stated rather than worked around: guessing a ``p_touch`` from
-    some other config field would be exactly the silent substitution the
-    ``'probabilistic'`` branch below refuses.
+    some other config field would be exactly the silent substitution this
+    function refuses.
 
     *Requested of the orchestrator:* ``p_touch: Optional[Decimal]`` and
     ``p_auction_margin: Optional[Decimal]`` on ``FillPolicyConfig`` in
-    ``types.py``, at which point this function passes them through and the two
-    lines below become four. Until then the supported route for any other
-    ``p_touch`` is to construct the policy and hand it over directly --
+    ``types.py``. Adding them now **raises** here (sweep 1 above) until they
+    are added to :data:`HONOURED_CONFIG_FIELDS` and passed through, which is
+    the intended forcing function. Until then the supported route for any
+    other ``p_touch`` is to construct the policy and hand it over directly --
     ``ExchangeSession.build(..., fill_policy=ProbabilisticFillPolicy(...))``
     takes precedence over the config, which is what that parameter is for.
 
-    Note also that a config-built ``probabilistic`` policy is **capped**, since
-    ``FillPolicyConfig.max_participation`` always has a value; on today's
-    corpus, where both adapters leave ``volume`` unsupplied, that makes it
-    ``INDETERMINATE`` wherever it would otherwise fill, exactly as ``hard`` is.
-    Pass the policy directly with ``max_participation=None`` to isolate the
-    touch instead.
+    *Also requested of the orchestrator:* that ``parse_config`` in
+    ``exchange.py`` route its ``fill_policy`` payload through
+    :func:`parse_fill_policy_config` rather than reading three keys off the
+    mapping. Unknown **YAML keys** are dropped before they ever reach this
+    function, so ``{kind: hard, participation: 0.10}`` -- a typo -- is an
+    uncapped-by-typo run that nothing here can see.
+
+    **A written cap is always honoured, 0.10 included.** That is a repair too.
+    ``FillPolicyConfig.max_participation`` used to be a non-optional
+    ``Decimal`` defaulting to ``0.10``, so this function could not tell an
+    instruction from a default and read the literal value 0.10 as "nobody
+    asked" -- which made every ``soft`` caller who wrote 0.10, including
+    ``validation/runner.py`` and every scenario behind it, run uncapped. The
+    field is ``Optional[Decimal] = None`` now, ``None`` is the only unset, and
+    each kind answers for ``None`` on its own terms:
+
+    ``soft`` runs **uncapped**, which is its documented meaning -- the
+    optimistic baseline arm, in which the caller has taken the assumption that
+    their own size was available. Capping it by default instead was measured
+    rather than assumed: it turns every source that serves no volume --
+    ``TickSource`` and every hand-written test double, though no longer
+    ``DataHubSource`` -- into a run in which *nothing* fills, which is not an
+    answer to the complaint that ``soft`` was the only arm that ran.
+
+    ``hard`` uses :class:`HardFillPolicy`'s **own documented default**, and
+    the signature records the number it ran at, so nothing is asserted that
+    the provenance does not state. Uncapped is not available to it: "fill only
+    what the data supports" without a size bound is not the hard standard, and
+    the constructor refuses ``None``.
+
+    ``probabilistic`` **raises**, for the same reason it raises on a missing
+    seed. It has no default cap of its own -- ``max_participation`` is
+    keyword-only and required precisely so nobody gets a bound by accident --
+    and defaulting it to ``soft``'s uncapped would quietly loosen every
+    config-built probabilistic run that exists, which is the permissive
+    direction. Name a cap, or construct the policy and hand it to
+    ``ExchangeSession.build``.
+
+    Where a cap applies and the interval carries no volume, the decision is
+    ``INDETERMINATE`` rather than a fill, which is the honest answer and is
+    counted.
 
     Raises:
-        ValueError: on an unknown kind, or on ``'probabilistic'`` without a
-            ``seed``. The seed is not defaulted: an unseeded probabilistic run
-            cannot be reproduced, a result that cannot be reproduced is not a
-            result, and a default seed would make a run reproducible by
-            accident rather than by record. Nothing is silently substituted
-            here for the same reason nothing else in this package is -- a
-            caller who asked for one assumption must not be given another.
+        ValueError: on an unknown kind; on ``'probabilistic'`` without a
+            ``seed`` or without a ``max_participation``; and on any configured
+            field the selected policy cannot honour. The seed is not
+            defaulted: an unseeded probabilistic run cannot be reproduced, a
+            result that cannot be reproduced is not a result, and a default
+            seed would make a run reproducible by accident rather than by
+            record. Nothing is silently substituted here for the same reason
+            nothing else in this package is -- a caller who asked for one
+            assumption must not be given another.
     """
     kind = (config.kind or '').strip().lower()
+    if kind not in _FIELDS_BY_KIND:
+        raise ValueError(
+            f'unknown fill policy {config.kind!r}; known kinds are '
+            f'{SoftFillPolicy.kind!r}, {HardFillPolicy.kind!r} and '
+            f'{ProbabilisticFillPolicy.kind!r}'
+        )
+    _refuse_fields_that_cannot_be_honoured(config, kind)
+
+    cap = config.max_participation
     if kind == SoftFillPolicy.kind:
-        return SoftFillPolicy()
+        # None passes straight through: soft's uncapped arm IS the unset case.
+        return SoftFillPolicy(max_participation=cap)
     if kind == HardFillPolicy.kind:
-        return HardFillPolicy(max_participation=config.max_participation)
-    if kind == ProbabilisticFillPolicy.kind:
-        if config.seed is None:
-            raise ValueError(
-                'the probabilistic fill policy requires an explicit seed: an '
-                'unseeded probabilistic run cannot be reproduced, and a result '
-                'that cannot be reproduced is not a result. Set '
-                'fill_policy.seed in the config'
-            )
-        return ProbabilisticFillPolicy(
-            config.seed, max_participation=config.max_participation)
-    raise ValueError(
-        f'unknown fill policy {config.kind!r}; known kinds are '
-        f'{SoftFillPolicy.kind!r}, {HardFillPolicy.kind!r} and '
-        f'{ProbabilisticFillPolicy.kind!r}'
-    )
+        # The policy's own default, not a number invented at this layer, and
+        # the signature it publishes states whichever one it ran at.
+        if cap is None:
+            return HardFillPolicy()
+        return HardFillPolicy(max_participation=cap)
+    if config.seed is None:
+        raise ValueError(
+            'the probabilistic fill policy requires an explicit seed: an '
+            'unseeded probabilistic run cannot be reproduced, and a result '
+            'that cannot be reproduced is not a result. Set '
+            'fill_policy.seed in the config'
+        )
+    if cap is None:
+        raise ValueError(
+            'the probabilistic fill policy requires an explicit '
+            'fill_policy.max_participation: it has no default cap of its own, '
+            'and reading an absent one as uncapped would loosen the run '
+            'rather than tighten it -- the direction a backtest must not err '
+            'in. Name a cap, or build the policy yourself and pass it to '
+            'ExchangeSession.build(..., fill_policy=ProbabilisticFillPolicy('
+            'seed, max_participation=None)) for the uncapped bound'
+        )
+    return ProbabilisticFillPolicy(config.seed, max_participation=cap)
+
+
+def parse_fill_policy_config(
+    payload: Mapping[str, object],
+) -> FillPolicyConfig:
+    """A ``fill_policy`` config block, with **unknown keys refused**.
+
+    The other half of the same defect :func:`build_fill_policy` closes, one
+    layer up. ``exchange.py``'s ``parse_config`` used to read ``kind``,
+    ``max_participation`` and ``seed`` off the payload mapping with
+    ``.get(...)`` and ignore everything else, so a config file saying
+    ``p_touch: 0.7`` -- a parameter this package genuinely has, and genuinely
+    cannot configure -- ran at 0.5 and said nothing; and a misspelled
+    ``participation: 0.10`` ran at the 0.10 default by coincidence rather
+    than by instruction, which is worse because it looks right.
+
+    A caller who wants the same tolerance the rest of the payload has does not
+    get it here on purpose. A fill assumption is the one input of a run that
+    a result cannot be read without, and "the key you wrote did nothing" is
+    not a state a backtest may be in.
+
+    **Wired now.** ``parse_config`` routes its ``fill_policy`` block through
+    this function, so the refusals above are on the path rather than beside
+    it. An absent ``max_participation`` becomes ``None`` -- the config type's
+    unset -- and a written one is carried through unchanged, 0.10 included;
+    what an unset cap then means is each policy kind's own answer in
+    :func:`build_fill_policy`.
+
+    Raises:
+        ValueError: on an unknown key, or on a value the policy will refuse
+            (which is raised by the policy constructors, not re-implemented
+            here).
+    """
+    unknown = sorted(set(payload) - HONOURED_CONFIG_FIELDS)
+    if unknown:
+        raise ValueError(
+            f'unknown fill_policy keys {unknown}; this block takes '
+            f'{sorted(HONOURED_CONFIG_FIELDS)} and a key that is not one of '
+            f'them would be read by nothing and change no decision. Note that '
+            f'p_touch and p_auction_margin are real parameters of the '
+            f'probabilistic policy that the config type cannot carry yet: '
+            f'construct the policy and pass it to ExchangeSession.build '
+            f'instead'
+        )
+    seed = payload.get('seed')
+    if seed is not None and (isinstance(seed, bool) or not isinstance(seed, int)):
+        raise ValueError(
+            f'fill_policy.seed must be an int, got {seed!r}; a probabilistic '
+            f'run that cannot be reproduced is not a result'
+        )
+    # Written or not written -- the only distinction there is, and the whole
+    # reason the config field is Optional. A value here is an instruction and
+    # is carried through untouched; None is the absence of one.
+    raw = payload.get('max_participation')
+    cap = None if raw is None else Decimal(str(raw))
+    return FillPolicyConfig(kind=str(payload.get('kind', 'soft')),
+                            max_participation=cap, seed=seed)
 
 
 # --------------------------------------------------------------------------

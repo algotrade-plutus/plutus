@@ -683,21 +683,27 @@ def test_the_provenance_names_the_firm_the_model_and_who_supplied_it(source):
 # The wiring: profile system and margin-model selection
 # --------------------------------------------------------------------------
 
-def test_a_profile_selecting_the_scenario_grid_refuses_to_build(source=None):
-    """The author's sixth axis, enforced at build time.
+def test_the_grid_is_computed_and_still_may_not_be_put_on_the_ladder():
+    """The author's sixth axis, and what changed when the grid was wired.
 
-    A profile carries two margin models and names which layer faces the user.
-    ``scenario_margin`` -- QD 26 Phu luc 2's 21-scenario grid -- is not wired
-    into ``ExchangeSession``, so a profile selecting it must refuse rather than
-    silently run on ``IM + VM``. Running it anyway would put our number on the
-    firm's ladder and report it under the firm's name, which is the one failure
-    a provenance record cannot catch: the record would say the run was
-    configured correctly.
+    **What this used to assert:** a profile whose ``user_facing_model`` was
+    ``OVERNIGHT`` raised ``NotImplementedError`` naming ``scenario_margin``,
+    because the module *"is not wired into ExchangeSession"*. That was true --
+    it had zero call sites in ``src/`` -- and refusing beat running the
+    grid-selecting profile on ``IM + VM``.
 
-    Five shipped profiles carry ``SCENARIO_GRID`` as their *overnight* model
-    and none of them faces the user with it, which is why this has to be built
-    by hand -- and why the refusal is not dead code the day someone changes
-    ``user_facing_model``.
+    It is wired now, through ``session/overnight.py``, and the refusal
+    survives for a narrower and more specific reason: ``MarginView.required``
+    is the property ``initial_margin + variation_margin`` and QD 26 Phu luc 2
+    produces neither term (Dieu 20 settles position P&L as a separate cash
+    movement; section 6.2 has no ``VM`` at all). Putting the grid's number on
+    the ladder would mean writing it into ``initial_margin`` and zeroing
+    ``variation_margin`` -- a decomposition that did not happen, which would
+    corrupt ``free_deposit`` and ``posted_margin`` with it.
+
+    So the refusal is now about the *ladder*, not about the engine, and the
+    message says so. ``ExchangeSession.overnight_margin()`` computes the
+    number for every profile either way.
     """
     from dataclasses import replace
     from plutus.market.session.exchange import ExchangeSession
@@ -711,13 +717,90 @@ def test_a_profile_selecting_the_scenario_grid_refuses_to_build(source=None):
     profile = SessionBrokerProfile.from_margin_profile(grid)
     with pytest.raises(NotImplementedError) as caught:
         ExchangeSession._check_margin_model(profile)
-    assert 'scenario_margin' in str(caught.value)
     assert 'OVERNIGHT' in str(caught.value)
+    assert 'MarginView' in str(caught.value)
 
-    # And the ones that do run are the ones deposit.py computes.
+    # An INTRADAY-facing profile carrying the grid overnight now builds, and
+    # every shipped profile is in that position.
+    intraday = replace(grid, user_facing_model=bp.MarginLayer.INTRADAY)
+    ExchangeSession._check_margin_model(
+        SessionBrokerProfile.from_margin_profile(intraday))
     for firm in dm.PROFILES:
-        model = bp.get_profile(firm, warn=False).margin_model
-        assert model.engine in (None, 'plutus.market.session.deposit')
+        shipped = bp.get_profile(firm, warn=False)
+        assert shipped.user_facing_model is bp.MarginLayer.INTRADAY
+        assert shipped.margin_model.engine in (
+            None, 'plutus.market.session.deposit')
+
+
+@requires_corpus
+def test_the_overnight_layer_now_runs_on_every_session_of_the_window(
+        uncured):
+    """The layer the fidelity audit found missing, exercised on real data.
+
+    ``scenario_margin.py`` had zero call sites anywhere in ``src/`` or
+    ``validation/`` and ``indeterminate_report()`` answered ``indeterminate=0``
+    throughout, because a layer nobody calls has no evaluation to be undecided
+    about. There is now one end-of-day requirement per session, and it is
+    ``Component.OVERNIGHT_MARGIN`` in ``exercised`` that distinguishes "ran and
+    computed" from "never ran".
+
+    **This window is pre-KRX, so the model is the pre-KRX one and that is the
+    point.** ``RuleName.MARGIN_MODEL`` records ``'pre_margin'`` to 2025-05-04
+    at HIGH confidence -- one continuously-recomputed mechanism, no separate
+    end-of-day model -- so running QD 26's grid on a 2022 account would report
+    a number under a regulation that did not exist.
+
+    The last session is the expiry. The contract cash-settles inside the same
+    advance, so what is carried past that close is nothing: a **determinate
+    zero** with ``flat`` set, which is a different fact from an undecided one.
+    """
+    trail = uncured.session.overnight_margins()
+    assert len(trail) == 19
+    assert {r.model for r in trail} == {'PRE_KRX_CONTINUOUS'}
+    assert all(r.is_determinate for r in trail)
+    assert all(r.engine == 'plutus.market.session.deposit' for r in trail)
+
+    entry, expiry = trail[0], trail[-1]
+    assert entry.as_of == date(2022, 9, 26)
+    assert entry.flat is False
+    assert entry.amount == Decimal('61984000.000')
+    assert expiry.as_of == date(2022, 10, 20)
+    assert expiry.flat is True
+    assert expiry.amount == Decimal('0')
+
+    report = uncured.session.indeterminate_report()
+    assert report.exercised['margin.derivatives.overnight'] == 19
+    assert 'margin.derivatives.overnight' not in report.unexercised
+
+    provenance = uncured.session.provenance()
+    assert provenance.overnight_model == 'PRE_KRX_CONTINUOUS'
+    assert provenance.overnight_determinate == 19
+    assert provenance.overnight_indeterminate == 0
+
+
+@requires_corpus
+def test_the_overnight_requirement_is_not_the_intraday_one(uncured):
+    """It drops the resting-order margin, and it is read at the close.
+
+    ``account_margin_requirement`` adds ``resting_order_margin`` to ``IM +
+    VM`` because a live order has margin lodged against it. Past the close the
+    day's orders are gone, so the overnight figure is the held book alone --
+    which is why the layer passes ``resting=()`` rather than reusing the mark's
+    view.
+    """
+    trail = {r.as_of: r for r in uncured.session.overnight_margins()}
+    crash = trail[date(2022, 10, 3)]
+    # 4 contracts at the 2022-10-03 close of 1102.6, at the dated VSD ratio,
+    # plus the loss against the 1192.0 entry. The ratio is read from the
+    # dated series rather than written down, because it steps 0.13 -> 0.17 on
+    # 2022-12-15 and a constant here would pass for the wrong reason.
+    rate = vsd_initial_margin(date(2022, 10, 3))
+    assert rate == Decimal('0.13')
+    initial = rate * Decimal('4') * Decimal('100000') * Decimal('1102.6')
+    variation = Decimal('4') * Decimal('100000') * (Decimal('1192.0')
+                                                    - Decimal('1102.6'))
+    assert crash.amount == initial + variation
+    assert crash.amount == Decimal('93095200.000')
 
 
 def test_naming_a_firm_and_a_ladder_level_in_one_config_is_refused():
@@ -1325,12 +1408,16 @@ def test_a_snapshot_is_taken_after_the_step_and_the_event_during_it(cured,
 
 
 def test_the_findings_register_is_complete_and_states_its_own_status():
-    """A report cannot quietly drop the five that are not fixed."""
+    """A report cannot quietly drop the ones that are not fixed.
+
+    ``F10`` and ``F11`` are the overnight layer: the engine that had no call
+    site, and the gap between the two layers that wiring it exposed.
+    """
     found = dm.findings()
     assert {row['id'] for row in found} == {'F1', 'F2', 'F3', 'F4', 'F5', 'F6',
-                                            'F7', 'F8', 'F9'}
+                                            'F7', 'F8', 'F9', 'F10', 'F11'}
     assert {row['status'] for row in found} == {'fixed', 'open', 'declared'}
-    assert sum(1 for row in found if row['status'] == 'fixed') == 3
+    assert sum(1 for row in found if row['status'] == 'fixed') == 4
     assert sum(1 for row in found if row['status'] == 'open') == 1
     for row in found:
         assert row['where'] and row['evidence'] and row['fix']
@@ -1346,11 +1433,16 @@ def test_the_run_decided_everything_it_evaluated_and_says_on_what_evidence(
     """Zero indeterminate, and the reason it is zero is the fill policy.
 
     ``soft`` fills at the limit when the close touched it. That is a **model
-    output**: the Parquet bars carry no high, no low and no volume, so an order
-    that was never touched and one that was fully filled are the same row.
-    ``hard`` on this corpus is 100% INDETERMINATE and the entry would never
-    fill at all. The trade log carries the evidence on every fill so a reader
-    can see which it was.
+    output**: this entry is priced at the day's close, and the bars carry no
+    high and no low, so an order that was never touched and one that was fully
+    filled are the same row. ``hard`` refuses that touch and the entry would
+    never fill at all. The trade log carries the evidence on every fill so a
+    reader can see which it was.
+
+    ``indeterminate`` is still zero here and ``is_clean`` is not: the
+    overnight layer runs 19 times on this window and decides every one, but
+    each ``soft`` fill was taken from an interval that named the day's
+    extremes absent, and those are counted separately.
     """
     report = uncured.result.indeterminate
     assert report.indeterminate == 0

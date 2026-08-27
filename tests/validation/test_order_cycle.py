@@ -721,28 +721,38 @@ def test_amendment_refuses_upward_and_price_changes_and_admits_a_decrease(
 # --------------------------------------------------------------------------
 
 def test_a_partially_filled_order_can_be_cancelled(chained):
-    """65,000 + 65,000 filled of 200,000, then 70,000 cancelled.
+    """65,000 filled of 200,000, then 135,000 cancelled.
 
     Two ``run_scenario`` calls over one session clock; see
-    ``partial_fill_then_cancel``. The second fill is not an accident: the
-    participation cap is per **evaluated interval**, so sampling one day at
-    two instants permits two caps' worth.
+    ``partial_fill_then_cancel``. **This used to assert a second fill of
+    65,000 on the 09:30 advance**, and called it a property of sampling one
+    day at two instants. It was a property of the session throwing its
+    filled-quantity counter away at the end of every ``advance_to``: the same
+    650,600-share day was re-offered to the same order, and the run booked
+    130,000 -- 20% of everything that traded -- under
+    ``hard(max_participation=0.10)``. The counter is carried per
+    ``(ticker, bar)`` now, so the day's allowance is spent once.
+
+    The edge the scenario exists for is untouched: cancelling an order that
+    has *already* partially filled is a state the two-advance loop cannot
+    otherwise reach, and it is still reached here.
     """
     first, second, _ = chained
     part_one = _one(first, TradeAction.PARTIALLY_FILLED)
     assert part_one.fill_quantity == 65_000
     assert part_one.remaining == 135_000
 
-    part_two = _one(second, TradeAction.PARTIALLY_FILLED)
-    assert part_two.fill_quantity == 65_000
-    assert part_two.remaining == 70_000
+    assert [e for e in second.logs.trades
+            if e.action is TradeAction.PARTIALLY_FILLED] == [], (
+        'the second advance is inside the same bar, whose 10% is already '
+        'spent; a fill here would be the same shares claimed twice')
 
     cancels = [e for e in second.logs.trades
                if e.action is TradeAction.CANCELLED]
-    assert any(e.quantity == 130_000 for e in cancels), (
-        'the cancel outcome should report 130,000 filled')
-    assert any(e.quantity == 70_000 for e in cancels), (
-        'the cancel event should report 70,000 cancelled')
+    assert any(e.quantity == 65_000 for e in cancels), (
+        'the cancel outcome should report 65,000 filled')
+    assert any(e.quantity == 135_000 for e in cancels), (
+        'the cancel event should report 135,000 cancelled')
 
 
 def test_the_chained_pair_conserves_cash_and_shares_across_both_runs(chained):
@@ -755,26 +765,37 @@ def test_the_chained_pair_conserves_cash_and_shares_across_both_runs(chained):
     away.
     """
     first, second, session = chained
+    # ``order_lifecycle`` used to be here too, because the second run held a
+    # fill whose ACCEPTED row was in the first log. The second run no longer
+    # fills -- the bar's allowance was spent by the first -- so only the
+    # holding it inherited is out of scope for its own log.
     assert {r.name for r in second.failed_identities} == {
-        'order_lifecycle', 'holdings_conservation'}
+        'holdings_conservation'}
     merged = combined_identities(first, second, session)
     assert not [r for r in merged if not r.passed], (
         [r.detail for r in merged if not r.passed])
 
 
 def test_every_dong_of_the_chained_run_is_accounted_for(chained):
-    """130,000 HPX at 21.50 plus the 0.027% HOSE exchange service charge."""
+    """65,000 HPX at 21.50 plus the 0.027% HOSE exchange service charge.
+
+    Half of what this asserted before, and the half that was removed is the
+    second claim on the same day's liquidity. The accounting identity is the
+    same one either way -- consideration plus charges out of settled cash,
+    shares in -- which is the point: it held on the wrong quantity too, so it
+    was never going to be the thing that caught the cap.
+    """
     _, _, session = chained
-    consideration = Decimal('130000') * Decimal('21.50') * Decimal('1000')
-    assert consideration == Decimal('2795000000')
+    consideration = Decimal('65000') * Decimal('21.50') * Decimal('1000')
+    assert consideration == Decimal('1397500000')
     charges = sum(c.amount for c in session.charges())
-    assert charges == Decimal('754650')
+    assert charges == Decimal('377325')
     assert charges == (consideration * Decimal('0.00027')).quantize(
         Decimal('1'))
     assert session.cash().settled_balance == (
         Decimal('200000000000') - consideration - charges)
     holding = session.holdings('HPX')
-    assert holding.total == 130_000
+    assert holding.total == 65_000
     assert holding.settled == 0
     assert all(t.settles_at == datetime(2022, 11, 14, 13, 0)
                for t in holding.unsettled)
@@ -784,23 +805,31 @@ def test_every_dong_of_the_chained_run_is_accounted_for(chained):
 # What the shipped adapter costs
 # --------------------------------------------------------------------------
 
-def test_the_shipped_adapter_cannot_decide_a_fill_the_corpus_can(runs):
-    """The same order, the same day, the same policy, two sources.
+def test_the_shipped_adapter_now_decides_the_fill_the_corpus_can(runs):
+    """The same order, the same day, the same policy, two sources: they agree.
 
-    ``DataHubSource`` selects ``quote_close``, ``quote_ceil``,
-    ``quote_floor`` and ``quote_reference`` and nothing else, so the session
-    synthesises an interval with ``VOLUME`` missing and ``HardFillPolicy``
-    cannot compute a participation cap. The columns it needs --
-    ``quote_open``, ``quote_max``, ``quote_min``, ``quote_dailyvolume`` --
-    are on disk for every ticker-day of this window.
+    **What this used to assert:** ``thin['fills'] == 0``,
+    ``thin['indeterminate'] == 1`` and ``thin['by_field'] == {'volume': 1}``.
+    ``DataHubSource`` selected four columns -- ``quote_close``,
+    ``quote_ceil``, ``quote_floor``, ``quote_reference`` -- and the session
+    synthesised an interval with ``VOLUME`` missing, so ``HardFillPolicy``
+    could not compute a participation cap and refused to decide an order the
+    corpus had the evidence for.
+
+    It now implements the ``IntervalSource`` seam and serves
+    ``quote_dailyvolume`` alongside them, so the two sources reach the same
+    verdict on the same bar. ``quote_open``, ``quote_max`` and ``quote_min``
+    are still dropped, which is why the phased source remains the richer one
+    and why this window is still worth running on both.
     """
     gap = adapter_gap(build_source())
     rich = gap['phased_bar_source']
     thin = gap['shipped_datahub_source']
     assert rich['fills'] == 1 and rich['indeterminate'] == 0
-    assert thin['fills'] == 0 and thin['indeterminate'] == 1
-    assert thin['by_field'] == {'volume': 1}
+    assert thin['fills'] == 1 and thin['indeterminate'] == 0
+    assert thin['by_field'] == {}
     assert rich['fill_policy'] == thin['fill_policy']
+    assert 'quote_dailyvolume' not in gap['corpus_columns_dropped_by_datahub']
 
 
 def test_the_daily_lock_proxy_refuses_an_order_the_bar_proves_was_fillable():
@@ -835,19 +864,25 @@ def test_the_depth_proxy_policy_is_the_only_way_to_decide_a_market_order():
     Not a preference: ``HardFillPolicy._continuous`` and
     ``ProbabilisticFillPolicy._continuous`` both route a limit-less order to
     ``_market_family_undecidable``, and ``SoftFillPolicy`` decides it but is
-    uncapped and therefore cannot partially fill anything. Three terminal
-    edges would have no reachable path end to end. This test states the
-    reason so a later fill policy that models depth breaks it.
+    **uncapped by default** and therefore cannot partially fill anything.
+    Three terminal edges would have no reachable path end to end. This test
+    states the reason so a later fill policy that models depth breaks it.
+
+    ``soft`` is now a capped policy that carries ``max_participation=None``
+    unless a caller names one, so the claim "cannot partially fill anything"
+    is conditional where it used to be structural. The default is what the
+    ``compare_policies`` baseline runs on and it is byte-for-byte the old
+    uncapped behaviour, which is why the conclusion above still holds.
     """
     from plutus.market.session.fills import (
         HardFillPolicy, ProbabilisticFillPolicy, SoftFillPolicy)
 
     assert hasattr(HardFillPolicy, '_market_family_undecidable')
     assert hasattr(ProbabilisticFillPolicy, '_market_family_undecidable')
-    # ``soft`` does not even have the attribute: it is not a capped policy,
-    # so it has no size question to answer and cannot partially fill.
     assert not isinstance(SoftFillPolicy(), HardFillPolicy)
-    assert not hasattr(SoftFillPolicy(), 'max_participation')
+    # It has the attribute now; what matters is that it is unset by default.
+    assert SoftFillPolicy().max_participation is None
+    assert SoftFillPolicy(Decimal('0.25')).max_participation == Decimal('0.25')
     assert issubclass(DepthProxyFillPolicy, HardFillPolicy)
     assert DepthProxyFillPolicy(Decimal('0.10')).max_participation == Decimal(
         '0.10')
@@ -1037,7 +1072,7 @@ def test_a_cancellation_is_written_to_the_trade_log_twice(runs):
 
     Harmless for a cancel of an untouched order, where both are readable, and
     actively misleading for a partial: the pair reads as two cancellations of
-    130,000 and 70,000. This is in the harness, not the session.
+    65,000 and 135,000. This is in the harness, not the session.
     """
     rows = [e for e in runs['lo-cancelled'].logs.trades
             if e.action is TradeAction.CANCELLED]

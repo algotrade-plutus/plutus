@@ -2729,11 +2729,27 @@ class FillPolicyConfig:
     ``max_participation`` is a fraction of the volume observed in the
     evaluated interval, and it **aggregates across all of the caller's own
     live orders in that instrument** -- not per order, or a caller splits one
-    order into ten and evades the cap.
+    order into ten and evades the cap. It also aggregates across every
+    ``advance_to`` landing inside the same bar, or the same caller evades it
+    by advancing the clock instead of splitting the order.
+
+    ``None`` means **the caller did not ask for a cap**, and it is
+    ``Optional`` for exactly that reason. It was a non-optional ``Decimal``
+    defaulting to ``0.10``, which left no value meaning "unset": ``{kind:
+    soft}`` and ``{kind: soft, max_participation: 0.10}`` produced the same
+    object, ``fills.py`` had to read 0.10 itself as "unset", and every caller
+    that wrote 0.10 explicitly -- including every ``soft`` scenario in
+    ``validation/`` -- silently ran uncapped. Now ``None`` is unset and every
+    written value, 0.10 included, is honoured.
+
+    What ``None`` then *means* is the built policy's answer, not this type's:
+    ``soft`` runs uncapped (its documented optimistic baseline), ``hard`` uses
+    its own documented default, and ``probabilistic`` refuses -- see
+    :func:`~plutus.market.session.fills.build_fill_policy`.
     """
 
     kind: str = 'soft'
-    max_participation: Decimal = Decimal('0.10')
+    max_participation: Optional[Decimal] = None
     seed: Optional[int] = None
 
 

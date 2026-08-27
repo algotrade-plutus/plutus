@@ -79,8 +79,13 @@ from plutus.market.session.ledgers import (
     assess_charges, estimate_charges, trade_value,
 )
 from plutus.market.session.orders import (
-    OrderBookOfRecord, OrderIdFactory, expires_at_boundary,
-    is_legal_transition,
+    EncumbranceDivergence, OrderBookOfRecord, OrderIdFactory,
+    expires_at_boundary, is_legal_transition,
+)
+from plutus.market.session.overnight import (
+    PRE_KRX_CONTINUOUS, OvernightAssumption, OvernightGap,
+    OvernightRequirement, overnight_requirement, scenario_grid_requirement,
+    underlying_of,
 )
 from plutus.market.session.rulebook import (
     KRX_CUTOVER, RuleName, RuleResolution, RuleSet, RuleStatus, Rulebook,
@@ -118,7 +123,7 @@ __all__ = [
     # -- orders -----------------------------------------------------------
     'OrderBookOfRecord', 'OrderIdFactory', 'OrderRecord', 'OrderState',
     'OrderTransition', 'TimeInForce', 'ExpiryTrigger', 'OrderId',
-    'is_legal_transition', 'expires_at_boundary',
+    'is_legal_transition', 'expires_at_boundary', 'EncumbranceDivergence',
     # -- ledgers ----------------------------------------------------------
     'EncumbranceLedger', 'HoldingsLedger', 'CashLedger', 'SecuritiesAccount',
     'estimate_charges', 'assess_charges', 'trade_value',
@@ -128,6 +133,10 @@ __all__ = [
     'account_margin_requirement', 'margin_status', 'liquidation_sequence',
     'ContractPosition', 'MarginView', 'MarginStatus', 'LiquidationRule',
     'InvestorClass',
+    # -- the overnight layer ----------------------------------------------
+    'OvernightRequirement', 'OvernightGap', 'OvernightAssumption',
+    'overnight_requirement', 'scenario_grid_requirement', 'underlying_of',
+    'PRE_KRX_CONTINUOUS',
     # -- fills ------------------------------------------------------------
     'FillPolicy', 'BaseFillPolicy', 'SoftFillPolicy', 'HardFillPolicy',
     'build_fill_policy', 'floor_to_lot', 'participation_cap',

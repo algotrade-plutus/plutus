@@ -132,7 +132,7 @@ cost (``ledgers.py``), or which types a venue accepts on a date
 refuses to record something the state machine forbids.
 """
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime
 from decimal import Decimal
 from typing import (Callable, Dict, FrozenSet, List, Mapping, Optional,
@@ -146,12 +146,13 @@ from plutus.market.session.types import (EVENT_FOR_TRANSITION,
                                          TIME_IN_FORCE, Amended, Encumbrance,
                                          Event, EventKind, ExpiryTrigger, Fill,
                                          OrderId, OrderRecord, OrderState,
-                                         OrderTransition, Rejected, TimeInForce,
-                                         Venue, new_order_id_seed)
+                                         OrderTransition, Rejected,
+                                         ResourceKind, TimeInForce, Venue,
+                                         new_order_id_seed)
 from plutus.market.verdicts import AdmissionRule, Verdict
 
 __all__ = [
-    'OrderIdFactory', 'OrderBookOfRecord',
+    'OrderIdFactory', 'OrderBookOfRecord', 'EncumbranceDivergence',
     'amend_cancel_lock', 'amendment_preserves_priority', 'expires_at_boundary',
     'is_legal_transition', 'is_vietnamese_order_type',
     'UNVENUED_ORDER_TYPES',
@@ -442,6 +443,47 @@ EventSink = Callable[[Event], None]
 #: session owns more event families than orders, so the session may supply its
 #: own counter rather than let the book number events privately.
 SeqSource = Callable[[], int]
+
+
+@dataclass(frozen=True)
+class EncumbranceDivergence:
+    """One order, one resource, on which the record and the ledger disagree.
+
+    A row of :meth:`OrderBookOfRecord.encumbrance_divergence`. Both numbers are
+    carried rather than their difference, because *which side is high* is the
+    whole diagnosis: a record above the ledger overstates what the account has
+    promised and costs the caller nothing but a wrong report, while a record
+    *below* the ledger under-reports a commitment -- a summed-over-records view
+    would then let the same parcel be sold twice.
+
+    Exactly one of the two pairs is meaningful per resource, the same split
+    :class:`~plutus.market.session.types.Encumbrance` makes: ``CASH`` and
+    ``DEPOSIT`` are denominated in ``*_amount``, ``SHARES`` in ``*_quantity``.
+    Both pairs are reported anyway so a reader never has to know which, and
+    :attr:`is_clean` compares both.
+    """
+
+    order_id: OrderId
+    state: OrderState
+    resource: ResourceKind
+    record_amount: Decimal
+    ledger_amount: Decimal
+    record_quantity: int
+    ledger_quantity: int
+    ticker: Optional[str] = None
+
+    @property
+    def is_clean(self) -> bool:
+        """True when the two sides agree on both denominations."""
+        return (self.record_amount == self.ledger_amount
+                and self.record_quantity == self.ledger_quantity)
+
+    def __str__(self) -> str:
+        return (f'{self.order_id} ({self.state.value}) '
+                f'{self.resource.value}'
+                f'{"" if self.ticker is None else " " + self.ticker}: '
+                f'record {self.record_amount}/{self.record_quantity} vs '
+                f'ledger {self.ledger_amount}/{self.ledger_quantity}')
 
 
 class OrderBookOfRecord:
@@ -1079,6 +1121,17 @@ class OrderBookOfRecord:
         orders -- would overstate. A record that lies is worse than a record
         that is absent.
 
+        **The rule this method carries is general, and the partial fill is
+        only its first instance:** any path that moves the encumbrance ledger
+        for an order that is still live owes the record this call, in the same
+        operation. Two paths do so today -- ``exchange.py``'s partial fill and
+        ``corporate.py``'s ``SCALE`` of a resting order across an ex-date --
+        and the second was found by measurement, not by review: a scaled order
+        rested for the remainder of its life with a record 2,034,329 dong
+        above the ledger and a share leg 1,000 below it. Anything that adds a
+        third path and forgets this call re-opens the same hole, and
+        :meth:`encumbrance_divergence` is what makes the hole findable.
+
         Raises:
             ValueError: on a terminal order. :meth:`_terminate` has already
                 stamped its reservations released, and letting a later write
@@ -1092,6 +1145,65 @@ class OrderBookOfRecord:
                 f'nothing; its encumbrance was released on the terminal edge'
             )
         return self._store(record.with_encumbrances(encumbrances))
+
+    def encumbrance_divergence(
+        self,
+        reservations: Callable[[OrderId], Sequence[Encumbrance]],
+    ) -> Tuple['EncumbranceDivergence', ...]:
+        """Every order whose record and the ledger disagree, right now.
+
+        **The meter for the failure this book cannot prevent.** Section 12
+        invariant 4 -- the sum of encumbrance over live orders equals the
+        ledgers' committed totals -- is checked in ``validation/identities.py``
+        as two *totals*, and totals are sampled at the end of a run, when
+        nothing is live and both sides are zero. A record that overstated by
+        2,034,329 dong for the whole life of a resting order therefore read as
+        clean: an ignorance meter that reads zero during known ignorance.
+
+        This is the per-order, any-instant form. It names the order, the
+        resource and both numbers, so a divergence is attributable rather than
+        merely present, and it sweeps **terminal** orders too: a terminal
+        record reserves nothing by construction (:meth:`_terminate`), so a
+        reservation the ledger still holds for one is a leak the totals would
+        only show while some other order happened to be flat.
+
+        The book does not import ``ledgers.py`` and must not, so the ledger
+        arrives as a callable rather than an object -- pass
+        ``account.encumbrances.of``. That also lets a caller sweep against the
+        derivatives side or against a stub.
+
+        Args:
+            reservations: ``order_id -> the reservations the ledger holds``.
+
+        Returns:
+            One row per (order, resource) that disagrees, in the order the
+            book received the orders. **Empty is the passing answer**, and it
+            is the only passing answer.
+        """
+        rows: List['EncumbranceDivergence'] = []
+        for record in self._records.values():
+            on_record = {e.resource: e for e in record.encumbrances}
+            in_ledger = {e.resource: e for e in reservations(record.order_id)}
+            resources = sorted(set(on_record) | set(in_ledger),
+                               key=lambda r: r.value)
+            for resource in resources:
+                mine = on_record.get(resource)
+                theirs = in_ledger.get(resource)
+                row = EncumbranceDivergence(
+                    order_id=record.order_id,
+                    state=record.state,
+                    resource=resource,
+                    record_amount=(Decimal('0') if mine is None
+                                   else mine.amount),
+                    ledger_amount=(Decimal('0') if theirs is None
+                                   else theirs.amount),
+                    record_quantity=0 if mine is None else mine.quantity,
+                    ledger_quantity=0 if theirs is None else theirs.quantity,
+                    ticker=(mine if mine is not None else theirs).ticker,
+                )
+                if not row.is_clean:
+                    rows.append(row)
+        return tuple(rows)
 
     # -- refusals -------------------------------------------------------
 

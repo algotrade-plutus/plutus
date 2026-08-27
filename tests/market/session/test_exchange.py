@@ -12,6 +12,7 @@ shares become sellable.
 """
 
 import json
+from dataclasses import replace
 from datetime import date, datetime
 from decimal import Decimal
 
@@ -25,10 +26,16 @@ from plutus.market.protocol import (
 )
 from plutus.market.session import (
     EXCHANGE_BY_VENUE, Accepted, ChargeBase, DataField, EventKind,
-    ExchangeSession, FillDecision, FillEvidence, LeviedBy, LiquidationRule,
-    MarginStatus, MarginMonitor, MarketInterval, OrderState, Pool, Rejected,
-    Session, SoftFillPolicy, StatefulRule, Venue, parse_config,
+    ExchangeSession, FillDecision, FillEvidence, IndeterminateReport,
+    LeviedBy, LiquidationRule, MarginStatus, MarginMonitor, MarketInterval,
+    HardFillPolicy, OrderState, Pool, Rejected, Session, SessionProvenance,
+    SoftFillPolicy, StatefulRule, Venue, parse_config,
 )
+from plutus.market.session.exchange import (
+    Blindness, Component, RunIgnorance, RunProvenance,
+)
+from plutus.market.session.overnight import PRE_KRX_CONTINUOUS, OvernightGap
+from plutus.market.session.types import BrokerProfile
 from plutus.market.session.calendar import (
     CalendarError, weekday_settlement_calendar, weekday_trading_calendar,
 )
@@ -2398,6 +2405,49 @@ def test_eleven_blind_sessions_do_not_produce_a_definite_margin_status():
 
 
 # --------------------------------------------------------------------------
+# The fill_policy block: parsed, not read key by key
+# --------------------------------------------------------------------------
+
+def test_a_fill_policy_block_with_no_cap_reaches_the_session_uncapped():
+    """`parse_config` used to supply `'0.10'` for an absent `max_participation`
+    and that value was what `fills.py` read as *unset*, so the default was both
+    written and ignored. The absence is carried as an absence now."""
+    parsed = parse_config(config(fill_policy={'kind': 'soft'}))
+    assert parsed.fill_policy.max_participation is None
+    session = ExchangeSession.build(parsed, source=StubSource(EQUITY_ROWS,
+                                                              KINDS))
+    assert session.provenance().fill_policy_kind == (
+        'soft(max_participation=uncapped)')
+
+
+def test_a_fill_policy_block_naming_one_tenth_reaches_the_session_capped():
+    """The sentinel value, end to end through the session's own config path.
+
+    `{kind: soft, max_participation: 0.10}` built an **uncapped** session: the
+    payload's 0.10 was indistinguishable from `FillPolicyConfig`'s own default,
+    which meant "nobody asked". A caller who wrote the number this repository's
+    own `HardFillPolicy` uses got no cap and no error.
+    """
+    parsed = parse_config(config(
+        fill_policy={'kind': 'soft', 'max_participation': '0.10'}))
+    assert parsed.fill_policy.max_participation == Decimal('0.10')
+    session = ExchangeSession.build(parsed, source=StubSource(EQUITY_ROWS,
+                                                              KINDS))
+    assert session.provenance().fill_policy_kind == (
+        'soft(max_participation=0.10)')
+
+
+def test_an_unknown_fill_policy_key_is_refused_on_the_sessions_own_path():
+    """`parse_config` read three keys with `.get` and dropped the rest, so
+    `{kind: hard, participation: 0.10}` -- a typo for a real key -- was an
+    uncapped-by-typo run that nothing downstream could see. The block goes
+    through `parse_fill_policy_config` now, which refuses it."""
+    with pytest.raises(ValueError, match='unknown fill_policy keys'):
+        parse_config(config(fill_policy={'kind': 'hard',
+                                         'participation': '0.10'}))
+
+
+# --------------------------------------------------------------------------
 # The injected liquidation rule
 # --------------------------------------------------------------------------
 
@@ -2454,3 +2504,898 @@ def test_an_injected_liquidation_rule_is_honoured_and_not_overwritten():
     # defect read as plausible.
     assert forced[0].detail['sequence'] is None
     assert forced[0].detail['legs'] == ('VN30F2406',)
+
+
+# --------------------------------------------------------------------------
+# The ignorance meter: its scope, and the blind spots it used to have
+# --------------------------------------------------------------------------
+#
+# ``indeterminate_report()`` answered ``indeterminate=0`` on every failure an
+# independent fidelity audit found -- an uncapped fill, a bar the source never
+# supplied, a margin layer nothing called. The instrument built to bound our
+# own ignorance was structurally blind to exactly the ignorance it existed to
+# measure, and a user reading it saw a clean run.
+#
+# These tests pin the three repairs and, more importantly, pin the *general*
+# one: a component that returns 0 because nothing invoked it must never again
+# be indistinguishable from one that ran and computed 0.
+
+
+class AlwaysFillPolicy:
+    """A third-party fill policy that fills whatever it is handed.
+
+    Deliberately **not** one of the shipped policies. ``FillPolicy`` is an
+    advertised extension point, so the session has to be able to audit a
+    policy it did not write -- and a test that reached for ``soft`` or
+    ``hard`` would be pinning ``fills.py``'s behaviour rather than the
+    session's meter, and would move every time that module moved.
+
+    ``max_participation`` is set as an attribute **only when one is given**,
+    so this stub can stand for all three of the cases the session has to tell
+    apart: a policy with no cap at all, one whose cap it cannot compute, and
+    one that exceeds the cap it carries.
+    """
+
+    kind = 'always'
+    signature = 'always'
+    assumptions = ()
+
+    def __init__(self, max_participation=None, quantity=None):
+        if max_participation is not None:
+            self.max_participation = max_participation
+        self._quantity = quantity
+
+    def evaluate(self, order, interval, rules, *, already_filled=0,
+                 instrument=None):
+        quantity = self._quantity or order.remaining_quantity
+        return FillDecision.fill(quantity, order.order.limit_price,
+                                 FillEvidence.TRADED_THROUGH)
+
+
+class FadingSource(StubSource):
+    """A source that answers at submission and then goes dark.
+
+    The shape of a real coverage hole: the row that admitted the order exists
+    and the row that would have decided it does not. Before this repair the
+    session skipped such an order in complete silence -- no evaluation, no
+    event, nothing in any published number -- and it ended in the same
+    ``expired(session_end)`` row as an order the market simply never reached.
+    """
+
+    def __init__(self, rows, kinds=None, dark_from=None):
+        super().__init__(rows, kinds)
+        self._dark_from = dark_from
+
+    def state_at(self, ticker, ts):
+        if self._dark_from is not None and ts >= self._dark_from:
+            return None
+        return super().state_at(ticker, ts)
+
+
+#: A VN30F contract one month past the KRX cutover (2025-05-05), where the
+#: rulebook refuses to name the margin mechanism at all.
+KRX_DAY = date(2025, 6, 2)
+POST_KRX_KINDS = {**KINDS, 'VN30F2506': ('HNXDS', InstrumentKind.FUTURE)}
+POST_KRX_ROWS = {('VN30F2506', KRX_DAY): market('VN30F2506', KRX_DAY,
+                                                Decimal('1250'))}
+
+
+def build_with(policy, source=None, rows=None, **overrides):
+    """A session running ``policy``, which a config file cannot select."""
+    if source is None:
+        source = StubSource(rows if rows is not None else EQUITY_ROWS, KINDS)
+    return ExchangeSession.build(parse_config(config(**overrides)),
+                                 source=source, fill_policy=policy)
+
+
+def one_filled_day(session, order=None):
+    """Submit one order and give it one interval to be decided on."""
+    session.advance_to(datetime(2024, 6, 3, 9, 30))
+    session.submit(order if order is not None else buy())
+    session.advance_to(datetime(2024, 6, 3, 14, 0))
+    return session.indeterminate_report()
+
+
+def test_a_fill_decided_without_the_data_is_counted_though_it_is_not_indeterminate():
+    """``by_field`` counts a decision NOT taken. This counts one taken anyway.
+
+    The asymmetry is the whole defect. A policy that says "I cannot tell"
+    names the missing field and is counted; a policy that fills on the same
+    bar names nothing and is counted nowhere -- so the optimistic arm of the
+    comparison, the one whose fills a user would actually trade, reported
+    itself as the arm with no ignorance in it.
+
+    Both shipped adapters supply no OHLC and no volume, so a fill on a
+    synthesised interval rests on five absent fields. Counting all five is a
+    deliberate over-estimate: absence is not proof the fill depended on the
+    field, and the bound is drawn wide because a fill this simulator books
+    that the market would not have printed costs a user money in production.
+    """
+    report = one_filled_day(build_with(AlwaysFillPolicy()))
+
+    # The old headline, unchanged and still saying nothing is wrong.
+    assert report.evaluations == 1
+    assert report.indeterminate == 0
+    assert report.by_field == {}
+
+    assert report.silent_ignorance['fill.decided_without.volume'] == 1
+    assert report.silent_ignorance['fill.decided_without.high'] == 1
+    assert report.silent_ignorance['fill.decided_without.low'] == 1
+    assert report.silent_ignorance['fill.decided_without.open'] == 1
+    assert report.silent_ignorance['fill.decided_without.book_size'] == 1
+    assert not report.is_clean
+
+
+def test_a_definite_no_fill_is_not_audited_because_it_errs_the_safe_way():
+    """The bound is one-sided on purpose, and the docstring has to say so.
+
+    A refusal decided without OHLC costs the caller an opportunity; a fill
+    decided without OHLC costs them a position they never had. The guiding
+    rule is to be more restrictive than the market rather than more
+    permissive, so only the permissive direction is counted -- otherwise every
+    quiet interval in a run would bury the fills under noise.
+    """
+    class NeverFills(AlwaysFillPolicy):
+        def evaluate(self, order, interval, rules, *, already_filled=0,
+                     instrument=None):
+            return FillDecision.no_fill('nothing traded')
+
+    report = one_filled_day(build_with(NeverFills()))
+    assert report.evaluations == 1
+    assert report.silent_ignorance == {}
+    assert report.is_clean
+
+
+def test_a_policy_that_cannot_honour_the_configured_cap_says_so():
+    """A config can name a cap the policy actually running does not carry.
+
+    ``ExchangeSession.build`` takes a constructed ``fill_policy`` that wins
+    over the config, so "config says 10%, policy carries none" is a real state
+    and it produced **uncapped** fills with nothing in any published number to
+    show that the field the caller wrote had no effect. That is the audit's
+    "uncapped fill", and the three cases are deliberately kept apart because
+    the remedies differ: no cap at all is a wiring question, an uncomputable
+    cap is a data question, and an exceeded cap is a bug in the policy.
+    """
+    named_a_cap = {'kind': 'soft', 'max_participation': '0.10'}
+    uncapped = one_filled_day(
+        build_with(AlwaysFillPolicy(), fill_policy=named_a_cap))
+    assert uncapped.silent_ignorance[
+        Blindness.CAP_NOT_APPLIED.value] == 1
+
+    blind_cap = one_filled_day(
+        build_with(AlwaysFillPolicy(max_participation=Decimal('0.10'))))
+    assert Blindness.CAP_NOT_APPLIED.value not in blind_cap.silent_ignorance
+    assert blind_cap.silent_ignorance[
+        Blindness.CAP_UNCOMPUTABLE.value] == 1
+
+
+def test_a_config_and_a_policy_that_both_name_no_cap_have_nothing_to_report():
+    """The complement, and the reason the branch is gated on the config at all.
+
+    ``fill_policy.max_participation`` is ``Optional`` now: ``None`` means the
+    caller asked for no cap, and a policy carrying none is then doing exactly
+    what was asked. Reporting ``not_applied`` here would make an uncapped
+    ``soft`` -- the documented baseline arm -- look like a wiring fault on
+    every fill it produces.
+    """
+    agreed = one_filled_day(build_with(AlwaysFillPolicy()))
+    assert Blindness.CAP_NOT_APPLIED.value not in agreed.silent_ignorance
+
+
+def test_a_fill_past_the_cap_the_policy_carries_is_counted_as_exceeded():
+    """The session audits the size claim; the policy cannot be its own witness.
+
+    A bar of 5,000 at a 10% cap supports 500 shares. This policy claims 1,000
+    and the session says so -- the only place the check can live, because
+    a policy that got its own cap wrong would report the wrong number twice.
+    """
+    bars = {('FPT', D1): (Decimal('95.0'), Decimal('96.5'), Decimal('95.5'),
+                          5000)}
+    session = build_with(AlwaysFillPolicy(max_participation=Decimal('0.10')),
+                         source=BarSource(EQUITY_ROWS, bars, KINDS))
+    report = one_filled_day(session)
+
+    assert report.indeterminate == 0
+    assert report.silent_ignorance[Blindness.CAP_EXCEEDED.value] == 1
+    # A bar that carries its fields is not a bar we decided blind on.
+    assert not any(key.startswith(Blindness.DECIDED_WITHOUT.value)
+                   for key in report.silent_ignorance)
+
+
+def test_a_cap_that_is_carried_computed_and_respected_leaves_a_clean_report():
+    """The control. Nothing here is unwitnessed, so nothing is reported."""
+    bars = {('FPT', D1): (Decimal('95.0'), Decimal('96.5'), Decimal('95.5'),
+                          50000)}
+    session = build_with(AlwaysFillPolicy(max_participation=Decimal('0.10')),
+                         source=BarSource(EQUITY_ROWS, bars, KINDS))
+    report = one_filled_day(session)
+
+    assert report.silent_ignorance == {}
+    assert report.unexercised == ()
+    assert report.is_clean
+
+
+# --- the cap bounds a bar, not an advance --------------------------------
+
+INTRADAY = ((9, 30), (10, 30), (11, 15), (13, 15), (14, 0), (14, 45))
+
+#: Enough that the cap, and never the cash, is what binds below.
+DEEP_POCKETS = {'securities': {'initial_cash': 200000000000}}
+
+
+def through_the_day(session, day):
+    """Six advances inside one trading day -- the sequence that found it."""
+    for hour, minute in INTRADAY:
+        session.advance_to(datetime.combine(day, datetime.min.time())
+                           .replace(hour=hour, minute=minute))
+
+
+def test_the_participation_cap_bounds_the_bar_not_a_single_advance():
+    """Six advances inside one day used to reset the cap six times.
+
+    ``_evaluate_fills`` aggregated ``already_filled`` **per instrument** so a
+    caller could not evade the cap by splitting one order into ten -- and then
+    threw the counter away at the end of the advance, so the same caller could
+    evade it by advancing the clock instead. Every source in this repository
+    serves a whole day's volume for any instant inside the day (both shipped
+    adapters, and ``PhasedBarSource`` even at ``Resolution.TICK``), so N
+    advances recomputed 10% of the *same* 3,300 shares N times.
+
+    Reproduced from the run that found it: HTV on 2022-11-09, volume 3,300,
+    ``hard`` at 0.10, one BUY of 5,000. 330 allowed, floored to 300 by the
+    100-lot -- and the run booked 1,800, 54.5% of everything that traded that
+    day, under a signature reading ``hard(max_participation=0.10)``.
+    """
+    bars = {('FPT', D1): (Decimal('95.0'), Decimal('96.5'), Decimal('95.5'),
+                          3300)}
+    session = build_with(HardFillPolicy(max_participation=Decimal('0.10')),
+                         source=BarSource(EQUITY_ROWS, bars, KINDS),
+                         accounts=DEEP_POCKETS)
+    session.advance_to(datetime(2024, 6, 3, 9, 20))
+    assert isinstance(session.submit(buy(quantity=5000)), Accepted)
+    through_the_day(session, D1)
+
+    assert session.holdings('FPT').unsettled_quantity == 300
+
+
+def test_the_cap_resets_when_the_bar_does_and_not_before():
+    """The other half: carrying is not the same as never resetting.
+
+    A new day is new liquidity and gets its own allowance. 300 on each of two
+    days -- not 300 in total, which would turn the cap into a lifetime quota
+    and be restrictive past the point of honesty, and not 1,800 on day one,
+    which is the defect above.
+    """
+    bars = {('FPT', D1): (Decimal('95.0'), Decimal('96.5'), Decimal('95.5'),
+                          3300),
+            ('FPT', D2): (Decimal('95.5'), Decimal('97.0'), Decimal('96.0'),
+                          3300)}
+    session = build_with(HardFillPolicy(max_participation=Decimal('0.10')),
+                         source=BarSource(EQUITY_ROWS, bars, KINDS),
+                         accounts=DEEP_POCKETS)
+    session.advance_to(datetime(2024, 6, 3, 9, 20))
+    assert isinstance(session.submit(buy(quantity=5000)), Accepted)
+    through_the_day(session, D1)
+    day_one = session.holdings('FPT').unsettled_quantity
+
+    # LO is a day order, so day two needs its own; the counter is what is
+    # being pinned here, not the order's lifetime.
+    session.advance_to(datetime(2024, 6, 4, 9, 20))
+    assert isinstance(session.submit(buy(quantity=5000, price='96.0')),
+                      Accepted)
+    through_the_day(session, D2)
+
+    assert day_one == 300
+    assert session.holdings('FPT').unsettled_quantity == 600
+
+
+def test_a_third_party_policy_that_breaches_across_advances_is_counted():
+    """``participation_cap.exceeded`` could not fire, and now can.
+
+    It compared against the *current advance's* counter, which for every
+    shipped policy is arithmetically unreachable -- they size to
+    ``floor(cap x volume) - already`` -- so the branch could only ever have
+    caught a third-party policy, and a per-advance counter meant it could not
+    catch one of those either. With the counter carried across the bar, a
+    policy that ignores ``already_filled`` is caught on its second advance.
+
+    The meter, not a refusal: the session does not overrule a policy it did
+    not write. It counts the breach, which is what makes it publishable.
+    """
+    bars = {('FPT', D1): (Decimal('95.0'), Decimal('96.5'), Decimal('95.5'),
+                          50000)}
+    session = build_with(AlwaysFillPolicy(max_participation=Decimal('0.10'),
+                                          quantity=1000),
+                         source=BarSource(EQUITY_ROWS, bars, KINDS),
+                         accounts=DEEP_POCKETS)
+    session.advance_to(datetime(2024, 6, 3, 9, 20))
+    assert isinstance(session.submit(buy(quantity=10000)), Accepted)
+    through_the_day(session, D1)
+
+    report = session.indeterminate_report()
+    # 10% of 50,000 is 5,000: the first five advances are inside it and the
+    # sixth is not.
+    assert report.silent_ignorance[Blindness.CAP_EXCEEDED.value] == 1
+    assert not report.is_clean
+
+
+def test_an_order_the_source_had_no_bar_for_is_counted_not_skipped_in_silence():
+    """A live order nobody evaluated is ignorance, and it counted as nothing.
+
+    ``_evaluate_fills`` skips an order whose ticker has no state at the
+    instant, which is correct -- killing it would enforce our coverage as if
+    it were a market rule -- but the skip incremented no counter, so a run in
+    which the data ran out mid-session was indistinguishable from a quiet one.
+    """
+    source = FadingSource(EQUITY_ROWS, KINDS,
+                          dark_from=datetime(2024, 6, 3, 12, 0))
+    session = build_with(AlwaysFillPolicy(), source=source)
+    session.advance_to(datetime(2024, 6, 3, 9, 30))
+    assert isinstance(session.submit(buy()), Accepted)
+    session.advance_to(datetime(2024, 6, 3, 14, 0))
+
+    report = session.indeterminate_report()
+    assert report.evaluations == 0          # the policy was never asked
+    assert report.indeterminate == 0        # and so it decided nothing
+    assert report.silent_ignorance[Blindness.NO_BAR.value] == 1
+    assert not report.is_clean
+    assert session.orders(state=OrderState.RESTING)
+
+
+def test_an_unsourced_order_size_cap_is_counted_rather_than_passed_over():
+    """HNX and UPCoM publish no per-order cap, so the rule refuses nothing.
+
+    That is the right call -- refusing every order on an unsourced ceiling
+    would report a research gap as a market rule -- but the run has to say how
+    many orders it admitted without ever testing the rule, or the log reads as
+    a run in which the cap was tested and bound nothing.
+    """
+    rows = {**EQUITY_ROWS, ('ABC', D1): market('ABC', D1, Decimal('10.0'))}
+    session = build_with(
+        AlwaysFillPolicy(), source=StubSource(rows, KINDS),
+        exchange_rules={'venues': ['HSX', 'HNXDS', 'UPCOM'],
+                        'rulebook': 'vn-2020-2026'})
+    session.advance_to(datetime(2024, 6, 3, 9, 30))
+
+    assert isinstance(session.submit(buy()), Accepted)          # HSX: sourced
+    unsourced = Blindness.ORDER_SIZE_UNSOURCED.value
+    assert unsourced not in session.indeterminate_report().silent_ignorance
+
+    assert isinstance(session.submit(buy(ticker='ABC', quantity=1000,
+                                         price='10.0')), Accepted)
+    report = session.indeterminate_report()
+    assert report.silent_ignorance[unsourced] == 1
+    assert report.exercised[Component.MAX_ORDER_SIZE.value] == 2
+
+
+# -- the general repair: what actually ran ----------------------------------
+
+def test_a_session_that_never_ran_its_fill_policy_says_so():
+    """The headline case. Zero evaluations is not a clean run.
+
+    ``indeterminate == 0`` and ``by_field == {}`` are exactly what a session
+    reports when its execution model was never invoked at all, which is
+    indistinguishable -- in every number published before this repair -- from
+    a session whose execution model ran and found nothing to report.
+    """
+    session = build()
+    session.advance_to(datetime(2024, 6, 3, 14, 0))
+
+    report = session.indeterminate_report()
+    assert report.evaluations == 0
+    assert report.indeterminate == 0
+    assert report.rate is None
+    assert Component.FILL_POLICY.value not in report.exercised
+    assert report.unexercised == (Component.FILL_POLICY.value,)
+    assert not report.is_clean
+
+
+def test_a_margin_layer_this_run_needed_and_never_ran_is_named():
+    """A component returning 0 because nothing called it, made visible.
+
+    The run margined a futures order at entry, so it *requires* the layer that
+    marks it afterwards -- and until the clock moves that layer has not run.
+    The old report was silent about it in both halves: no counter said the
+    mark had not happened, and no counter would have said so if the call site
+    had never existed.
+    """
+    session = build(rows=FUTURES_ROWS)
+    session.advance_to(datetime(2024, 6, 3, 9, 30))
+    assert isinstance(
+        session.submit(buy(ticker='VN30F2406', quantity=1, price='1250')),
+        Accepted)
+
+    before = session.indeterminate_report()
+    assert before.indeterminate == 0
+    assert Component.DERIVATIVES_MARK.value in before.unexercised
+    assert Component.DERIVATIVES_LADDER.value in before.unexercised
+    assert not before.is_clean
+
+    session.advance_to(datetime(2024, 6, 3, 14, 0))
+    after = session.indeterminate_report()
+    assert after.exercised[Component.DERIVATIVES_MARK.value] == 1
+    assert after.exercised[Component.DERIVATIVES_LADDER.value] == 1
+    assert Component.DERIVATIVES_MARK.value not in after.unexercised
+    assert Component.DERIVATIVES_LADDER.value not in after.unexercised
+
+
+def test_a_run_that_never_touched_derivatives_is_not_asked_for_that_layer():
+    """``unexercised`` is a finding, not a standing complaint about the config.
+
+    This session is configured for HNXDS and never trades a contract, so the
+    deposit's margin layer is not something it required. Requiring components
+    from the venue list instead of from what the run did would put two lines
+    in every equity report and train a reader to ignore them.
+    """
+    session = build_with(AlwaysFillPolicy())
+    report = one_filled_day(session)
+    assert Venue.HNXDS in session.provenance().venues
+    assert Component.DERIVATIVES_MARK.value not in report.unexercised
+    assert Component.DERIVATIVES_LADDER.value not in report.unexercised
+    assert report.unexercised == ()
+
+
+class StubEquityMargin:
+    """The three methods ``exchange.py`` documents, and a call counter."""
+
+    account_id = 'M-0001'
+
+    def __init__(self):
+        self.advances = 0
+
+    def gate(self, session, order, order_id, state, ts):
+        return None
+
+    def unwind(self, draw, ts, session, reason):
+        return None
+
+    def on_advance(self, session, ts, next_seq):
+        self.advances += 1
+        return ()
+
+
+def test_an_attached_equity_margin_account_is_reported_attached_and_then_run():
+    """Configuration is not execution, and the record now separates them.
+
+    A session holding a margin account publishes a provenance record that
+    implies leverage was modelled. If the maintenance pass never runs, that
+    implication is false -- and nothing in the old record could show it.
+    """
+    session = build()
+    account = StubEquityMargin()
+    session.attach_equity_margin(account)
+
+    advance = Component.EQUITY_MARGIN_ADVANCE.value
+    assert session.indeterminate_report().unexercised == (
+        Component.FILL_POLICY.value, advance)
+
+    session.advance_to(datetime(2024, 6, 3, 14, 0))
+    assert account.advances == 1
+    assert session.indeterminate_report().exercised[advance] == 1
+    assert advance not in session.indeterminate_report().unexercised
+
+
+def test_the_margin_model_is_asked_and_an_unsourced_answer_is_counted():
+    """D42: the rulebook's own "which mechanism applies" had no caller at all.
+
+    ``RuleSet.margin_model`` raises from the KRX cutover, where the post-trade
+    COMS calculation is unsourced. Nothing in ``src/`` called it, so a 2026
+    position was margined ``IM + VM`` on the pre-KRX shape, the run completed,
+    and ``indeterminate_report`` counted zero. A run that cannot resolve a
+    *band* answers INDETERMINATE and counts it; a run that cannot resolve the
+    *margin model* answered with last year's.
+
+    The mark still runs -- refusing to margin an open position is not the
+    safer answer -- but the run now records that it took the mark without a
+    sourced mechanism, and records the positive case too.
+    """
+    before = build(rows=FUTURES_ROWS)
+    before.advance_to(datetime(2024, 6, 3, 9, 30))
+    before.submit(buy(ticker='VN30F2406', quantity=1, price='1250'))
+    before.advance_to(datetime(2024, 6, 3, 14, 0))
+    pre = before.indeterminate_report()
+    assert pre.exercised[Component.MARGIN_MODEL.value] == 1
+    assert Blindness.MARGIN_MODEL_UNSOURCED.value not in pre.silent_ignorance
+
+    after = ExchangeSession.from_mapping(
+        config(period={'start': '2025-06-02', 'end': '2025-06-27'}),
+        source=StubSource(POST_KRX_ROWS, POST_KRX_KINDS))
+    after.advance_to(datetime(2025, 6, 2, 9, 30))
+    assert isinstance(
+        after.submit(buy(ticker='VN30F2506', quantity=1, price='1250')),
+        Accepted)
+    after.advance_to(datetime(2025, 6, 2, 14, 0))
+
+    post = after.indeterminate_report()
+    assert Component.MARGIN_MODEL.value not in post.exercised
+    assert post.silent_ignorance[
+        Blindness.MARGIN_MODEL_UNSOURCED.value] == 1
+    assert post.indeterminate == 0          # the old headline, still zero
+    assert not post.is_clean                # the honest one
+
+
+def test_provenance_carries_the_wiring_so_a_result_reads_without_re_running():
+    """Section 6.3's record says what a run was configured with.
+
+    Now it says what ran, too.
+
+    A stored ``ScenarioResult`` can be checked for a never-invoked component
+    months later, which is the whole point: the audit's findings were only
+    visible to somebody re-running the scenario under a debugger.
+    """
+    session = build(rows=FUTURES_ROWS)
+    session.advance_to(datetime(2024, 6, 3, 9, 30))
+    session.submit(buy(ticker='VN30F2406', quantity=1, price='1250'))
+
+    prov = session.provenance()
+    report = session.indeterminate_report()
+    assert isinstance(prov, RunProvenance)
+    assert prov.exercised == tuple(sorted(report.exercised))
+    assert prov.unexercised == report.unexercised
+    assert Component.DERIVATIVES_MARK.value in prov.unexercised
+
+
+def test_both_records_stay_readable_as_the_types_the_contract_promises():
+    """``validation/runner.py`` stores them under the base types unchanged.
+
+    The two fields belong on ``IndeterminateReport`` and ``SessionProvenance``
+    in ``types.py``, which this module does not own; subclassing is how the
+    session reports more than the base shape carries without breaking a single
+    existing reader.
+    """
+    session = build()
+    session.advance_to(datetime(2024, 6, 3, 14, 0))
+    assert isinstance(session.indeterminate_report(), IndeterminateReport)
+    assert isinstance(session.indeterminate_report(), RunIgnorance)
+    assert isinstance(session.provenance(), SessionProvenance)
+
+
+def test_blind_spots_reads_out_every_line_the_headline_number_hides():
+    """One printable line per finding, so a report can state them.
+
+    ``rate`` is unchanged -- these are not evaluations and folding them into
+    the denominator would make the published share mean nothing -- so the
+    reader needs somewhere to look, and ``indeterminate == 0`` is exactly
+    where they were looking when the audit found all of this.
+    """
+    session = build(rows=FUTURES_ROWS)
+    session.advance_to(datetime(2024, 6, 3, 9, 30))
+    session.submit(buy(ticker='VN30F2406', quantity=1, price='1250'))
+    report = session.indeterminate_report()
+
+    assert report.rate is None
+    assert report.silent_total == sum(report.silent_ignorance.values())
+    lines = report.blind_spots()
+    assert f'{Component.DERIVATIVES_MARK.value}: required by this run and ' \
+           f'never invoked' in lines
+    assert all(isinstance(line, str) for line in lines)
+
+
+# --------------------------------------------------------------------------
+# The overnight layer, wired
+# --------------------------------------------------------------------------
+
+def overnight_source(rows=None, index=None):
+    """``FUTURES_ROWS`` plus, optionally, the **underlying index**.
+
+    Kept as a switch rather than always-on because withholding the index is
+    the ordinary case for a caller's own adapter, and it is the arm that
+    proves the layer refuses instead of reaching for the futures price.
+    """
+    table = dict(rows if rows is not None else FUTURES_ROWS)
+    for day, level in (index or {}).items():
+        table[('VN30', day)] = market('VN30', day, level)
+    kinds = dict(KINDS)
+    kinds['VN30'] = ('HSX', InstrumentKind.INDEX)
+    return StubSource(table, kinds)
+
+
+def held_overnight(session, day=D1, close_at=14, quantity=1):
+    """Open one VN30F2406 long and drive the clock past the venue's close.
+
+    ``advance_to(14:00)`` is *inside* the session and 14:45 is HNXDS's own
+    session end, so the two advances are what separate "the day is running"
+    from "the day is over" -- which is the distinction the whole layer turns
+    on (QD 26 Dieu 5.5: MR is computed *"sau khi ket thuc phien giao dich"*).
+    """
+    session.advance_to(datetime(2024, 6, day.day, 9, 30))
+    assert isinstance(
+        session.submit(buy(ticker='VN30F2406', quantity=quantity,
+                           price='1250')),
+        Accepted)
+    session.advance_to(datetime(2024, 6, day.day, close_at, 0))
+    return session
+
+
+#: One post-cutover session. 2026-03-09 is a Monday, so the weekday-only
+#: default calendar and a real one agree about it -- the same reason ``D1``
+#: is a Monday. The date is the point: from 2025-05-05 the rulebook refuses to
+#: name the margin mechanism, so the broker profile is what decides.
+K1 = date(2026, 3, 9)
+K2 = date(2026, 3, 10)
+
+OVERNIGHT_KRX_ROWS = {
+    ('VN30F2603', K1): market('VN30F2603', K1, Decimal('1766')),
+    ('VN30F2603', K2): market('VN30F2603', K2, Decimal('1833')),
+}
+OVERNIGHT_KRX_INDEX = {K1: Decimal('1766'), K2: Decimal('1833')}
+
+
+def post_krx_session(firm=None, serve_index=False, entry='1900'):
+    """A post-cutover session holding one long over its first close.
+
+    The entry above the mark is deliberate: it puts the account in loss, so
+    ``VM`` is non-zero and the two layers cannot agree by accident.
+    """
+    table = dict(OVERNIGHT_KRX_ROWS)
+    table[('VN30F2603', K1)] = market('VN30F2603', K1, Decimal(entry))
+    kinds = dict(KINDS)
+    kinds['VN30F2603'] = ('HNXDS', InstrumentKind.FUTURE)
+    if serve_index:
+        kinds['VN30'] = ('HSX', InstrumentKind.INDEX)
+        for day, level in OVERNIGHT_KRX_INDEX.items():
+            table[('VN30', day)] = market('VN30', day, level)
+    profile = {'name': 'test-retail'}
+    if firm is not None:
+        profile = {'firm': firm, 'warn': False}
+    session = ExchangeSession.from_mapping(
+        config(period={'start': K1.isoformat(), 'end': '2026-03-20'},
+               broker_profile=profile,
+               accounts={'securities': {'initial_cash': 150000000},
+                         'derivatives': {'initial_deposit': 900000000}}),
+        source=StubSource(table, kinds))
+    session.advance_to(datetime(2026, 3, 9, 9, 30))
+    assert isinstance(
+        session.submit(buy(ticker='VN30F2603', quantity=2, price=entry)),
+        Accepted)
+    session.advance_to(datetime(2026, 3, 9, 14, 0))
+    assert session.positions()['VN30F2603'].net_quantity == 2
+    # A second session, so the mark moves off the entry and VM is real.
+    session.advance_to(datetime(2026, 3, 10, 14, 45))
+    return session
+
+
+def test_the_overnight_layer_does_not_run_before_the_session_has_closed():
+    """The requirement is an *end of session* one, and 14:00 is not the end.
+
+    A layer that ran on every advance would report an "overnight" number for
+    an account that still has three hours to flatten, which is the intraday
+    number with a misleading name on it.
+    """
+    session = held_overnight(build(rows=FUTURES_ROWS))
+    assert session.overnight_margins() == ()
+    assert session.overnight_margin() is None
+
+    session.advance_to(datetime(2024, 6, 3, 14, 45))
+    assert len(session.overnight_margins()) == 1
+
+
+def test_the_overnight_layer_answers_once_a_day_however_often_it_is_polled():
+    """Four advances after the close must not be four requirements.
+
+    ``evaluations`` already mixes populations and moves with the caller's
+    sampling rate; a layer that is defined as *"once, after the close"* and
+    then counted per poll would make that worse in the one place the source
+    is unambiguous about the cadence.
+    """
+    session = held_overnight(build(rows=FUTURES_ROWS))
+    for hour, minute in ((14, 45), (15, 0), (15, 30), (16, 0)):
+        session.advance_to(datetime(2024, 6, 3, hour, minute))
+    assert len(session.overnight_margins()) == 1
+    assert session.indeterminate_report().exercised[
+        Component.OVERNIGHT_MARGIN.value] == 1
+
+
+def test_an_equity_only_run_is_never_asked_for_an_overnight_requirement():
+    """``unexercised`` is only worth reading if it is not a standing line.
+
+    A run that never opened a derivatives position does not need this layer,
+    and declaring it needed anyway would put a permanent complaint on every
+    equity report -- which is exactly how a reader learns to ignore the
+    field.
+    """
+    session = build()
+    for day in (3, 4, 5):
+        session.advance_to(datetime(2024, 6, day, 14, 45))
+    report = session.indeterminate_report()
+    assert session.overnight_margins() == ()
+    assert Component.OVERNIGHT_MARGIN.value not in report.unexercised
+    assert Component.OVERNIGHT_MARGIN.value not in report.exercised
+
+
+def test_a_pre_krx_close_carries_the_continuous_requirement_and_says_so():
+    """2024 is pre-KRX, and the dated rulebook is what decides that.
+
+    ``RuleName.MARGIN_MODEL`` resolves to ``'pre_margin'`` to 2025-05-04 at
+    HIGH confidence: margin lodged before the order and recomputed in-session,
+    with **no separate end-of-day model**. So the overnight requirement in
+    this regime is the continuous one on the held book -- and running QD 26's
+    grid here would report a number under a regulation that did not exist.
+    """
+    session = held_overnight(build(rows=FUTURES_ROWS))
+    session.advance_to(datetime(2024, 6, 3, 14, 45))
+
+    row = session.overnight_margin()
+    assert row.model == PRE_KRX_CONTINUOUS
+    assert row.engine == 'plutus.market.session.deposit'
+    assert row.as_of == D1
+    assert row.is_determinate and row.flat is False
+    assert row.amount == session.margin().required
+    assert session.provenance().overnight_model == PRE_KRX_CONTINUOUS
+    assert session.provenance().overnight_determinate == 1
+
+
+def test_the_overnight_requirement_drops_the_resting_order_margin():
+    """The day's orders are gone by the close, so their margin is not carried.
+
+    ``account_margin_requirement`` adds ``resting_order_margin`` to ``IM +
+    VM`` because a live order has margin lodged against it. The layer passes
+    ``resting=()`` rather than reusing the mark's view, and this is the case
+    that tells the two apart: a GTC order still on the book at the close.
+    """
+    session = held_overnight(build(
+        rows=FUTURES_ROWS,
+        accounts={'securities': {'initial_cash': 150000000},
+                  'derivatives': {'initial_deposit': 100000000}}))
+    # A limit inside the band that the day's close never reached, so it is
+    # still on the book at 14:45 with its margin lodged against it.
+    resting = session.submit(buy(ticker='VN30F2406', quantity=1,
+                                 price='1180'))
+    assert isinstance(resting, Accepted)
+    session.advance_to(datetime(2024, 6, 3, 14, 45))
+    assert resting.order_id in {r.order_id for r in
+                                session.orders(state=OrderState.RESTING)}
+
+    view = session.margin()
+    assert view.resting_order_margin > 0
+    assert session.overnight_margin().amount == (
+        view.required - view.resting_order_margin)
+
+
+def test_an_account_flat_at_the_close_gets_a_determinate_zero():
+    """Flat and undecided must not look alike, and neither must flat and
+    "the layer never ran": the first two sessions here hold a position and
+    the requirement is real, the third is flat and the zero is a finding."""
+    session = held_overnight(build(rows=FUTURES_ROWS))
+    session.advance_to(datetime(2024, 6, 3, 14, 45))
+    assert session.overnight_margin().amount > 0
+
+    session.advance_to(datetime(2024, 6, 4, 9, 30))
+    assert isinstance(session.submit(
+        sell(ticker='VN30F2406', quantity=1, price='1150')), Accepted)
+    session.advance_to(datetime(2024, 6, 4, 14, 45))
+    assert session.positions() == {}
+
+    flat = session.overnight_margin()
+    assert flat.as_of == D2
+    assert flat.flat is True
+    assert flat.amount == Decimal('0')
+    assert flat.is_determinate is True
+
+
+def test_a_stale_mark_makes_the_overnight_layer_undecided_and_counted():
+    """A requirement is arithmetic on a price, and this one has no price.
+
+    The intraday mark already reports INDETERMINATE here. The overnight layer
+    is a *second* evaluation on the same absence and it must not quietly
+    succeed where the mark did not -- but the missing settlement price is
+    counted once, by the mark, because one absent price counted twice under
+    one ``by_field`` key turns a population into a magnitude.
+    """
+    rows = {('VN30F2406', D1): market('VN30F2406', D1, Decimal('1250'))}
+    session = held_overnight(build(rows=rows))
+    session.advance_to(datetime(2024, 6, 4, 14, 45))
+
+    row = session.overnight_margin()
+    assert row.as_of == D2
+    assert row.amount is None
+    assert row.gaps == (OvernightGap.INTRADAY_INDETERMINATE.value,)
+
+    report = session.indeterminate_report()
+    assert report.silent_ignorance[
+        'margin.overnight.uncomputed.intraday.indeterminate'] == 1
+    assert report.by_field[DataField.SETTLEMENT_PRICE] == 1
+
+
+def test_a_post_krx_close_with_no_firm_named_refuses_rather_than_substituting():
+    """The KRX cutover, and the substitution that must not happen.
+
+    From 2025-05-05 ``RuleSet.margin_model()`` raises -- the mechanism is not
+    sourced in the rulebook -- so the *profile* decides, and a session with no
+    margin profile has no firm to ask. The intraday number is available, sits
+    right there on ``session.margin()``, and is **not** reported as the
+    overnight one: the two are computed by different engines from different
+    price series, and QD 26 Phu luc 2 has no variation-margin term at all.
+    """
+    session = post_krx_session()
+    assert session.margin().required > 0
+
+    row = session.overnight_margin()
+    assert row.amount is None
+    assert row.engine is None
+    assert row.gaps == (OvernightGap.MODEL_UNSTATED.value,)
+
+    report = session.indeterminate_report()
+    assert report.indeterminate == 1
+    assert report.silent_ignorance[
+        'margin.overnight.uncomputed.margin_model_overnight.unstated'] == 1
+    assert report.is_clean is False
+    assert session.provenance().overnight_indeterminate == 1
+
+
+def test_a_post_krx_close_with_a_firm_but_no_index_names_the_missing_close():
+    """Phu luc 2 section 1.1's ``S`` is the **underlying's** close.
+
+    SSI publishes the parameter mirror, so the model is known and the only
+    thing missing is the index level -- which the futures price is not. The
+    gap names ``VN30`` so a caller knows which series to serve.
+    """
+    session = post_krx_session(firm='SSI')
+    row = session.overnight_margin()
+    assert row.model == 'SCENARIO_GRID'
+    assert row.amount is None
+    assert row.gaps == (f'{OvernightGap.UNDERLYING_CLOSE.value}:VN30',)
+    assert session.indeterminate_report().by_field[DataField.CLOSE] == 1
+
+
+def test_a_post_krx_close_with_everything_present_runs_the_grid():
+    """The engine with zero call sites, called -- and it is a different number.
+
+    ``IM + VM`` and ``Max(Rm + Sm - OA, MM)`` on the same account at the same
+    close, and the gap between them is exactly the variation margin, because
+    QD 26 Dieu 20 settles position P&L as a separate daily cash movement and
+    section 6.2 has no ``VM`` term. That this simulator does not make that
+    cash movement is the layer's one permissive assumption, and it is counted
+    rather than described.
+    """
+    session = post_krx_session(firm='SSI', serve_index=True)
+    row = session.overnight_margin()
+    assert row.model == 'SCENARIO_GRID'
+    assert row.engine == 'plutus.market.session.scenario_margin'
+    assert row.is_determinate
+    assert row.gaps == ()
+
+    view = session.margin()
+    assert row.amount != view.required
+    assert row.amount == view.required - view.variation_margin
+
+    report = session.indeterminate_report()
+    assert report.indeterminate == 0
+    assert report.exercised[Component.OVERNIGHT_MARGIN.value] == 1
+    assert 'margin.overnight.assumed.minimum_margin_factor_derived' in \
+        report.silent_ignorance
+
+
+def test_a_profile_facing_the_user_with_the_overnight_layer_is_refused():
+    """The grid is computed; it may not be put on the utilisation ladder.
+
+    ``MarginView.required`` is the property ``initial_margin +
+    variation_margin`` and the grid produces neither term, so putting its
+    number on the ladder would mean writing it into ``initial_margin`` and
+    zeroing ``variation_margin`` -- a decomposition that did not happen, and
+    one that would corrupt ``free_deposit`` and ``posted_margin`` with it.
+    All twelve shipped profiles face the user with the intraday layer, so
+    nothing this repository ships is refused here.
+    """
+    from plutus.market.session import broker_profile as bp
+
+    overnight = replace(bp.get_profile('SSI', warn=False),
+                        user_facing_model=bp.MarginLayer.OVERNIGHT)
+    profile = BrokerProfile.from_margin_profile(overnight)
+    with pytest.raises(NotImplementedError) as caught:
+        ExchangeSession._check_margin_model(profile)
+    assert 'MarginView' in str(caught.value)
+
+    for name in bp.PROFILE_NAMES:
+        try:
+            shipped = bp.get_profile(name, warn=False)
+            session_profile = BrokerProfile.from_margin_profile(shipped)
+        except bp.BrokerProfileError:
+            # MBS delegates five levels to a notice that is not published and
+            # Vietcap prints two rungs where ``BrokerTerms`` needs three, so
+            # both refuse before this check is ever reached. Those refusals
+            # are their own tests' subject, not this one's.
+            continue
+        assert shipped.user_facing_model is bp.MarginLayer.INTRADAY
+        ExchangeSession._check_margin_model(session_profile)

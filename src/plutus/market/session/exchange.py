@@ -81,10 +81,11 @@ things the contract could not see until the modules were written:
 
 import importlib
 import json
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta
 from datetime import time as _time
 from decimal import ROUND_HALF_UP, Decimal
+from enum import Enum
 from pathlib import Path
 from typing import (
     Any, Dict, FrozenSet, List, Mapping, Optional, Protocol, Sequence, Set,
@@ -111,13 +112,18 @@ from plutus.market.session.deposit import (
     liquidation_sequence, resolve_contract_multiplier,
 )
 from plutus.market.session.charges import ChargeContext, assess_at_maturity
-from plutus.market.session.fills import FillPolicy, build_fill_policy
+from plutus.market.session.fills import (FillPolicy, build_fill_policy,
+                                         parse_fill_policy_config)
 from plutus.market.session.ledgers import (
     CashLedger, EncumbranceLedger, HoldingsLedger, SecuritiesAccount,
     assess_charges,
 )
 from plutus.market.session.orders import (
     OrderBookOfRecord, OrderIdFactory, is_legal_transition,
+)
+from plutus.market.session.overnight import (
+    PRE_KRX_CONTINUOUS, UNSTATED_MODEL, OvernightGap, OvernightRequirement,
+    is_continuous_model, overnight_requirement, underlying_of,
 )
 from plutus.market.session.rulebook import (
     Rulebook, RuleName, RuleSet, SymbolRouter, UnresolvedRule, VenueListing,
@@ -136,9 +142,9 @@ from plutus.market.session.types import (
 from plutus.market.verdicts import AdmissionRule, SettlementSource, Verdict
 
 __all__ = [
-    'CHARGE_CLASS_BY_KIND', 'EXCHANGE_BY_VENUE', 'ExchangeSession',
-    'IntervalSource', 'Session', 'charge_class_for', 'load_data_source',
-    'parse_config',
+    'CHARGE_CLASS_BY_KIND', 'EXCHANGE_BY_VENUE', 'Blindness', 'Component',
+    'ExchangeSession', 'IntervalSource', 'RunIgnorance', 'RunProvenance',
+    'Session', 'charge_class_for', 'load_data_source', 'parse_config',
 ]
 
 
@@ -300,6 +306,269 @@ _SEGREGATED_FUNDING_RULES: FrozenSet[StatefulRule] = frozenset({
 })
 
 
+# --------------------------------------------------------------------------
+# The honesty instrument: what ran, and what ran blind
+# --------------------------------------------------------------------------
+
+class Component(str, Enum):
+    """A named part of the session that one run either exercised or did not.
+
+    **Why this exists.** A component that returns 0 because nothing called it
+    is indistinguishable, in every number this package publishes, from one
+    that ran and correctly computed 0. Three of the fidelity audit's findings
+    have that exact shape -- a margin layer with no call site, a rule with no
+    caller, a policy configuration nothing applied -- and in all three
+    ``indeterminate_report()`` answered ``indeterminate=0``. A run that
+    records which parts it actually invoked cannot make that mistake again:
+    "not wired" appears as an absence from :attr:`RunIgnorance.exercised` and,
+    where the run needed it, as a line in :attr:`RunIgnorance.unexercised`.
+
+    **An enum and not free-form strings**, for the reason ``rulebook.py``
+    gives about its own keys: a typo in a counter's key is a silent zero, and
+    a silent zero is the failure this whole record exists to prevent.
+
+    **Membership is not a claim of coverage.** These are the *session's* seams
+    -- the places this module calls out to another one. A component named here
+    and exercised was invoked; it does not follow that it was invoked with the
+    right arguments, nor that the module behind it is correct. This record
+    bounds one failure mode only: never invoked at all.
+    """
+
+    #: ``FillPolicy.evaluate`` -- the execution model, per order per interval.
+    FILL_POLICY = 'fill_policy'
+    #: ``Exchange.admits`` -- the stateless admission rules on the dated judge.
+    ADMISSION = 'rule.admits'
+    #: ``RuleSet.legal_order_types`` at the submitting instant.
+    LEGAL_ORDER_TYPES = 'rule.legal_order_types'
+    #: ``RuleSet.resolve(MAX_ORDER_SIZE)`` at the submitting instant.
+    MAX_ORDER_SIZE = 'rule.max_order_size'
+    #: ``RuleSet.tick_size`` -- the dated grid installed for one call.
+    TICK_SIZE = 'rule.tick_size'
+    #: ``RuleSet.margin_model`` -- which margin MECHANISM the date is under.
+    MARGIN_MODEL = 'rule.margin_model'
+    #: ``SecuritiesAccount.reserve_for_buy`` / ``reserve_for_sell``.
+    SECURITIES_FUNDING = 'funding.securities_cash'
+    #: ``DerivativesAccount.reserve_for_order`` -- initial margin at entry.
+    DERIVATIVES_FUNDING = 'funding.derivatives_deposit'
+    #: ``DerivativesAccount.margin`` -- the ``MR = IM + VM`` view. The
+    #: **intraday** layer: continuously recomputed on the futures traded
+    #: price, and the one every surveyed firm's client ladder is tested
+    #: against.
+    DERIVATIVES_MARK = 'margin.derivatives.mark'
+    #: ``overnight.overnight_requirement`` -- the **overnight** layer, once
+    #: per session after the close, on the *underlying's* close. A separate
+    #: component from ``DERIVATIVES_MARK`` because they are separate models
+    #: chosen separately (survey finding F-1), and because the failure this
+    #: member exists to report is exactly that one of them ran and the other
+    #: never did: ``scenario_margin.py`` had zero call sites in ``src/``
+    #: while every derivatives run reported a full margin history.
+    OVERNIGHT_MARGIN = 'margin.derivatives.overnight'
+    #: ``MarginMonitor.on_mark`` -- the utilisation ladder and the cure clock.
+    DERIVATIVES_LADDER = 'margin.derivatives.ladder'
+    #: The equity margin account's per-order lending gate.
+    EQUITY_MARGIN_GATE = 'margin.equity.gate'
+    #: The equity margin account's per-advance maintenance pass.
+    EQUITY_MARGIN_ADVANCE = 'margin.equity.advance'
+
+
+class Blindness(str, Enum):
+    """Ignorance that the ``indeterminate`` scalar structurally cannot show.
+
+    Every member is a place where the run **acted anyway**: it produced a
+    fill, passed an order, or marked an account while a fact it needed was
+    absent. None of them is an ``INDETERMINATE`` outcome, so none of them
+    reaches :attr:`IndeterminateReport.indeterminate` -- which is precisely
+    why they have to be counted somewhere, and why
+    :attr:`RunIgnorance.silent_total` exists.
+
+    The two ``fill.*`` skips are the exception to "acted anyway": there the
+    run did **not** act, and a live order was simply never put to the policy.
+    That is the same defect wearing the other face -- an order nobody
+    evaluated and an order nobody could decide end in the identical expiry
+    row, and neither was visible in any published number.
+
+    :attr:`OVERNIGHT_UNCOMPUTED` is the same exception again, and the one
+    place a member here is a **duplicate** of something ``indeterminate``
+    already counts. That is deliberate: an undecided overnight requirement is
+    a real evaluation and moves the scalar, but the scalar cannot say *which
+    input was missing*, and the remedy -- name a firm that publishes a
+    parameter mirror, add the underlying's close to the source -- is entirely
+    in that qualifier. :attr:`OVERNIGHT_ASSUMED` is the ordinary "acted
+    anyway" kind: a number was produced with something of ours in it.
+    """
+
+    #: A live order whose ticker had no state at this instant, so it was
+    #: never offered to the fill policy at all.
+    NO_BAR = 'fill.no_bar'
+    #: A live order whose ticker routed to no venue at this instant.
+    UNROUTED = 'fill.unrouted'
+    #: Prefix. A **definite fill** decided from an interval that named this
+    #: field as absent. Composed as ``fill.decided_without.<field>``.
+    DECIDED_WITHOUT = 'fill.decided_without'
+    #: The config names a participation cap and the running policy applies
+    #: none, so the fill was uncapped.
+    CAP_NOT_APPLIED = 'participation_cap.not_applied'
+    #: The running policy carries a cap and filled without the volume to
+    #: compute it against.
+    CAP_UNCOMPUTABLE = 'participation_cap.uncomputable'
+    #: The fill exceeded the cap the running policy carries.
+    CAP_EXCEEDED = 'participation_cap.exceeded'
+    #: The order size cap could not be resolved at this date and venue, so
+    #: the order was passed over the rule rather than judged by it.
+    ORDER_SIZE_UNSOURCED = 'rule.max_order_size.unsourced'
+    #: The rulebook refuses to name the margin mechanism at this date and the
+    #: account was marked on ``IM + VM`` regardless.
+    MARGIN_MODEL_UNSOURCED = 'rule.margin_model.unsourced'
+    #: Prefix. The overnight requirement could not be computed and the run
+    #: did **not** substitute the intraday number. Composed as
+    #: ``margin.overnight.uncomputed.<OvernightGap>``, so the missing input
+    #: is in the key.
+    OVERNIGHT_UNCOMPUTED = 'margin.overnight.uncomputed'
+    #: Prefix. The overnight requirement was produced with something of ours
+    #: in it -- an underlying-asset grouping nobody publishes, an undated
+    #: parameter mirror, an ``R`` inverted out of ``MF``. Composed as
+    #: ``margin.overnight.assumed.<OvernightAssumption>``.
+    OVERNIGHT_ASSUMED = 'margin.overnight.assumed'
+
+
+def _blindness_key(what: Blindness,
+                   field_: Union[DataField, str, None] = None) -> str:
+    """The counter key for one blind spot, qualified where it has a subject.
+
+    ``field_`` is a :class:`DataField` for the fill-side members, whose
+    subject is always a field of the data contract, and a plain string for
+    the overnight members, whose subject is an :class:`OvernightGap` or
+    :class:`OvernightAssumption` value. Both are closed vocabularies with a
+    ``.value``, so neither can become the free-form key
+    :class:`Component` exists to prevent -- but they are different
+    vocabularies, and pretending otherwise would put an enum member from
+    ``overnight.py`` where a reader expects a ``DataField``.
+    """
+    if field_ is None:
+        return what.value
+    suffix = field_.value if isinstance(field_, DataField) else str(field_)
+    return f'{what.value}.{suffix}'
+
+
+@dataclass(frozen=True)
+class RunIgnorance(IndeterminateReport):
+    """:class:`IndeterminateReport` plus the ignorance it cannot represent.
+
+    **Why a subclass and not three more fields on the base record.**
+    ``IndeterminateReport`` lives in ``types.py``, which this module does not
+    own; subclassing keeps every existing reader working unchanged --
+    ``validation/runner.py`` stores it as an ``IndeterminateReport`` and the
+    ``isinstance`` still holds -- while the session can report more than the
+    base shape can carry. *Orchestrator action:* these three fields belong on
+    ``IndeterminateReport`` itself, at which point this class collapses into
+    it.
+
+    **The three additions map onto three ways a meter reads zero while its
+    subject is ignorant**, all three of them observed:
+
+    * :attr:`silent_ignorance` -- the run acted on a fact it did not have. An
+      uncapped fill, a fill decided without volume, an order passed over an
+      unsourced size cap, a margin mark taken on a mechanism the rulebook
+      refuses to name at that date.
+    * :attr:`unexercised` -- a component this run **required** and never
+      invoked. The margin layer that was never called is not a zero; it is an
+      absence, and the two must not look alike.
+    * :attr:`exercised` -- the positive half of the same fact, and the one a
+      reader should check first: it says what actually ran.
+
+    **These do not move** :attr:`~IndeterminateReport.indeterminate`, and that
+    is deliberate rather than timid. That number is a share of
+    ``evaluations`` -- fill decisions and margin marks -- and none of the
+    three is an evaluation, so folding them in would make the published rate
+    mean nothing at all. Read :attr:`is_clean`, never ``indeterminate == 0``,
+    to ask whether a run was ignorant of anything.
+    """
+
+    silent_ignorance: Mapping[str, int] = field(default_factory=dict)
+    """Blind spots by :class:`Blindness` key. Not part of ``indeterminate``."""
+
+    exercised: Mapping[str, int] = field(default_factory=dict)
+    """:class:`Component` key -> how many times this run invoked it."""
+
+    unexercised: Tuple[str, ...] = ()
+    """Components this run required and never invoked, sorted."""
+
+    @property
+    def silent_total(self) -> int:
+        """Blind spots counted, summed over every key.
+
+        A count of ``(act, missing fact)`` pairs and **not** of acts: one fill
+        on a synthesised interval contributes five, one per absent field, plus
+        one for a cap that was not applied. So it is a magnitude to compare
+        against itself across runs, not a population with a denominator -- the
+        per-key breakdown in :attr:`silent_ignorance` is what a reader acts
+        on, and :attr:`is_clean` is the question they usually mean.
+        """
+        return sum(self.silent_ignorance.values())
+
+    @property
+    def is_clean(self) -> bool:
+        """True only when **nothing** in this run was undecided or unwitnessed.
+
+        The predicate ``indeterminate == 0`` is the one a reader reaches for
+        and it is the one that was wrong on every audited failure. This is the
+        honest form of the same question.
+        """
+        return (self.indeterminate == 0
+                and self.silent_total == 0
+                and not self.unexercised)
+
+    def blind_spots(self) -> Tuple[str, ...]:
+        """One human-readable line per blind spot, for a report to print."""
+        lines = [f'{key}: {count}'
+                 for key, count in sorted(self.silent_ignorance.items())]
+        lines += [f'{name}: required by this run and never invoked'
+                  for name in self.unexercised]
+        return tuple(lines)
+
+
+@dataclass(frozen=True)
+class RunProvenance(SessionProvenance):
+    """:class:`SessionProvenance` plus which parts of the session ran.
+
+    A provenance record says what a run was *configured* with. Configuration
+    is not execution: a session configured with an equity margin account whose
+    lending pass was never invoked has a provenance record that is entirely
+    true and entirely misleading. These two fields close that gap, so a stored
+    result can be read for wiring failures without re-running it.
+
+    Subclassed rather than added to ``SessionProvenance`` for the reason given
+    on :class:`RunIgnorance`; the same *orchestrator action* applies.
+    """
+
+    exercised: Tuple[str, ...] = ()
+    """:class:`Component` keys this run invoked at least once, sorted."""
+
+    unexercised: Tuple[str, ...] = ()
+    """Components this run required and never invoked, sorted."""
+
+    overnight_model: Optional[str] = None
+    """Which model computed the **overnight** layer, at the last close this
+    run reached: a ``MarginModel`` name, or
+    :data:`~plutus.market.session.overnight.PRE_KRX_CONTINUOUS`.
+
+    Separate from ``margin_model``, which is the *user-facing* one. The two
+    being one field is how a run reports a firm's intraday ladder and leaves
+    the reader to assume the CCP layer was the same model -- survey finding
+    F-1 says it is chosen per layer, and a record with one slot cannot say
+    so. ``None`` means the layer never ran."""
+
+    overnight_engine: Optional[str] = None
+    """The module that produced :attr:`overnight_model`'s number, by name."""
+
+    overnight_determinate: int = 0
+    """End-of-day requirements this run actually computed."""
+
+    overnight_indeterminate: int = 0
+    """End-of-day requirements it could not compute. A stored result can be
+    read for the layer's coverage without re-running it."""
+
+
 @runtime_checkable
 class IntervalSource(Protocol):
     """A data source that can serve a whole :class:`MarketInterval`.
@@ -318,11 +587,34 @@ class IntervalSource(Protocol):
     ``HardFillPolicy`` returns ``INDETERMINATE`` wherever it would otherwise
     fill, and ``session.indeterminate_report()`` is the number to publish --
     a bound on ignorance, not a defect.
+
+    **Absent, and unserveable, are different answers.** ``None`` means this
+    source has no bar for that window and the session may synthesise one. A
+    ``resolution`` the source cannot serve at all is not that: it is a
+    configuration the run cannot honour, and answering ``None`` would have the
+    session synthesise a bar that an uncapped ``soft`` would then fill on --
+    at the wrong resolution, silently. So a source **raises** ``ValueError``
+    for a resolution it cannot serve, and declares which ones it can in an
+    optional class attribute :attr:`SERVES_RESOLUTIONS`, which
+    :class:`ExchangeSession` reads at construction so the refusal lands before
+    the run rather than inside it.
+
+    ``SERVES_RESOLUTIONS`` is deliberately **not** a member of this protocol.
+    Adding one would make every existing source fail the ``isinstance`` below
+    and be silently downgraded to synthesised intervals -- a worse failure
+    than the one it would prevent. A source that does not declare it is not
+    checked, and is then responsible for not raising out of ``advance_to``.
     """
 
     def interval(self, ticker: str, start: datetime, end: datetime, *,
                  resolution: Resolution) -> Optional[MarketInterval]:
-        """The interval over ``[start, end)``, or ``None`` if absent."""
+        """The interval over ``[start, end)``, or ``None`` if absent.
+
+        Raises:
+            ValueError: on a ``resolution`` this source cannot serve. Not an
+                absence and not answerable with ``None`` -- see the class
+                docstring.
+        """
         ...
 
 
@@ -361,11 +653,26 @@ def parse_config(payload: Mapping[str, Any]) -> SessionConfig:
       rung (MBS, KIS, VPS) will build, and every filled field is then marked
       as ours by ``BrokerProfile.supplied_fields``.
 
+    **The ``fill_policy`` block is parsed by
+    :func:`~plutus.market.session.fills.parse_fill_policy_config`, not read
+    key by key here.** It used to be three ``.get`` calls, one of which
+    supplied ``'0.10'`` for an absent ``max_participation`` -- which is what
+    made every ``kind: soft`` run in this repository uncapped, since
+    ``fills.py`` had to read that same 0.10 as "nobody asked for a cap". An
+    absent key is now ``None`` and a written one is honoured, 0.10 included.
+    Routing through that function also means an **unknown** ``fill_policy``
+    key is refused rather than dropped: ``{kind: hard, participation: 0.10}``
+    -- a typo for a real key -- used to be an uncapped-by-typo run that
+    nothing could see. Unknown keys elsewhere in the payload are still
+    tolerated; the fill assumption is the one input a result cannot be read
+    without.
+
     Raises:
         KeyError: on a missing ``period`` or ``exchange_rules.venues``, rather
             than defaulting. A session that silently ran on an invented period
             or venue list would produce a result nobody can reproduce.
-        ValueError: on ``firm`` together with an explicit ladder level.
+        ValueError: on ``firm`` together with an explicit ladder level, and on
+            an unknown or unusable ``fill_policy`` key.
     """
     period = payload['period']
     rules_payload = payload.get('exchange_rules') or {}
@@ -388,12 +695,7 @@ def parse_config(payload: Mapping[str, Any]) -> SessionConfig:
         securities_account_no=str(securities.get('account_no', 'SEC-0001')),
         derivatives_account_no=str(derivatives.get('account_no', 'DER-0001')),
     )
-    fill_policy = FillPolicyConfig(
-        kind=str(fill_payload.get('kind', 'soft')),
-        max_participation=Decimal(
-            str(fill_payload.get('max_participation', '0.10'))),
-        seed=fill_payload.get('seed'),
-    )
+    fill_policy = parse_fill_policy_config(fill_payload)
     data = DataConfig(
         adapter=str(data_payload.get('adapter', '')),
         root=str(data_payload.get('root', '')),
@@ -555,7 +857,13 @@ class ExchangeSession:
         ``FORCED_LIQUIDATION`` event state. Passing one and having the session
         report a different rule is the failure
         :meth:`_liquidation_rule` exists to make impossible.
+
+        Raises:
+            ValueError: if ``source`` declares the resolutions it serves and
+                ``config.resolution`` is not one of them. See
+                :meth:`_refuse_unserveable_resolution`.
         """
+        self._refuse_unserveable_resolution(config, source)
         self._config = config
         self._source = source
         self._rulebook = rulebook
@@ -615,10 +923,90 @@ class ExchangeSession:
         #: session keeps this half and :meth:`charges` merges the two.
         self._deposit_charges: List[Charge] = []
 
+        #: Quantity filled per ticker **in the bar currently being evaluated**,
+        #: and the bar it belongs to. Session state rather than a local of
+        #: :meth:`_evaluate_fills`, and that is the whole of a repair.
+        #:
+        #: The participation cap aggregates across the caller's live orders so
+        #: that splitting one order into ten does not evade it. It has to
+        #: aggregate across ``advance_to`` calls for the same reason: every
+        #: source in this package serves a whole day's volume for any instant
+        #: inside the day, so a counter reset per advance let the same caller
+        #: claim 10% of the same 3,300 shares once per advance -- 1,800 of
+        #: them, 54.5% of the day, under a signature reading
+        #: ``hard(max_participation=0.10)``. Splitting the order and advancing
+        #: the clock are the same evasion; only the first was closed.
+        #:
+        #: **The bar is the trading date**, and that is a claim about the data
+        #: rather than about the config. ``_interval_for`` asks for
+        #: ``[ts, ts + one bar)``, but no source in this repository serves a
+        #: sub-daily volume for it: ``DataHubSource`` serves the day's row and
+        #: says so, ``PhasedBarSource`` serves the day's row even at
+        #: ``Resolution.TICK``, and ``TickSource`` implements no ``interval``
+        #: at all, so its intervals are synthesised with no volume and the cap
+        #: never computes. Whatever the resolution, the liquidity the cap is
+        #: taken from is one session's, and claiming a share of it twice in a
+        #: day is claiming the same shares twice.
+        #:
+        #: If a source ever serves genuinely disjoint sub-daily volumes, this
+        #: key is too coarse and will under-fill -- the restrictive direction,
+        #: and the one to err in. The fix then is to key on the served
+        #: interval's own window, which is only sound once a served window
+        #: means something, which today it does not.
+        self._filled_in_bar: Dict[str, int] = {}
+        self._filled_bar: Optional[date] = None
+
         self._evaluations = 0
         self._indeterminate = 0
         self._by_field: Dict[DataField, int] = {}
         self._by_rule: Dict[str, int] = {}
+
+        #: Blind spots, keyed by :class:`Blindness`. Counted separately from
+        #: ``_indeterminate`` because they are not evaluations -- see
+        #: :class:`RunIgnorance`.
+        self._silent: Dict[str, int] = {}
+        #: :class:`Component` value -> invocations. The positive record of
+        #: what this run actually ran.
+        self._exercised: Dict[str, int] = {}
+        #: Components this run **requires**. Seeded with the fill policy,
+        #: which every session claims to have, and grown by what the run does:
+        #: opening a futures position requires the deposit's margin layer, and
+        #: attaching a margin account requires its maintenance pass. Requiring
+        #: a component only once the run needs it is what keeps
+        #: ``unexercised`` a finding rather than a standing complaint about
+        #: every venue in the config.
+        self._needed: Set[str] = {Component.FILL_POLICY.value}
+        if equity_margin is not None:
+            self._needed.add(Component.EQUITY_MARGIN_ADVANCE.value)
+
+        #: The overnight requirement per calculation date, in the order the
+        #: run computed them. A list rather than one latest value because the
+        #: layer's whole content is how the requirement moved across the
+        #: window, and because a run that computed it once and then stopped
+        #: is a finding a scalar cannot show.
+        self._overnight: List[OvernightRequirement] = []
+        #: Dates the overnight layer has already answered for. The layer runs
+        #: once per session, *"sau khi ket thuc phien giao dich"* (QD 26 Dieu
+        #: 5.5), and a caller polling the clock four times after the close
+        #: must not get four requirements and four evaluations.
+        self._overnight_dates: Set[date] = set()
+
+    # -- the honesty instrument's two write paths -----------------------
+
+    def _exercise(self, component: Component) -> None:
+        """Record that this run actually invoked ``component``."""
+        key = component.value
+        self._exercised[key] = self._exercised.get(key, 0) + 1
+
+    def _needs(self, component: Component) -> None:
+        """Record that this run **requires** ``component`` to have run."""
+        self._needed.add(component.value)
+
+    def _blind(self, what: Blindness,
+               field_: Union[DataField, str, None] = None) -> None:
+        """Record one act taken without a fact the run needed."""
+        key = _blindness_key(what, field_)
+        self._silent[key] = self._silent.get(key, 0) + 1
 
     # -- construction ---------------------------------------------------
 
@@ -811,52 +1199,99 @@ class ExchangeSession:
                 f'breach-day counter and its cure clock would all start from a '
                 f'state that never existed')
         self._equity_margin = account
+        # A session holding a margin account is a session whose published
+        # provenance implies leverage was modelled. If the maintenance pass
+        # never runs, that implication is false and must be reported as such.
+        self._needs(Component.EQUITY_MARGIN_ADVANCE)
 
     @staticmethod
     def _check_margin_model(profile: BrokerProfile) -> None:
-        """Refuse a session whose profile selects a model we do not compute.
+        """Check that the model the profile's user-facing layer names is wired.
 
         The author's sixth axis, enforced. A profile carries **two** margin
         models -- the intraday continuously-updated one and the overnight CCP
         submission -- and ``user_facing_model`` names which of them the
-        client's ladder is tested against. Every model but one is
-        ``deposit.py``'s; ``MarginModel.SCENARIO_GRID`` is QD 26 Phu luc 2's
-        21-scenario grid, implemented in
-        :mod:`plutus.market.session.scenario_margin` and **not wired to this
-        session**.
+        client's ladder is tested against.
 
-        Refusing is the whole point. Running the grid-selecting profile on
-        ``IM + VM`` would produce a number, put it on the firm's ladder, and
-        report it under the firm's name -- a result that is wrong in the one
-        way a provenance record cannot catch, because the record would say the
-        run was configured correctly. ``scenario_margin.required_margin`` also
-        needs a ``VsdcParameterSet`` per underlying group that most profiles do
-        not publish (``BrokerProfile.parameters_for`` raises for TCBS, MBS, KIS
-        and VPS), so the refusal is not merely a missing call site.
+        **Both are now wired**, which is what changed here.
+        ``MarginModel.SCENARIO_GRID`` is QD 26 Phu luc 2's 21-scenario grid,
+        implemented in :mod:`plutus.market.session.scenario_margin` and
+        reached through :mod:`plutus.market.session.overnight` from
+        :meth:`_overnight_margin`; everything else is ``deposit.py``'s.
+        This method used to raise ``NotImplementedError`` for the grid, and
+        the refusal was correct for as long as the engine had no call site --
+        running the grid-selecting profile on ``IM + VM`` would have put our
+        number on the firm's ladder and reported it under the firm's name.
+
+        What replaces the refusal is **not** a silent acceptance. The grid
+        needs a ``VsdcParameterSet`` most profiles do not publish
+        (``BrokerProfile.parameters_for`` raises for TCBS, MBS, KIS and VPS),
+        and where it is missing the layer answers INDETERMINATE with the
+        missing input named -- see :meth:`_overnight_margin`. A refusal at
+        build time would have been the *wrong* place for that: whether the
+        parameters are there is a fact about the run's dates and the account's
+        underlyings, not about the config.
 
         ``MarginModel.UNSTATED`` -- SSI, Pinetree, TCBS's intraday numerator --
-        is **not** refused. Those firms publish a real ladder and no formula,
-        so the levels are theirs and the divisor is ours; the session runs and
-        ``SessionProvenance.margin_model_is_assumed`` says so.
+        is not refused either. Those firms publish a real ladder and no
+        formula, so the levels are theirs and the divisor is ours; the session
+        runs and ``SessionProvenance.margin_model_is_assumed`` says so.
+
+        **What is still refused, and it is a narrower thing than before**: a
+        profile whose ``user_facing_model`` is ``OVERNIGHT``. The overnight
+        number is computed for every profile and reported by
+        :meth:`overnight_margin`, but the utilisation *ladder* cannot be run
+        on it, because ``MarginView`` has no field for a requirement it did
+        not decompose -- ``required`` is the property ``initial_margin +
+        variation_margin``, and the grid produces neither of those terms (QD
+        26 Dieu 20 settles position P&L as a separate cash movement and Phu
+        luc 2 section 6.2 has no ``VM`` term at all). The only way to put the
+        grid's number on the ladder today would be to write it into
+        ``initial_margin`` and zero ``variation_margin``, which would report
+        a decomposition that did not happen and would corrupt
+        ``free_deposit`` and ``posted_margin`` with it. Refusing beats
+        fabricating. *Orchestrator action:* ``MarginView`` needs to carry a
+        requirement and its layer, at which point this refusal goes.
+
+        No shipped profile is in that position -- all twelve name
+        ``INTRADAY`` -- so nothing this repository ships is refused here.
 
         Raises:
-            NotImplementedError: naming the profile, the layer, the model and
-                the module that would have to be wired.
+            NotImplementedError: for an ``OVERNIGHT``-facing profile, and for
+                a model whose engine is neither of the two this session can
+                reach. The second has no instance today; the check is kept so
+                that a *new* ``MarginModel`` member cannot be added upstream
+                and silently margined on the wrong engine.
         """
         margin_profile = getattr(profile, 'margin_profile', None)
         if margin_profile is None:
             return
         model = margin_profile.margin_model
-        if model.engine in (None, 'plutus.market.session.deposit'):
+        layer = margin_profile.user_facing_model
+        if layer.name == 'OVERNIGHT':
+            raise NotImplementedError(
+                f'{margin_profile.firm} declares its user-facing margin '
+                f'number to be the OVERNIGHT layer. This session computes '
+                f'that layer -- see ExchangeSession.overnight_margin() -- but '
+                f'cannot run the utilisation ladder on it: MarginView.required '
+                f'is initial_margin + variation_margin, and QD 26 Phu luc 2 '
+                f'produces neither term. Grading {margin_profile.firm}\'s '
+                f'client on the intraday number while reporting the firm\'s '
+                f'name is the failure a provenance record cannot catch.')
+        if model.engine in (None,
+                            'plutus.market.session.deposit',
+                            'plutus.market.session.scenario_margin'):
             return
         raise NotImplementedError(
             f'{margin_profile.firm} declares its user-facing margin number to '
             f'be the {margin_profile.user_facing_model.name} layer, whose '
             f'model is {model.name}. That model is computed by '
             f'{model.engine}, which is not wired into ExchangeSession: this '
-            f'session computes only deposit.py\'s MR = IM + VM. Running it '
-            f'anyway would put our number on {margin_profile.firm}\'s ladder '
-            f'and report it under {margin_profile.firm}\'s name.')
+            f'session reaches deposit.py for the intraday layer and '
+            f'scenario_margin.py for the overnight one, and nothing else. '
+            f'Running it anyway would put our number on '
+            f'{margin_profile.firm}\'s ladder and report it under '
+            f'{margin_profile.firm}\'s name.')
 
     @staticmethod
     def _settlement_calendar(data: DataConfig,
@@ -938,7 +1373,13 @@ class ExchangeSession:
         6. ``cash.accrue_interest(now)``
         7. the derivatives mark -> ``MarginWarning`` / ``MarginCall`` /
            ``ForcedLiquidation``; expiries -> ``ExpirySettled``
+        7c. at or after the derivatives close, once per day, the **overnight**
+           requirement -> :meth:`overnight_margin`
         8. drain the cursor and return
+
+        **Step 7c runs after step 7**, and the order is load-bearing: a
+        contract that cash-settled today is not carried past tonight's close,
+        so the end-of-day book has to be the post-expiry one.
 
         **Step 1 runs before step 2**, or an order that died at the cross can
         still fill in the phase that killed it.
@@ -981,6 +1422,7 @@ class ExchangeSession:
         self._settle(ts)
         self._securities.cash_ledger.accrue_interest(ts)
         self._mark_derivatives(ts)
+        self._overnight_margin(ts)
         self._run_equity_margin(ts)
         return self.poll()
 
@@ -1002,6 +1444,7 @@ class ExchangeSession:
         """
         if self._equity_margin is None:
             return
+        self._exercise(Component.EQUITY_MARGIN_ADVANCE)
         for event in self._equity_margin.on_advance(self, ts, self._next_seq):
             self._emit(event)
 
@@ -1082,6 +1525,7 @@ class ExchangeSession:
 
         adm = self._venue_at(order.ticker, ts, tick).admits(
             order, state, instrument=instrument, regime_tag=regime_tag)
+        self._exercise(Component.ADMISSION)
         if adm.verdict is not Verdict.ADMITTED:
             return self._reject(order, venue, order_id,
                                 Rejected.from_admissibility(adm, order_id))
@@ -1392,11 +1836,20 @@ class ExchangeSession:
         *is* named, ``margin_model_is_assumed`` is the honest half of the
         record -- five of the shipped profiles publish a ladder and no formula,
         and a result from one of those is our divisor under their levels.
+
+        **``exercised`` and ``unexercised`` are the difference between what a
+        run was configured with and what it ran.** Everything above this
+        paragraph is configuration, and configuration is not execution: a
+        record naming a margin model, a fill policy and a liquidation rule is
+        entirely true of a session in which none of the three was ever
+        invoked. That is not hypothetical -- it is what the fidelity audit
+        found -- so the record carries the wiring as well, and a stored result
+        can be checked for it without re-running. See :class:`Component`.
         """
         profile = self._config.broker_profile
         margin_profile = getattr(profile, 'margin_profile', None)
         model = None if margin_profile is None else margin_profile.margin_model
-        return SessionProvenance(
+        return RunProvenance(
             rulebook_id=self._config.exchange_rules.rulebook,
             resolution=self._config.resolution,
             period_start=self._config.period_start,
@@ -1416,7 +1869,27 @@ class ExchangeSession:
             margin_model_is_assumed=(model is not None and model.engine is None),
             block_opening_utilisation=getattr(
                 profile, 'block_opening_utilisation', None),
+            exercised=tuple(sorted(self._exercised)),
+            unexercised=self._unexercised(),
+            overnight_model=(self._overnight[-1].model
+                             if self._overnight else None),
+            overnight_engine=(self._overnight[-1].engine
+                              if self._overnight else None),
+            overnight_determinate=sum(1 for r in self._overnight
+                                      if r.is_determinate),
+            overnight_indeterminate=sum(1 for r in self._overnight
+                                        if not r.is_determinate),
         )
+
+    def _unexercised(self) -> Tuple[str, ...]:
+        """Components this run required and never invoked, sorted.
+
+        One reader, used by :meth:`provenance` and :meth:`indeterminate_report`
+        alike, for the reason :meth:`_liquidation_rule` is one: the record and
+        the meter must not be able to disagree about the same fact.
+        """
+        return tuple(sorted(name for name in self._needed
+                            if not self._exercised.get(name)))
 
     def _liquidation_rule(self) -> LiquidationRule:
         """The selection rule this session's forced closes are reported under.
@@ -1432,24 +1905,91 @@ class ExchangeSession:
         return getattr(self._monitor, 'liquidation',
                        LiquidationRule.LARGEST_LOSS_FIRST)
 
-    def indeterminate_report(self) -> IndeterminateReport:
-        """How much of the run the data could not decide.
+    def indeterminate_report(self) -> RunIgnorance:
+        """How much of the run rested on something the run did not have.
 
         Design section 9.2 requires the session to report this rate, and
         section 8 makes it the honest headline: **a bound on ignorance, not a
-        fill rate.**
+        fill rate.** This docstring states the bound's *scope*, because a
+        meter whose scope is undocumented invites the mistake it was built to
+        prevent -- and did: ``indeterminate`` answered **zero** on every
+        failure an independent fidelity audit found.
 
-        ``by_field`` counts fill evaluations the policy could not decide,
-        named by the field that was missing. ``by_rule`` counts submissions
-        the rulebook or the exchange could not judge, named by the rule. They
-        are different populations over different denominators and are
-        deliberately not summed -- ``evaluations`` counts only the first.
+        What each field counts
+        ----------------------
+        ``evaluations``
+            Questions this session put to the data and had to answer before it
+            could act: one per live order per :meth:`advance_to` that reached
+            the fill policy, **plus** one per derivatives mark, one per
+            expiry settlement it could not price, and one per **overnight**
+            requirement (:meth:`_overnight_margin`, once per session after the
+            close). Four populations in one denominator, so the rate moves
+            with how often the caller samples the clock -- a known defect of
+            the figure, recorded here rather than in a comment.
+        ``indeterminate``
+            The subset of those the data could not decide: a fill policy
+            answering ``INDETERMINATE``, a mark with a stale contract, an
+            expiry with no settlement price, an overnight requirement whose
+            parameters were not available. The last of those is **never** a
+            silent fall back to the intraday number -- that substitution is
+            the direction that costs a user money, and
+            ``margin.overnight.uncomputed.<gap>`` names the input that was
+            missing.
+        ``by_field``
+            The :class:`DataField` named **on an ``INDETERMINATE``** -- a
+            decision *not* taken. Never a decision taken anyway.
+        ``by_rule``
+            ``INDETERMINATE`` **rejections** at ``submit()``, by admission
+            rule. A different population over a different denominator, and
+            deliberately not summed into the two above.
+
+        What those four structurally cannot see
+        ---------------------------------------
+        Each of these was a real, measured zero, and each now has a counter:
+
+        1. **A decision taken without the data.** ``by_field`` is written only
+           on an ``INDETERMINATE``, so a full-size ``soft`` fill on a bar with
+           no volume, no high and no low counted nothing at all. Now
+           ``silent_ignorance['fill.decided_without.volume']`` and its
+           siblings -- see :meth:`_audit_fill`.
+        2. **A configuration the running policy could not honour.** Every
+           config states a participation cap and not every policy carries
+           one. An uncapped fill under a config naming 10% is now
+           ``'participation_cap.not_applied'``; a cap carried but not
+           computable, and a cap computed and exceeded, are kept apart from it
+           because the remedies differ -- see :meth:`_audit_fill`.
+        3. **A rule passed over rather than tested.** An unsourced per-order
+           size cap refuses nothing (:meth:`_size_here`) and an unsourced
+           margin mechanism marks on ``IM + VM`` anyway
+           (:meth:`_mark_derivatives`). Both are now counted.
+        4. **An order never evaluated at all.** No bar, or no venue at that
+           instant, and the loop simply skipped it -- indistinguishable in
+           every published number from an order the market never reached.
+        5. **A component that never ran.** The general case, and the reason
+           for :class:`Component`: a margin layer returning 0 because nothing
+           called it looked exactly like one that computed 0. Now
+           :attr:`RunIgnorance.unexercised`. The instance that named the
+           class was the overnight layer -- ``scenario_margin.py``, 1,069
+           executable lines with **zero call sites** -- and it is now
+           :attr:`Component.OVERNIGHT_MARGIN`, exercised or listed.
+
+        What is *still* outside the bound, and would need work elsewhere:
+        rules resolved correctly but from a LOW-confidence rulebook row (the
+        rulebook's own citations carry that, not this record); a component
+        invoked with wrong arguments (this counts invocations, not
+        correctness); and the sampling artefact in ``evaluations`` noted
+        above.
+
+        Read :attr:`RunIgnorance.is_clean`, never ``indeterminate == 0``.
         """
-        return IndeterminateReport(
+        return RunIgnorance(
             evaluations=self._evaluations,
             indeterminate=self._indeterminate,
             by_field=dict(self._by_field),
             by_rule=dict(self._by_rule),
+            silent_ignorance=dict(self._silent),
+            exercised=dict(self._exercised),
+            unexercised=self._unexercised(),
         )
 
     def instrument(self, ticker: str,
@@ -1594,6 +2134,7 @@ class ExchangeSession:
         of record means this check was skipped, which is a bug in the caller
         and not an event in the market.
         """
+        self._exercise(Component.LEGAL_ORDER_TYPES)
         try:
             legal = rules.legal_order_types(venue, phase)
         except UnresolvedRule as exc:
@@ -1644,13 +2185,20 @@ class ExchangeSession:
         order in 2020 is admitted here and may well have been refused by HOSE.
         The declared alternative -- refusing on an unsourced ceiling -- is
         worse, and the gap is visible in the rulebook rather than hidden here.
+        **It is now visible in the run too**: an order passed over a cap the
+        rulebook could not resolve is counted under
+        ``Blindness.ORDER_SIZE_UNSOURCED``, so a run on HNX or UPCoM reports
+        how many orders it admitted without ever testing this rule instead of
+        reading as a run in which the rule was tested and bound nothing.
 
         Odd lots do not reach this rule: their 99-unit cap is the odd-lot
         definition itself, and ``admits()``'s ``ROUND_LOT`` rule refuses a
         non-multiple of the trading unit before any of it applies.
         """
+        self._exercise(Component.MAX_ORDER_SIZE)
         resolution = rules.resolve(RuleName.MAX_ORDER_SIZE, venue)
         if not resolution.is_known:
+            self._blind(Blindness.ORDER_SIZE_UNSOURCED)
             return None
         cap = resolution.value
         if order.quantity <= cap:
@@ -1716,6 +2264,7 @@ class ExchangeSession:
             return None
         kind = (instrument.kind if instrument is not None
                 else InstrumentKind.STOCK)
+        self._exercise(Component.TICK_SIZE)
         try:
             return rules.tick_size(venue, kind, price, ticker=order.ticker)
         except UnresolvedRule as exc:
@@ -1791,6 +2340,61 @@ class ExchangeSession:
                            band_source=BandSource.ABSENT,
                            session=SessionPhase.UNKNOWN)
 
+    @staticmethod
+    def _refuse_unserveable_resolution(
+        config: SessionConfig,
+        source: Optional[MarketDataSource],
+    ) -> None:
+        """Refuse a resolution the source has declared it cannot serve.
+
+        **At construction, and that is the whole point.** ``resolution: tick``
+        with the shipped ``DataHubSource`` used to build a session, accept
+        orders, encumber the cash behind them, and then raise ``ValueError``
+        out of the first :meth:`advance_to` that had a live order --
+        :meth:`_interval_for` calls ``source.interval(...,
+        resolution=self._config.resolution)`` and catches nothing, and that
+        adapter raises for anything but ``DAILY``. A run that dies mid-flight
+        with state already moved is the one outcome that is wrong here; the
+        two defensible ones are a source that answers and a configuration that
+        is refused, and this is the second delivered before it costs anything.
+
+        The adapter's refusal is **not** the defect and is not softened. An
+        unserveable resolution is not an absence: answering ``None`` would
+        have the session synthesise a bar with the OHLC and volume fields
+        named missing, on which ``hard`` and ``probabilistic`` would return
+        ``INDETERMINATE`` -- but an uncapped ``soft`` would *fill*, at the
+        daily close, in a session the caller asked to run at tick resolution.
+        A silent fill at the wrong resolution is the permissive direction and
+        the one this package may not err in. See ``IntervalSource``.
+
+        **A source that declares nothing is not checked.**
+        ``SERVES_RESOLUTIONS`` is an optional class attribute, read with
+        ``getattr``, and not a member of the ``IntervalSource`` protocol:
+        adding one there would fail the ``isinstance`` in
+        :meth:`_interval_for` for every source that lacks it and silently
+        downgrade it to synthesised intervals, which is a worse failure than
+        the one being fixed. So this is a check that catches the shipped
+        adapter and any source that opts in, and is stated as exactly that
+        rather than as a guarantee it cannot make.
+
+        Raises:
+            ValueError: naming the configured resolution, what the source
+                serves, and the adapter to use instead.
+        """
+        declared = getattr(source, 'SERVES_RESOLUTIONS', None)
+        if declared is None or config.resolution in declared:
+            return
+        served = ', '.join(sorted(r.value for r in declared)) or '(none)'
+        raise ValueError(
+            f'{type(source).__name__} cannot serve resolution '
+            f'{config.resolution.value!r}; it serves {served}. A session '
+            f'configured this way would build, accept orders and encumber '
+            f'cash for them, and then fail on the first advance with a live '
+            f'order, so it is refused here instead. Set resolution to one it '
+            f'serves, or use an adapter that serves this one -- '
+            f'plutus.market.adapters.tick.TickSource for Resolution.TICK'
+        )
+
     def _interval_for(self, ticker: str, ts: datetime,
                       state: MarketState) -> MarketInterval:
         """The interval a fill policy evaluates, with absences **named**.
@@ -1810,6 +2414,23 @@ class ExchangeSession:
         evaluated against the whole day, an over-generosity that is a declared
         consequence of the resolution and not something a fill policy may
         silently correct.
+
+        **The served ``resolution`` is the session's, and a source that cannot
+        serve it raises.** That is not caught here, deliberately: the
+        configuration is refused at construction by
+        :meth:`_refuse_unserveable_resolution` for any source that declares
+        what it serves, so a raise reaching this line means a source that
+        declared nothing and cannot honour the contract. Swallowing it would
+        substitute a synthesised bar for an answer the source has just said it
+        does not have, which for an uncapped ``soft`` is a silent fill at the
+        wrong resolution.
+
+        What is served is **not** re-checked against the request. A source may
+        answer a tick request with a day's bar -- ``PhasedBarSource`` does,
+        and says so -- and that is the source's declared assumption to make,
+        not something this method may overrule. It does bear on the
+        participation cap, which is why :attr:`_filled_in_bar` is keyed on the
+        trading date rather than on the requested window.
         """
         span = timedelta(days=1) if self._daily else timedelta(seconds=1)
         source = self._source
@@ -1883,6 +2504,7 @@ class ExchangeSession:
                                   'agreement: with no account there is no '
                                   'contract and no lending to discuss',
                         'article': 'TT 120 Dieu 9.1'})
+        self._exercise(Component.EQUITY_MARGIN_GATE)
         return self._equity_margin.gate(self, order, order_id, state, ts)
 
     # -- reservation ----------------------------------------------------
@@ -1918,6 +2540,14 @@ class ExchangeSession:
                                       'margined at the current mark and none '
                                       'has been observed',
                             'order_type': order.order_type.value})
+            self._exercise(Component.DERIVATIVES_FUNDING)
+            # A run that margins an order at entry requires the layer that
+            # marks it afterwards. Declared here rather than from the config's
+            # venue list, so a session merely *configured* for HNXDS that
+            # never trades a contract is not reported as missing a layer it
+            # never needed.
+            self._needs(Component.DERIVATIVES_MARK)
+            self._needs(Component.DERIVATIVES_LADDER)
             try:
                 return self._derivatives.reserve_for_order(
                     order_id, order, price, rules,
@@ -1941,9 +2571,11 @@ class ExchangeSession:
         cls_ = charge_class_for(instrument.kind if instrument is not None
                                 else InstrumentKind.STOCK)
         if order.side is Side.BUY:
+            self._exercise(Component.SECURITIES_FUNDING)
             return self._securities.reserve_for_buy(
                 order_id, order, venue, state, rules, ts, cls_=cls_)
         if order.side is Side.SELL:
+            self._exercise(Component.SECURITIES_FUNDING)
             return self._securities.reserve_for_sell(order_id, order, venue, ts)
         raise ValueError(
             f'{order.side} is a negotiated put-through, not order matching; '
@@ -2158,8 +2790,16 @@ class ExchangeSession:
         Orders are evaluated in the sequence the exchange received them, which
         is Vietnam's second priority level and the only one Tier 1 can honour
         -- there is no queue-position matching, by design.
-        ``already_filled`` is aggregated **per instrument**, so splitting one
-        order into ten does not evade a participation cap.
+
+        ``already_filled`` is aggregated **per instrument and per bar**, and
+        both halves are needed for the same reason. Per instrument, so
+        splitting one order into ten does not evade a participation cap; per
+        bar, so *advancing the clock* does not either. The counter lives on
+        the session (:attr:`_filled_in_bar`) rather than in this method, and
+        resets when the bar does. It was a local, and while the cap was
+        unreachable -- no volume, no cap, ``INDETERMINATE`` -- that cost
+        nothing; once the corpus adapter served volume it meant N advances
+        inside one day recomputed the cap from the full day's volume N times.
 
         Returns the ids the policy answered **definitely** for -- ``FILL`` or
         ``NO_FILL``. An order the data could not reach, or could not decide,
@@ -2169,7 +2809,11 @@ class ExchangeSession:
         market rule, and killing one on an ``INDETERMINATE`` would assert the
         very thing the policy just said it could not establish. Those orders
         are caught instead by :meth:`_sweep_non_resting` at the day's close,
-        which bounds the leak without inventing the fact.
+        which bounds the leak without inventing the fact. **Both skips are
+        counted** -- ``Blindness.NO_BAR`` and ``Blindness.UNROUTED`` -- because
+        an order nobody could evaluate and an order nobody evaluated end in
+        the identical expiry row, and until they were counted the second was
+        invisible in every number this session publishes.
 
         **The venue object handed to the policy is dated too.** ``FillPolicy``
         is an extension point and the contract says a policy "may consult it
@@ -2181,12 +2825,18 @@ class ExchangeSession:
         policy's price is the market's, not the order's, so the grid cannot be
         pre-resolved here the way admission's can.
         """
-        filled_by_ticker: Dict[str, int] = {}
+        if self._filled_bar != ts.date():
+            # A new bar is new liquidity, and gets its own allowance. Cleared
+            # rather than accumulated: a cap that never reset would be a
+            # lifetime quota, which is restrictive past the point of honesty.
+            self._filled_in_bar = {}
+            self._filled_bar = ts.date()
         decided: Set[OrderId] = set()
         for record in self._book.live():
             ticker = record.order.ticker
             state = self._observe(ticker, ts)
             if state is None:
+                self._blind(Blindness.NO_BAR)
                 continue
             phase = self._phase(record.venue, observed=state.session)
             interval = self._interval_for(ticker, ts,
@@ -2206,12 +2856,15 @@ class ExchangeSession:
                 # frozen-venue assumption shape 1 forbids. Treated like an
                 # unreachable bar above: undecided here, bounded at the close
                 # by :meth:`_sweep_non_resting`.
+                self._blind(Blindness.UNROUTED)
                 continue
+            already = self._filled_in_bar.get(ticker, 0)
             decision = self._policy.evaluate(
                 record, interval, judge,
-                already_filled=filled_by_ticker.get(ticker, 0),
+                already_filled=already,
                 instrument=instrument)
             self._evaluations += 1
+            self._exercise(Component.FILL_POLICY)
 
             if decision.outcome is FillOutcome.INDETERMINATE:
                 self._indeterminate += 1
@@ -2223,10 +2876,80 @@ class ExchangeSession:
             decided.add(record.order_id)
             if decision.outcome is FillOutcome.NO_FILL:
                 continue
+            self._audit_fill(decision, interval, already)
             self._apply_fill(record, decision, ts, instrument)
-            filled_by_ticker[ticker] = (filled_by_ticker.get(ticker, 0)
-                                        + decision.quantity)
+            self._filled_in_bar[ticker] = already + decision.quantity
         return frozenset(decided)
+
+    def _audit_fill(self, decision: FillDecision, interval: MarketInterval,
+                    already_filled: int) -> None:
+        """Count what a **definite fill** rested on that the data did not have.
+
+        The two classes the fidelity audit found, and neither of them was an
+        ``INDETERMINATE``, so neither reached any published number:
+
+        **A fill decided while a contract field was absent.** ``by_field``
+        counts fields named on an ``INDETERMINATE`` -- a decision *not* taken.
+        The opposite case is the dangerous one: a decision taken anyway, with
+        the field missing. Every such field is counted under
+        ``Blindness.DECIDED_WITHOUT``. This is deliberately a **superset**: a
+        field absent from the interval that produced a fill is not proof the
+        fill depended on it, and the bound is drawn wide because the direction
+        of error matters -- a fill this simulator books that the real market
+        would not have printed costs a user money in production.
+
+        **A NO_FILL is not audited**, for the same reason. A refusal decided
+        without OHLC is the restrictive direction: it costs an opportunity,
+        never a position, and counting it would bury the fills under noise.
+
+        **A cap the run did not apply.** A config may name a cap that the
+        policy actually running does not carry: ``ExchangeSession.build``
+        takes a constructed ``fill_policy`` that overrides the config, and an
+        uncapped ``soft`` or any third-party policy has no
+        ``max_participation`` at all. A run whose config names 10% and whose
+        policy applies none produced *uncapped* fills, which is exactly the
+        audit's finding, and it now says so. A config that names no cap and a
+        policy that carries none agree, and there is nothing to report.
+
+        **A cap the policy carries and did not honour.** Audited whatever the
+        config says, and that is a repair: this whole block used to return
+        early unless the *config* named a cap, so a constructed policy handed
+        to ``build()`` under a config with no ``fill_policy`` cap was never
+        checked against its own bound. Volume absent means the cap could not
+        be computed and was not honoured; a quantity past ``cap x volume``
+        means it was computed and exceeded.
+
+        The exceeded branch is **arithmetically unreachable for the shipped
+        policies**, and is meant to be: they size to
+        ``floor(cap x volume) - already_filled``, so ``already + quantity``
+        cannot pass ``cap x volume``. It exists for a policy this package did
+        not write -- ``FillPolicy`` is an advertised extension point -- and
+        until the fill counter was carried across advances it could not catch
+        one of those either, because ``already_filled`` restarted at zero
+        every advance. Now a policy that ignores ``already_filled`` is caught
+        on its second advance into the same bar.
+
+        Counting and not refusing, throughout. The session audits a component
+        it does not own, which is the only place the check can live -- a
+        policy that got its own cap wrong cannot be the witness to that fact
+        -- but overruling a caller's policy would substitute one assumption
+        for another, which this package does nowhere.
+        """
+        if not decision.filled:
+            return
+        for field_ in sorted(interval.missing, key=lambda f: f.value):
+            self._blind(Blindness.DECIDED_WITHOUT, field_)
+
+        cap = getattr(self._policy, 'max_participation', None)
+        if cap is None:
+            if self._config.fill_policy.max_participation is not None:
+                self._blind(Blindness.CAP_NOT_APPLIED)
+            return
+        if interval.volume is None:
+            self._blind(Blindness.CAP_UNCOMPUTABLE)
+            return
+        if already_filled + decision.quantity > cap * interval.volume:
+            self._blind(Blindness.CAP_EXCEEDED)
 
     def _apply_fill(self, record: OrderRecord, decision: FillDecision,
                     ts: datetime,
@@ -2703,20 +3426,48 @@ class ExchangeSession:
         :attr:`DataField.SETTLEMENT_PRICE` so
         :meth:`indeterminate_report` publishes the blind sessions rather than
         letting them read as quiet ones.
+
+        **The rulebook is now ASKED which margin mechanism the date is
+        under.** ``RuleSet.margin_model`` had no caller anywhere in ``src/``
+        and raises from the KRX cutover, where the post-trade COMS calculation
+        is unsourced -- so a 2026 position was margined ``IM + VM`` on the
+        pre-KRX shape, the run completed, and the ignorance meter read zero.
+        The mark still runs, because refusing to margin an open position is
+        not a safer answer than margining it on last year's mechanism, but the
+        run now records ``Blindness.MARGIN_MODEL_UNSOURCED`` once per mark it
+        took without a sourced mechanism, and ``Component.MARGIN_MODEL``
+        appears in ``exercised`` when the rulebook could answer. That converts
+        a rule with no caller into a rule with a counted one. *What this does
+        not do* is compute the KRX model: no source states it, and the layer
+        that would -- ``scenario_margin`` -- is refused at build rather than
+        silently substituted (see :meth:`_check_margin_model`).
         """
         positions = self._derivatives.positions()
         resting = self._live_derivative_orders()
         if not positions and not resting:
             return
+        # Declared before the work, not after it: a run holding an open
+        # contract requires this layer whether or not the layer then
+        # completes, and a requirement recorded only on success could never
+        # report the failure it exists to report.
+        self._needs(Component.DERIVATIVES_MARK)
+        self._needs(Component.DERIVATIVES_LADDER)
         marks = self._marks()
         if marks:
             self._derivatives.observe_marks(marks, ts)
 
         rules = self._rulebook.at(ts)
+        try:
+            rules.margin_model()
+        except UnresolvedRule:
+            self._blind(Blindness.MARGIN_MODEL_UNSOURCED)
+        else:
+            self._exercise(Component.MARGIN_MODEL)
         terms = self._config.broker_profile.terms
         view = self._derivatives.margin(marks, rules, terms, ts,
                                         resting=resting)
         self._evaluations += 1
+        self._exercise(Component.DERIVATIVES_MARK)
         if view.stale_marks:
             self._indeterminate += 1
             for _ in view.stale_marks:
@@ -2727,6 +3478,7 @@ class ExchangeSession:
         # in place when the account comes back, so afterwards there is no way
         # to tell a clearance from an ordinary quiet mark.
         call_before = self._monitor.outstanding_call
+        self._exercise(Component.DERIVATIVES_LADDER)
         for news in self._monitor.on_mark(self._derivatives, view, rules, ts):
             # A call that was outstanding and is now answered gets its own
             # row, whether the account came back to WARNING or all the way to
@@ -2801,6 +3553,216 @@ class ExchangeSession:
                 price_basis=basis,
                 charges=tuple(c.kind for c in charges),
                 charges_total=total))
+
+    # -- the overnight layer --------------------------------------------
+
+    def _derivatives_venues(self) -> Tuple[Venue, ...]:
+        """The configured venues whose orders draw on the deposit."""
+        return tuple(v for v in self._venues
+                     if pool_for_venue(v) is Pool.DERIVATIVES)
+
+    def _overnight_model(self, ts: datetime) -> str:
+        """Which model computes the requirement carried past *this* close.
+
+        Two questions in order, and they are different questions.
+
+        **The regime, from the dated rulebook.** ``RuleName.MARGIN_MODEL``
+        records ``'pre_margin'`` to 2025-05-04 at HIGH confidence: margin
+        lodged with VSDC before an order could be placed and recomputed
+        against live prices in-session. That regime has **no separate
+        end-of-day model**, so the overnight requirement in it is the
+        continuous one on the positions still held at the close. Running QD
+        26's 21-scenario grid on a 2022 account would report a number under a
+        regulation that did not exist, which is precisely the date-blindness
+        the rulebook exists to prevent -- so the regime is asked first and it
+        can veto the profile.
+
+        **The firm, from the broker profile**, once the rulebook has stopped
+        answering. ``margin_model_overnight`` is the firm's own statement
+        about the CCP layer, and it is a different field from
+        ``margin_model_intraday`` because the evidence is different: all ten
+        firms that state a client-ladder formula state ``IM + VM + DM``, and
+        the four that publish scenario-grid material label it as the
+        end-of-day submission (survey finding F-1).
+
+        A session with no margin profile has no firm to ask, so past the
+        cutover it gets ``UNSTATED`` -- which is INDETERMINATE, not
+        ``IM + VM`` by default.
+        """
+        rules = self._rulebook.at(ts)
+        try:
+            rules.margin_model()
+        except UnresolvedRule:
+            pass
+        else:
+            return PRE_KRX_CONTINUOUS
+        margin_profile = getattr(self._config.broker_profile,
+                                 'margin_profile', None)
+        if margin_profile is None:
+            return UNSTATED_MODEL
+        return margin_profile.margin_model_overnight.name
+
+    def _overnight_margin(self, ts: datetime) -> None:
+        """Step 7c: the requirement the account carries past the close.
+
+        **This is the layer the fidelity audit found missing.**
+        ``scenario_margin.py`` -- 1,069 executable lines implementing QD 26
+        Phu luc 2, unit-tested and checked against TCBS's own published
+        worked example -- had **zero call sites** anywhere in ``src/`` or
+        ``validation/``, and every derivatives run nevertheless reported a
+        complete margin history and ``indeterminate=0``. A margin layer that
+        is never invoked returns nothing, and nothing is indistinguishable
+        from a correct zero in every number this package used to publish.
+        :attr:`Component.OVERNIGHT_MARGIN` is what makes the two different.
+
+        **Once per session, after the close.** QD 26 Dieu 5.5 computes ``MR``
+        *"sau khi ket thuc phien giao dich"* for the position portfolio on
+        each investor account, so this runs on the first advance at or after
+        the derivatives venue's own session end and not again that day. A
+        day with no session -- the calendar refusing, a holiday -- gets no
+        requirement and is **not** counted as ignorance: there was no close
+        to carry a position past.
+
+        **The intraday number is never substituted.** Where the overnight
+        layer cannot be computed the answer is ``amount is None``, one
+        ``indeterminate`` against one ``evaluations``, and a
+        ``margin.overnight.uncomputed.<gap>`` key naming the missing input.
+        Substituting ``IM + VM`` would be wrong in the direction that costs a
+        user money: the grid stresses a book at the initial-margin move in
+        both directions and adds a basis charge on a calendar spread, so on
+        the books it is strictest about it is the larger number, and a
+        backtest quietly given the smaller one holds positions the real
+        account would have been called on.
+
+        **This reports; it does not grade.** ``user_facing_model`` names which
+        layer the client's ladder is tested against and all twelve shipped
+        profiles say ``INTRADAY``, so the ladder stays exactly where it was
+        and the accounting half of the simulator is untouched by this method.
+        An ``OVERNIGHT``-facing profile is refused at build rather than
+        graded on the wrong layer -- see :meth:`_check_margin_model` for the
+        ``MarginView`` shape that stops it.
+        """
+        venues = self._derivatives_venues()
+        if not venues:
+            return
+        if ts.date() in self._overnight_dates:
+            return
+        closes = [self._session_close(ts, v) for v in venues]
+        ends = [c for c in closes if c is not None]
+        if not ends or ts < min(ends):
+            return
+        self._overnight_dates.add(ts.date())
+
+        positions = self._derivatives.positions()
+        # A run that never opened a derivatives position does not need this
+        # layer, and declaring it needed anyway would put a line in
+        # ``unexercised`` on every equity run -- the standing complaint that
+        # trains a reader to ignore the field.
+        if not positions and not self._overnight:
+            return
+        self._needs(Component.OVERNIGHT_MARGIN)
+
+        model = self._overnight_model(ts)
+        margin_profile = getattr(self._config.broker_profile,
+                                 'margin_profile', None)
+        parameters = getattr(margin_profile, 'vsdc_parameters', None)
+        factor = getattr(margin_profile, 'minimum_margin_factor', None)
+
+        # The continuous engine's view of the same instant. Computed on every
+        # path, not only the one that returns it -- the grid needs the view's
+        # ``VM`` to know whether it is excluding a loss that this run never
+        # settled in cash. See
+        # ``OvernightAssumption.VARIATION_MARGIN_UNSETTLED``.
+        #
+        # ``resting_order_margin`` is then **subtracted** rather than asked
+        # for by passing ``resting=()``: ``account_margin_requirement`` tests
+        # ``if resting:``, so an empty sequence means "ask the account", not
+        # "there are none", and a caller who reads the default as the latter
+        # gets the account's own figure back. Subtracting from the returned
+        # view says what is meant and leaves that function untouched.
+        view = self._derivatives.margin(
+            self._marks(), self._rulebook.at(ts),
+            self._config.broker_profile.terms, ts,
+            resting=self._live_derivative_orders())
+        held_only = view.required - view.resting_order_margin
+        continuous = is_continuous_model(model)
+
+        result = overnight_requirement(
+            as_of=ts.date(),
+            account_id=self._derivatives.ref.account_no,
+            positions=positions,
+            model=model,
+            parameters=parameters,
+            underlying_closes=self._underlying_closes(positions, ts),
+            minimum_margin_factor=factor,
+            intraday_amount=held_only if continuous else None,
+            intraday_is_determinate=not view.stale_marks,
+            unsettled_variation_margin=view.variation_margin)
+
+        self._overnight.append(result)
+        self._exercise(Component.OVERNIGHT_MARGIN)
+        self._evaluations += 1
+        if not result.is_determinate:
+            self._indeterminate += 1
+            for gap in result.gaps:
+                self._blind(Blindness.OVERNIGHT_UNCOMPUTED,
+                            gap.split(':', 1)[0])
+            # The underlying's close is a field of the data contract that no
+            # other counter names, so it goes to ``by_field``.
+            # ``INTRADAY_INDETERMINATE`` deliberately does **not**: the
+            # missing settlement price behind it has already been counted by
+            # the mark in this same advance, and one absent price counted
+            # twice under one field key turns a population into a magnitude.
+            # The overnight layer's own share of it is the
+            # ``margin.overnight.uncomputed.intraday.indeterminate`` key.
+            if OvernightGap.UNDERLYING_CLOSE.value in result.subjects:
+                self._by_field[DataField.CLOSE] = (
+                    self._by_field.get(DataField.CLOSE, 0) + 1)
+        for assumed in result.assumptions:
+            self._blind(Blindness.OVERNIGHT_ASSUMED, assumed)
+
+    def _underlying_closes(self, positions: Mapping[str, ContractPosition],
+                           ts: datetime) -> Dict[str, Decimal]:
+        """The **underlying asset's** close per held contract, from the source.
+
+        Read from the same ``MarketDataSource`` the marks are read from, at
+        the same instant, by the underlying's own ticker -- ``'VN30'`` for
+        VN30F, which the wired Parquet corpus carries with 2,725 daily rows.
+        A source that does not carry the index simply has no entry here and
+        the layer answers INDETERMINATE naming
+        :attr:`OvernightGap.UNDERLYING_CLOSE`.
+
+        **The futures price is not substituted for it**, and the temptation
+        is real because it is right there in ``_marks()``. Phu luc 2 section
+        1.1's ``S`` is the underlying's close and section 1.2's ``S0`` is the
+        same quantity; the futures price differs from it by the basis, which
+        is what a calendar spread is *made of* and what section 3's ``Sm``
+        charges for. Folding the basis into ``S`` would put it into all 21
+        scenarios and then charge for it again.
+        """
+        wanted: Dict[str, Decimal] = {}
+        for code in positions:
+            name = underlying_of(code)
+            if name is None or name in wanted:
+                continue
+            state = self._observe(name, ts)
+            if state is not None and state.last is not None:
+                wanted[name] = state.last
+        return wanted
+
+    def overnight_margin(self) -> Optional[OvernightRequirement]:
+        """The most recent end-of-day requirement, or ``None`` if never run.
+
+        ``None`` is a real answer and it is the one the audit was looking
+        for: this session has not computed an overnight requirement at all,
+        either because it holds no derivatives or because the run never
+        reached a close.
+        """
+        return self._overnight[-1] if self._overnight else None
+
+    def overnight_margins(self) -> Tuple[OvernightRequirement, ...]:
+        """Every end-of-day requirement this run computed, in order."""
+        return tuple(self._overnight)
 
     def _expiry_reached(self, expiry: date, rules: RuleSet,
                         ts: datetime) -> bool:

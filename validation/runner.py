@@ -129,7 +129,7 @@ def build_session(*, start: date, end: date, venues: Sequence[str],
                   source: Any = None,
                   initial_cash: Any = 0, initial_deposit: Any = 0,
                   fill_policy: str = 'hard',
-                  max_participation: Any = '0.10',
+                  max_participation: Any = None,
                   seed: Optional[int] = None,
                   broker_profile: Optional[Mapping[str, Any]] = None,
                   rulebook: str = 'vn-2020-2026',
@@ -156,7 +156,38 @@ def build_session(*, start: date, end: date, venues: Sequence[str],
     around every Tet in the period, and ``provenance().settlement_calendar_id``
     says ``UNSOURCED`` when it happens, so a scenario that cares must pass a
     real one.
+
+    ``max_participation`` defaults to ``None``, and the key is then **not
+    written into the payload at all** -- the only way a caller can say "I did
+    not ask for a cap", and the reason ``FillPolicyConfig.max_participation``
+    had to become ``Optional``.
+
+    It used to default to ``'0.10'`` and write it unconditionally, which was
+    worse than it looks. That value is what ``FillPolicyConfig`` itself held
+    when nobody wrote one, so ``build_fill_policy`` read it as "nobody asked"
+    and built ``soft`` **uncapped** -- while ``ExchangeSession._audit_fill``,
+    reading the same config, saw a run whose config named 10% and whose policy
+    applied none and counted ``participation_cap.not_applied`` on every fill
+    it produced. Every ``fill_policy='soft'`` scenario in this directory,
+    about fifteen call sites, ran that way: uncapped fills, and a blindness
+    counter firing on each one. Both halves are gone. Nothing writes a cap it
+    does not mean, and nothing reports a contradiction that no longer exists.
+
+    **What this default is not.** It is not a judgement that the soft arm
+    should be uncapped; it is the statement that these call sites never said.
+    Making the old ``'0.10'`` real instead was measured rather than argued:
+    it caps every ``soft`` here, and every hand-written double in
+    ``tests/validation`` serves no volume, so the cap cannot be computed and
+    the arm that was filling goes ``INDETERMINATE`` -- 33 failures, and the
+    accounting scenarios that use ``soft`` merely to *get a fill* so
+    settlement, margin and charges are exercised stop exercising them. That
+    would be a fidelity claim imposed on scenarios that are not making one.
+    A scenario that does want a bounded ``soft`` says so and gets it, 0.10
+    included.
     """
+    fill_block: Dict[str, Any] = {'kind': fill_policy}
+    if max_participation is not None:
+        fill_block['max_participation'] = str(max_participation)
     payload: Dict[str, Any] = {
         'period': {'start': start.isoformat(), 'end': end.isoformat()},
         'resolution': resolution.value,
@@ -164,8 +195,7 @@ def build_session(*, start: date, end: date, venues: Sequence[str],
                            'pins': list(pins)},
         'accounts': {'securities': {'initial_cash': str(initial_cash)},
                      'derivatives': {'initial_deposit': str(initial_deposit)}},
-        'fill_policy': {'kind': fill_policy,
-                        'max_participation': str(max_participation)},
+        'fill_policy': fill_block,
         'data': {},
     }
     if seed is not None:
@@ -297,10 +327,26 @@ class ScenarioResult:
     sessions_run: int
     error: Optional[BaseException] = None
     note: Optional[str] = None
+    overnight: Tuple[Any, ...] = ()
+    """The end-of-day requirement per session, in order --
+    :class:`plutus.market.session.overnight.OvernightRequirement`.
+
+    Typed ``Any`` for the reason ``provenance`` is typed to the *base*
+    record: this module must keep working against a session that does not
+    have the method, and an empty tuple is the honest answer for one that
+    does not. Read :attr:`overnight_indeterminate` before reading the
+    amounts -- an entry whose ``amount is None`` is the layer refusing, and
+    is not a zero.
+    """
 
     @property
     def failed_identities(self) -> Tuple[IdentityResult, ...]:
         return tuple(r for r in self.identities if not r.passed)
+
+    @property
+    def overnight_indeterminate(self) -> Tuple[Any, ...]:
+        """Sessions whose overnight requirement could not be computed."""
+        return tuple(r for r in self.overnight if r.amount is None)
 
     @property
     def skipped_identities(self) -> Tuple[IdentityResult, ...]:
@@ -345,6 +391,13 @@ class ScenarioResult:
             f'  calendar    {self.provenance.settlement_calendar_id}',
             f'  fill policy {self.provenance.fill_policy_kind}',
         ]
+        if self.overnight:
+            undecided = len(self.overnight_indeterminate)
+            model = self.overnight[-1].model
+            lines.append(
+                f'  overnight   {len(self.overnight) - undecided}/'
+                f'{len(self.overnight)} computed by {model}'
+                + ('' if not undecided else f', {undecided} INDETERMINATE'))
         if self.error is not None:
             lines.append(f'  ERROR       {self.error!r}')
         return '\n'.join(lines)
@@ -493,7 +546,8 @@ def run_scenario(scenario: Scenario, *,
         logs=logs, identities=identities, snapshots=tuple(snapshots),
         annotations=ctx.annotations,
         indeterminate=session.indeterminate_report(),
-        sessions_run=ran, error=error, note=scenario.note)
+        sessions_run=ran, error=error, note=scenario.note,
+        overnight=tuple(getattr(session, 'overnight_margins', tuple)()))
 
 
 class _Counter:

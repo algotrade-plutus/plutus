@@ -807,6 +807,60 @@ def a_resting_sell(bk, acct, quantity=1000, price='96.0', ts=CUM_DATE):
     return order_id
 
 
+def a_resting_buy(bk, acct, quantity=1000, price='95.5', ts=CUM_DATE):
+    """A buy order on the book with a real cash reservation behind it.
+
+    The reservation is taken on the ledger **and** handed to ``accept``, which
+    is how ``exchange.py`` submits: one reservation, in the ledger and on the
+    record. A test that reserves only on the ledger leaves the record holding
+    nothing, and section 12 invariant 4 -- summed over live *records* -- then
+    reads clean whatever the ledger does.
+    """
+    order = an_order(side=Side.BUY, quantity=quantity, price=price)
+    order_id = OrderId('BUY-1')
+    enc = acct.encumbrances.take(
+        order_id, Pool.SECURITIES, ResourceKind.CASH, ts,
+        # Whole dong. A HOSE price is thousands of dong, and the currency has
+        # no subunit; rounding up is the direction a reservation may err in.
+        amount=(Decimal(price) * Decimal(quantity) * Decimal('1000')).quantize(
+            Decimal('1'), rounding=ROUND_CEILING),
+        ticker='FPT', order_quantity=quantity)
+    bk.accept(order, Venue.HSX, ts, order_id=order_id, encumbrances=(enc,))
+    bk.rest(order_id, ts)
+    return order_id
+
+
+def invariant_4_breaches(bk, acct, ticker='FPT'):
+    """Section 12 invariant 4 at this instant, in both of its forms.
+
+    The **totals** form is ``encumbrance_matches`` from
+    ``validation/identities.py``, reproduced here against the raw book and
+    account: the sum of encumbrance carried on live ``OrderRecord``s against
+    the ledgers' committed totals. The
+    **per-order** form is ``OrderBookOfRecord.encumbrance_divergence``, which
+    attributes a breach to an order and a resource and also sweeps terminal
+    orders.
+
+    Both are needed and neither subsumes the other: the totals catch a record
+    the ledger has no counterpart for at all, and the per-order form catches
+    two orders whose errors cancel -- and, more to the point here, it can be
+    read at any instant rather than only where the totals happen to be zero.
+    """
+    breaches = [str(row) for row in
+                bk.encumbrance_divergence(acct.encumbrances.of)]
+    live = [r for r in bk.orders() if not r.is_terminal]
+    record_cash = sum((r.encumbered_cash for r in live), Decimal('0'))
+    if record_cash != acct.cash().committed:
+        breaches.append(f'cash: records {record_cash} vs ledger '
+                        f'{acct.cash().committed}')
+    record_qty = sum(r.encumbered_quantity for r in live
+                     if r.order.ticker == ticker)
+    if record_qty != acct.holding(ticker).committed:
+        breaches.append(f'quantity[{ticker}]: records {record_qty} vs ledger '
+                        f'{acct.holding(ticker).committed}')
+    return breaches
+
+
 def test_a_resting_order_is_cancelled_across_the_ex_date_by_default():
     """**The design spec's open question, and this is a CHOICE, not a rule.**
     No Vietnamese document addresses an order live across an ex-date -- and
@@ -1073,6 +1127,144 @@ def test_scaling_a_partly_filled_buy_preserves_the_value_it_reserved():
     assert acct.cash().committed == Decimal('95500000')
     assert bk.get(order_id).order.limit_price == Decimal('47.75')
     assert bk.get(order_id).remaining_quantity == 1200
+
+
+# --------------------------------------------------------------------------
+# Invariant 4 across the adjustment, on a LIVE order, under both policies
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize('policy', [RestingOrderPolicy.CANCEL,
+                                    RestingOrderPolicy.SCALE])
+@pytest.mark.parametrize('side', [Side.BUY, Side.SELL])
+def test_the_record_and_the_ledger_agree_across_an_ex_date(policy, side):
+    """**Section 12 invariant 4, checked while the order is still RESTING.**
+
+    ``book.amend`` does not touch encumbrances, so ``SCALE`` releases and
+    re-takes on the ledger by hand -- and it used to stop there. The
+    ``OrderRecord`` went on carrying its accept-time reservation for the rest
+    of the order's life, so the invariant that is *summed over live orders* was
+    false for as long as a scaled order rested. Measured on HPG 2021-05-31 with
+    the order live: record 46,012,420 of committed cash against a ledger
+    holding 43,978,091, **2,034,329 apart**; the share leg diverged the other
+    way, a record saying 1,000 committed against a ledger saying 2,000, which
+    under-reports the promise and would let the same parcel be sold twice.
+
+    The fix is one call to ``OrderBookOfRecord.set_encumbrances`` -- the method
+    whose own docstring says a record that lies is worse than a record that is
+    absent, and whose only caller was the partial-fill path.
+
+    ``CANCEL`` is the control arm, not padding: it never diverged, because the
+    order terminates and the book's terminal hook releases the ledger while
+    ``_terminate`` stamps the record. Running both is what pins that the fix
+    did not close one arm by opening the other.
+    """
+    holdings = {'FPT': 1000} if side is Side.SELL else None
+    acct = account(cash='150000000', holdings=holdings)
+    bk = book(acct)
+    order_id = (a_resting_sell(bk, acct) if side is Side.SELL
+                else a_resting_buy(bk, acct))
+    assert invariant_4_breaches(bk, acct) == [], 'before the action'
+
+    # A 30% stock dividend: 1.3x the quantity and a reference that does not
+    # divide evenly, so the cash leg is re-taken through a rounding.
+    engine(resting_orders=policy).apply(
+        CorporateAction.stock_dividend('FPT', EX_DATE, ratio=Decimal('0.3')),
+        account=acct, ts=T0, book=bk,
+        base_price=Decimal('96.0') if side is Side.SELL else Decimal('95.5'),
+        venue=Venue.HSX, lot=100, order_tick=HSX_TICK_50)
+
+    record = bk.get(order_id)
+    assert record.is_terminal is (policy is RestingOrderPolicy.CANCEL)
+    assert invariant_4_breaches(bk, acct) == [], 'across the action'
+
+    if policy is RestingOrderPolicy.SCALE:
+        # Still live, and the record's own numbers are the ledger's, not a
+        # second opinion: whole dong on the cash leg, the rescaled quantity on
+        # the share leg.
+        assert record.state.value == 'resting'
+        if side is Side.BUY:
+            assert record.encumbered_cash == acct.cash().committed
+            assert record.encumbered_cash.as_tuple().exponent == 0
+            assert record.encumbered_cash < Decimal('95500000')
+        else:
+            assert record.encumbered_quantity == 1300
+            assert acct.holding('FPT').committed == 1300
+    else:
+        # Terminal on both sides: the record reserves nothing and neither
+        # does the ledger.
+        assert record.encumbered_cash == Decimal('0')
+        assert record.encumbered_quantity == 0
+        assert acct.cash().committed == Decimal('0')
+        assert acct.holding('FPT').committed == 0
+
+
+@pytest.mark.parametrize('reason,kwargs,action', [
+    ('outside the ex-date band',
+     dict(band=(Decimal('60.0'), Decimal('80.0')), base_price=Decimal('96.0'),
+          venue=Venue.HSX, lot=100),
+     CorporateAction.split('FPT', EX_DATE, into=2)),
+    ('cancelled instead',
+     dict(lot=100),
+     CorporateAction.consolidation('FPT', EX_DATE, of=20)),
+])
+def test_the_scale_branchs_cancel_fallbacks_leave_nothing_reserved(
+        reason, kwargs, action):
+    """``SCALE`` falls back to ``CANCEL`` on a price it cannot show admissible
+    and on a remainder that scales below the lot. Both arms leave the account
+    holding a rescaled position and the order dead, and the reservation must go
+    with the order -- through the book's terminal hook, on both the ledger and
+    the record.
+
+    These are the two paths where a half-done adjustment could hide: the ledger
+    has not been touched when either fires, so a leak here would be a
+    reservation released on one side only.
+    """
+    acct = account(holdings={'FPT': 1000})
+    bk = book(acct)
+    order_id = a_resting_sell(bk, acct)
+
+    applied = engine(resting_orders=RestingOrderPolicy.SCALE).apply(
+        action, account=acct, ts=T0, book=bk, **kwargs)
+
+    outcome, = applied.resting_orders
+    assert reason in outcome.reason
+    assert bk.get(order_id).state.value == 'cancelled'
+    assert invariant_4_breaches(bk, acct) == []
+    assert acct.holding('FPT').committed == 0
+
+
+def test_a_partly_filled_order_scaled_across_an_ex_date_stays_in_step():
+    """The two paths that write ``set_encumbrances`` meeting on one order.
+
+    A partial fill re-reads the record from the ledger (``exchange.py``), and
+    so does the ``SCALE`` branch (``corporate.py``). An order that has done
+    both is where a fix to one that forgot the other would show: the ledger's
+    reservation here is the pro-rata residue, not the accept-time amount, and
+    it is that residue the corporate action must scale and the record must
+    report.
+    """
+    acct = account(holdings={'FPT': 2000})
+    bk = book(acct)
+    order_id = a_resting_sell(bk, acct, quantity=1000)
+    # The fill, on both sides: the ledger consumes and the record is re-read
+    # from it, which is the shape ``exchange.py._apply_fill`` runs.
+    fill = _a_fill(order_id, 400)
+    acct.apply_fill(fill, SETTLES)
+    bk.apply_fill(order_id, fill)
+    bk.set_encumbrances(order_id, acct.encumbrances.of(order_id))
+    assert invariant_4_breaches(bk, acct) == [], 'after the partial fill'
+    assert bk.get(order_id).encumbered_quantity == 600
+
+    engine(resting_orders=RestingOrderPolicy.SCALE).apply(
+        CorporateAction.split('FPT', EX_DATE, into=2),
+        account=acct, ts=T0, book=bk, base_price=Decimal('96.0'),
+        venue=Venue.HSX, lot=100)
+
+    record = bk.get(order_id)
+    assert record.state.value == 'partially_filled'
+    assert (record.filled_quantity, record.remaining_quantity) == (400, 1200)
+    assert record.encumbered_quantity == 1200
+    assert invariant_4_breaches(bk, acct) == [], 'across the action'
 
 
 def _a_fill(order_id, quantity, price='96.0', side=Side.SELL):

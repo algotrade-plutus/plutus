@@ -24,9 +24,10 @@ that the standard idea is implemented in a way a researcher can actually use:
 Prices are in thousands of dong, the corpus convention.
 """
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from decimal import Decimal
+from typing import Optional
 
 import pytest
 
@@ -41,6 +42,7 @@ from plutus.market.session.fills import (DivergenceReport, FillPolicy,
                                          SoftFillPolicy, auction_fill_price,
                                          build_fill_policy, compare_policies,
                                          draw_key, fill_draw, floor_to_lot,
+                                         parse_fill_policy_config,
                                          participation_cap, policy_of,
                                          probabilistic_sweep, stamp_policy)
 from plutus.market.session.types import (DataField, Fill, FillDecision,
@@ -726,6 +728,112 @@ def test_soft_fills_an_auction_at_the_clearing_price_including_at_the_margin():
 
 
 # ==========================================================================
+# Soft's participation cap -- the field that used to be discarded
+# ==========================================================================
+#
+# The defect these pin, stated once. `SoftFillPolicy` was a bare
+# `BaseFillPolicy` with no cap field, and `build_fill_policy` returned
+# `SoftFillPolicy()` for `kind: soft`, so a configured `max_participation`
+# reached the builder and vanished: an uncapped run, no error, no warning, and
+# a provenance record reading `soft` with no cap in it. Nothing failed, and
+# `indeterminate_report()` read zero throughout -- an uncapped policy never
+# reaches the branch that would have counted the missing volume.
+
+
+def test_a_soft_policy_honours_a_participation_cap():
+    """The fix, at its narrowest: soft with a cap sizes to the cap.
+
+    5,000 traded at 10% is 500, and a 1,000-share order takes 500 of it. Before
+    the repair `SoftFillPolicy` had nowhere to put the 0.10 and filled 1,000.
+    """
+    decision = SoftFillPolicy(Decimal('0.10')).evaluate(
+        _order(quantity=1000), _interval(low=LIMIT, volume=5_000),
+        HSX_EXCHANGE, instrument=HSX_LOT)
+    assert decision.outcome is FillOutcome.FILL
+    assert decision.quantity == 500
+
+
+def test_a_capped_soft_policy_is_indeterminate_without_volume():
+    """The ignorance meter would have caught the defect, had soft been capped.
+
+    A caller who asked for a 10% cap and is handed an interval with no volume
+    has not been told how much would have filled. Before the repair this was a
+    full-size FILL and `by_field` stayed empty, so the one instrument built to
+    bound our ignorance read zero during exactly the ignorance it was built
+    for.
+    """
+    decision = SoftFillPolicy(Decimal('0.10')).evaluate(
+        _order(), _interval(low=LIMIT, volume=None,
+                            missing=(DataField.VOLUME,)),
+        HSX_EXCHANGE, instrument=HSX_LOT)
+    assert decision.outcome is FillOutcome.INDETERMINATE
+    assert decision.missing == frozenset({DataField.VOLUME})
+
+
+def test_the_uncapped_soft_default_is_the_baseline_arm_unchanged():
+    """The repair must not quietly move the arm everything else is measured
+    against. A bare `SoftFillPolicy()` is uncapped, needs no volume, resolves
+    no lot and fills in full -- exactly as before."""
+    policy = SoftFillPolicy()
+    assert policy.max_participation is None
+    decision = policy.evaluate(
+        _order(quantity=9_999_900),
+        _interval(low=Decimal('95.0'), volume=None,
+                  missing=(DataField.VOLUME,)),
+        HSX_EXCHANGE)
+    assert decision.outcome is FillOutcome.FILL
+    assert decision.quantity == 9_999_900
+
+
+def test_a_capped_soft_and_a_capped_hard_agree_on_size_and_differ_on_evidence():
+    """Why the cap lives in `_CappedFillPolicy` rather than inside soft.
+
+    Same cap, same interval, a price that traded strictly through: the two arms
+    must fill the *same quantity* and differ only on the evidence standard, or
+    a soft/hard spread stops being attributable to queue position. A private
+    second sizing path in soft is how that silently stops being true.
+    """
+    interval = _interval(low=Decimal('95.0'), volume=5_000)
+    soft = SoftFillPolicy(Decimal('0.10')).evaluate(
+        _order(), interval, HSX_EXCHANGE, instrument=HSX_LOT)
+    hard = HardFillPolicy(Decimal('0.10')).evaluate(
+        _order(), interval, HSX_EXCHANGE, instrument=HSX_LOT)
+    assert soft.outcome is hard.outcome is FillOutcome.FILL
+    assert soft.quantity == hard.quantity == 500
+    assert soft.evidence is hard.evidence is FillEvidence.TRADED_THROUGH
+
+
+def test_a_capped_soft_run_records_the_cap_and_an_uncapped_one_says_so():
+    """`provenance().fill_policy_kind` is this string. The kind alone cannot
+    reproduce a result -- and a bare `'soft'` could not be told apart from a
+    record written while the cap was being discarded, which is precisely the
+    period whose results must not look like the repaired ones."""
+    assert (SoftFillPolicy(Decimal('0.25')).signature
+            == 'soft(max_participation=0.25)')
+    assert SoftFillPolicy().signature == 'soft(max_participation=uncapped)'
+    decision = SoftFillPolicy(Decimal('0.25')).evaluate(
+        _order(), _interval(low=LIMIT, volume=100_000), HSX_EXCHANGE,
+        instrument=HSX_LOT)
+    assert policy_of(decision) == 'soft(max_participation=0.25)'
+
+
+def test_a_capped_soft_reports_what_it_computed_the_exhausted_cap_from():
+    """A cap that leaves nothing is a NO_FILL, and the sentence must be true.
+
+    It used to read "already exhausted by this caller's own fills" in all
+    three cases that reach it, which is a false claim about an interval that
+    traded five shares and about one that traded nothing at all.
+    """
+    decision = SoftFillPolicy(Decimal('0.10')).evaluate(
+        _order(), _interval(low=LIMIT, volume=5), HSX_EXCHANGE,
+        instrument=HSX_LOT)
+    assert decision.outcome is FillOutcome.NO_FILL
+    assert '5 traded in this interval' in decision.reason
+    assert '0 already filled' in decision.reason
+    assert 'exhausted' not in decision.reason
+
+
+# ==========================================================================
 # Conventions as free functions
 # ==========================================================================
 
@@ -787,6 +895,139 @@ def test_build_fill_policy_selects_by_kind_and_carries_the_cap():
     assert isinstance(soft, SoftFillPolicy)
     assert isinstance(hard, HardFillPolicy)
     assert hard.max_participation == Decimal('0.25')
+
+
+def test_a_cap_configured_for_soft_reaches_the_policy_instead_of_vanishing():
+    """The defect, at the layer it was reported from.
+
+    `fill_policy: {kind: soft, max_participation: 0.25}` used to build a bare
+    `SoftFillPolicy()`: the field was read off the config, passed to nothing,
+    and never mentioned again.
+    """
+    policy = build_fill_policy(
+        FillPolicyConfig(kind='soft', max_participation=Decimal('0.25')))
+    assert policy.max_participation == Decimal('0.25')
+    assert 'max_participation=0.25' in policy.signature
+
+
+def test_an_unset_soft_cap_is_uncapped_and_says_so():
+    """`None` is the unset, and soft's answer to it is its documented
+    optimistic arm -- recorded in the signature, so a run whose config named a
+    cap would contradict itself in its own provenance."""
+    assert FillPolicyConfig(kind='soft').max_participation is None
+    assert (build_fill_policy(FillPolicyConfig(kind='soft')).signature
+            == 'soft(max_participation=uncapped)')
+
+
+def test_a_soft_cap_of_one_tenth_is_honoured_rather_than_read_as_unset():
+    """The 0.10 sentinel, at the layer it lived on.
+
+    `FillPolicyConfig.max_participation` was a non-optional `Decimal`
+    defaulting to `0.10`, so **the value 0.10 literally meant "uncapped"**:
+    `{kind: soft}` and `{kind: soft, max_participation: 0.10}` were the same
+    object, `build_fill_policy` special-cased that value to `None`, and every
+    caller who wrote 0.10 -- which is every `soft` scenario in `validation/`,
+    via a `runner.build_session` that wrote the key unconditionally -- ran
+    uncapped under a config that said 10%.
+
+    0.10 is now an instruction like any other. It is also the *only* value the
+    old code got wrong, which is why it is the one pinned here.
+    """
+    at_ten = build_fill_policy(
+        FillPolicyConfig(kind='soft', max_participation=Decimal('0.10')))
+    assert at_ten.max_participation == Decimal('0.10')
+    assert at_ten.signature == 'soft(max_participation=0.10)'
+
+
+def test_an_unset_cap_is_the_policys_own_default_for_hard_and_a_refusal_for_probabilistic():
+    """The two kinds that cannot simply run uncapped, and why they differ.
+
+    `hard` is capped by definition and has a documented constructor default,
+    so an unset cap runs at it -- and the signature names the number, so
+    nothing is asserted the provenance does not state.
+
+    `probabilistic` has no default of its own: `max_participation` is
+    keyword-only and required precisely so that no run gets a bound by
+    accident. Reading an absent cap as uncapped there would *loosen* every
+    config-built probabilistic run, which is the permissive direction, so it
+    is refused the same way a missing seed is.
+    """
+    hard = build_fill_policy(FillPolicyConfig(kind='hard'))
+    assert hard.max_participation == HardFillPolicy().max_participation
+    assert hard.signature == f'hard(max_participation={hard.max_participation})'
+    with pytest.raises(ValueError, match='no default cap of its own'):
+        build_fill_policy(FillPolicyConfig(kind='probabilistic', seed=SEED))
+
+
+@pytest.mark.parametrize('kind', ['soft', 'hard'])
+def test_a_seed_configured_for_a_policy_that_makes_no_draws_raises(kind):
+    """`{kind: soft, seed: 7}` used to run, with the seed read by nothing.
+
+    Neither soft nor hard draws, so a seed could not have changed one
+    decision. A config file that describes a run which did not happen is the
+    same defect as the discarded cap wearing a different field name.
+    """
+    with pytest.raises(ValueError, match='cannot be honoured'):
+        build_fill_policy(FillPolicyConfig(kind=kind, seed=7))
+
+
+def test_a_config_field_no_policy_can_honour_raises_rather_than_running():
+    """The tripwire, and the general form of the whole defect class.
+
+    A field added to `FillPolicyConfig` and not wired into
+    `build_fill_policy` would be silently discarded exactly as
+    `max_participation` was. `p_touch` is the concrete case waiting to happen:
+    it is a real parameter of the probabilistic policy that the config type
+    cannot carry today, and adding it upstream must break this function rather
+    than ship ignored.
+    """
+    @dataclass(frozen=True)
+    class _NextFillPolicyConfig:
+        kind: str = 'probabilistic'
+        max_participation: Decimal = Decimal('0.10')
+        seed: Optional[int] = SEED
+        p_touch: Decimal = Decimal('0.9')
+
+    with pytest.raises(ValueError, match='p_touch'):
+        build_fill_policy(_NextFillPolicyConfig())
+
+
+# --- the payload layer, where a written key is still distinguishable -------
+
+def test_an_unknown_fill_policy_payload_key_is_refused_not_dropped():
+    """`parse_config` reads three keys with `.get` and ignores the rest, so a
+    real parameter this package has and cannot configure -- or a typo for one
+    it can -- changes nothing and says nothing."""
+    with pytest.raises(ValueError, match='p_touch'):
+        parse_fill_policy_config({'kind': 'probabilistic', 'seed': SEED,
+                                  'p_touch': '0.7'})
+    with pytest.raises(ValueError, match='participation'):
+        parse_fill_policy_config({'kind': 'hard', 'participation': '0.10'})
+
+
+def test_the_payload_carries_a_written_cap_through_and_an_absent_one_as_none():
+    """The distinction the config type could not hold and now can.
+
+    This test used to assert the opposite -- that `{kind: soft,
+    max_participation: 0.10}` was *refused*, because nothing downstream could
+    tell it from the default. That refusal is gone with the sentinel it
+    protected: the payload's written 0.10 survives to the policy.
+    """
+    assert parse_fill_policy_config(
+        {'kind': 'soft'}).max_participation is None
+    for written in ('0.10', '0.25'):
+        parsed = parse_fill_policy_config({'kind': 'soft',
+                                           'max_participation': written})
+        assert parsed.max_participation == Decimal(written)
+        assert build_fill_policy(parsed).max_participation == Decimal(written)
+
+
+def test_the_payload_parser_keeps_the_refusals_the_builder_makes():
+    """It parses; it does not become a second, more permissive door."""
+    assert parse_fill_policy_config({'kind': 'probabilistic',
+                                     'seed': SEED}).seed == SEED
+    with pytest.raises(ValueError, match='must be an int'):
+        parse_fill_policy_config({'kind': 'probabilistic', 'seed': True})
 
 
 def test_an_unseeded_probabilistic_config_is_refused_rather_than_defaulted():
