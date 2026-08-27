@@ -15,7 +15,17 @@ Status as of 2026-08-27. Suite: **2319 passing**.
 | 1 | **Order-book walk** | Without it, fills happen at a single price with no depth. The fidelity audit's verdict on that state: *"an excellent accounting engine attached to an execution model that is not a simulation of a market."* A user would be validating their strategy's accounting, not its executability. | In progress |
 | 2 | **Amendment re-runs encumbrance and admission** | `ExchangeSession.amend` exists and implements the dated Vietnamese amendment rules (phase locks, priority preservation per QĐ 352 Điều 21.3). What it does not do is re-reserve funding or re-check admission, so an amend-up escapes both. Its own docstring records this as a deliberate Tier 1 scope cut. Two additions to an existing function, not a new feature. | Not started |
 
-**That is the entire must-list.** Two items.
+| 3 | **Forced liquidation must EXECUTE, not just report** | `FORCED_LIQUIDATION` emits an event and closes nothing — `detail['executed']` is `False` on every one. Measured on the Oct-2022 drawdown: **24 forced liquidations across 12 sessions, position intact through all of them**, riding 1102.0 down to a 1058.0 settlement. Cost **17,600,000đ on a 100,000,000đ account — 17.6%**. A strategy that would have been liquidated in reality survives here, which is the permissive direction. | Not started |
+| 4 | **Variation margin must settle in cash daily** | `DerivativesAccount.settle_daily` has no session call site (`FEATURES.md` D1). So the VM baseline never rolls off the entry price and the deposit balance sits unchanged at 99,948,008đ for all 18 sessions before expiry. Vietnamese futures settle P&L in cash every day; here they do not, so **realised P&L never reaches the deposit** and the author's essential — "their PnL of the contracts should be calculated correctly" — is not met. | Not started |
+
+**That is the entire must-list.** Four items.
+
+**Items 3 and 4 share a root cause with a defect already fixed once**: a method exists,
+is correct, is unit-tested, and has no call site. `scenario_margin.py` was the same —
+1,069 of 1,069 lines never executed until it was wired. A component that returns nothing
+because nothing called it is indistinguishable from one that correctly returned nothing,
+which is why the ignorance meter now reports what was *exercised* rather than only what
+was *computed*. Both of these should have been caught by that; check why they were not.
 
 ---
 
