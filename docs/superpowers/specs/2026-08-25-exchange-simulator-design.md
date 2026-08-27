@@ -314,7 +314,9 @@ which the *requested* quantity becomes sellable, and attached to the rejection.
 **Settlement instants require a VSDC settlement-business-day calendar — this is a Tier 1
 data input.** An earlier draft claimed T+N is "holiday-correct by construction" from
 counting session dates. That is **wrong** (rulebook §9.5): T+2 is counted in VSDC
-*settlement* business days, which diverge from exchange *trading* days around Tết —
+*settlement* business days. VSDC works on exactly the days the exchange trades — the two
+calendars are separate documents listing the same dates — so what diverges is **weekdays**
+versus trading days —
 VSDC closed settlement 2026-02-16 to 02-20, so T+2 of a 2026-02-12 trade settled on
 02-23. So `settles_at` is a datetime computed by a pluggable `SettlementCalendar`
 resolved via `rulebook.at(ts)`, not by counting bars. The tranche/datetime *shape* is
@@ -748,7 +750,9 @@ would trigger revisiting it.
    engine mutates live orders or cancels them.
 6. **A VSDC settlement-business-day calendar is a required Tier 1 data input** (§7.1).
    The earlier "holiday-correct by construction" claim was wrong; settlement days
-   diverge from trading days around Tết.
+   diverge from WEEKDAYS around Tết. They do NOT diverge from trading days: measured at
+   three Tết closures, the trading gap and the settlement gap coincide exactly, so the
+   calendar can be derived from the data source rather than supplied.
 7. **Continuous-session fills are not empirically validated.** Report the
    `INDETERMINATE` rate as a bound on ignorance rather than a fill rate (§13).
 

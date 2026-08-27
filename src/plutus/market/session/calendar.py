@@ -1,9 +1,30 @@
 """Settlement business days, and the trading days they are not.
 
-**T+N is a depository fact, not an exchange fact.** T+2 is counted in VSDC
-*settlement* business days, published annually as a settlement-holiday calendar
-that is a **separate document** from the exchange trading calendar, and the two
-diverge around Tet. The worked example the rulebook verifies verbatim
+**T+N is a depository fact, and the depository works on exactly the days the
+exchange trades.** T+2 is counted in VSDC *settlement* business days, published
+annually as a settlement-holiday calendar that is a **separate document** from
+the exchange trading calendar -- but the two documents list the same days.
+
+*An earlier revision of this docstring said the two "diverge around Tet". That
+was wrong, and it contained its own refutation: the VSDC closure it quotes
+below, 2026-02-16 to 2026-02-20, is exactly the span for which no exchange data
+exists.* Confirmed by the author from domain knowledge -- "the day of trading is
+the day VSDC works" -- and measured against the corpus at three Tet closures
+(2021-02-10..16, 2022-01-31..02-04, 2026-02-16..20), where the trading gap and
+the settlement gap coincide every time.
+
+**What actually diverges is WEEKDAYS versus trading days**, which is the
+ordinary observation that markets close for holidays. Counting T+2 over
+weekdays gives 2026-02-16 for a 2026-02-12 trade; counting it over days the
+data exists gives **2026-02-23**, the answer VSDC published.
+
+The consequence is a simplification worth taking: **a settlement calendar does
+not have to be supplied.** It can be derived from the data source -- a date the
+source carries is a date both the exchange and the depository were open. The
+caller-supplied path stays for anyone who wants to pin an explicit calendar,
+but shipping without one no longer means shipping a wrong one.
+
+The worked example the rulebook verifies verbatim
 (Announcement 4228/TB-VSDC, 2025-11-20):
 
     VSDC closed settlement 2026-02-16 -> 2026-02-20 inclusive.
