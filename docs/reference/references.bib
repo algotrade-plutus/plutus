@@ -1,0 +1,568 @@
+% Plutus / RIVF'26 references
+% ---------------------------------------------------------------------------
+% Extracted from docs/reference/literature-review.md, section 6 "Sources"
+% (the "Engine source and documentation" and "Literature" tables). Identifiers
+% (arXiv / SSRN / NBER / DOI) are used exactly as the review gives them.
+%
+% Convention: an entry carrying `note = {... unverified ...}` is one the review
+% did not resolve to a full, checkable citation (missing author/title/venue/year
+% or a gazette-level primary source). Bibliographic detail is never invented to
+% fill those gaps -- the note says so instead. Software projects that the review
+% cites through many per-file evidence keys (L-*, N-*, RQ-*, ...) are collapsed
+% to one entry per project.
+%
+% Software entries deliberately omit a publication `year`: the review cites a
+% moving branch/version (e.g. "verified at branch master"), not a dated release,
+% and a year is not invented for one. Under biblatex/biber this raises a benign
+% "missing date/year" datamodel warning; under classic bibtex it is silent. The
+% file parses in both.
+% ---------------------------------------------------------------------------
+
+% ===========================================================================
+% Backtesting / simulation engines and platforms (software)
+% ===========================================================================
+
+@misc{lean,
+  title        = {{LEAN Algorithmic Trading Engine}},
+  author       = {{QuantConnect}},
+  howpublished = {\url{https://github.com/QuantConnect/Lean}},
+  note         = {Open-source C\# backtesting/live engine; verified at branch master, 2026-08-26}
+}
+
+@misc{nautilustrader,
+  title        = {{NautilusTrader}},
+  author       = {{Nautech Systems}},
+  howpublished = {\url{https://github.com/nautechsystems/nautilus_trader}},
+  note         = {High-performance Rust/Python trading platform; verified at v1.231.0 / branch develop, 2026-08-26}
+}
+
+@misc{zipline,
+  title        = {{zipline-reloaded}},
+  author       = {Jansen, Stefan},
+  howpublished = {\url{https://github.com/stefan-jansen/zipline-reloaded}},
+  note         = {Maintained fork of Quantopian Zipline; verified at branch main}
+}
+
+@misc{backtrader,
+  title        = {{Backtrader}},
+  author       = {Rodriguez, Daniel},
+  howpublished = {\url{https://github.com/mementum/backtrader}},
+  note         = {Python backtesting framework; docs at backtrader.com}
+}
+
+@misc{vectorbt,
+  title        = {{vectorbt}},
+  author       = {Polakow, Oleg},
+  howpublished = {\url{https://github.com/polakowo/vectorbt}},
+  note         = {Vectorized backtesting library; verified at branch master}
+}
+
+@misc{qlib,
+  title        = {{Qlib: An AI-oriented Quantitative Investment Platform}},
+  author       = {{Microsoft}},
+  howpublished = {\url{https://github.com/microsoft/qlib}},
+  note         = {Verified at branch main (backtest/exchange.py incl. the L152 warning)}
+}
+
+@misc{rqalpha,
+  title        = {{RQAlpha}},
+  author       = {{Ricequant}},
+  howpublished = {\url{https://github.com/ricequant/rqalpha}},
+  note         = {Chinese-market backtesting engine (bar/tick/signal matchers, price-limit validators); verified at branch master}
+}
+
+@misc{hftbacktest,
+  title        = {{hftbacktest}},
+  author       = {{nkaz001}},
+  howpublished = {\url{https://github.com/nkaz001/hftbacktest}},
+  note         = {High-frequency backtester with probabilistic queue models; verified at py-v2.1.0}
+}
+
+@misc{abides,
+  title        = {{ABIDES: Agent-Based Interactive Discrete Event Simulation}},
+  howpublished = {\url{https://github.com/jpmorganchase/abides-jpmc-public}},
+  note         = {Verified at commit f9cbe51342b7dedd9587e4e069040d68a5c6477f, 2023-12-13; author list unverified}
+}
+
+@misc{vnpy,
+  title        = {{vn.py}},
+  author       = {{vn.py community}},
+  howpublished = {\url{https://github.com/vnpy/vnpy}},
+  note         = {Verified at branch master (alpha/strategy and ctastrategy backtesting)}
+}
+
+@misc{hummingbot,
+  title        = {{Hummingbot}},
+  author       = {{Hummingbot Foundation}},
+  howpublished = {\url{https://github.com/hummingbot/hummingbot}},
+  note         = {Verified at branch master (trading_rule, paper_trade_exchange)}
+}
+
+@misc{pyalgotrade,
+  title        = {{PyAlgoTrade}},
+  author       = {Becedillas, Gabriel},
+  howpublished = {\url{https://github.com/gbeced/pyalgotrade}},
+  note         = {Repository archived; last push 2023-11-13}
+}
+
+@misc{btpackage,
+  title        = {{bt -- Flexible Backtesting for Python}},
+  author       = {Morissette, Philippe},
+  howpublished = {\url{https://github.com/pmorissette/bt}},
+  note         = {Verified at branch master}
+}
+
+@misc{qstrader,
+  title        = {{QSTrader}},
+  author       = {{QuantStart}},
+  howpublished = {\url{https://github.com/quantstart/qstrader}},
+  note         = {Verified at branch master}
+}
+
+@misc{mbtgym,
+  title        = {{mbt\_gym: Gym environments for model-based trading}},
+  howpublished = {\url{https://github.com/JJJerome/mbt_gym}},
+  note         = {Fill-probability models; associated ICAIF '23 paper; author list unverified}
+}
+
+@misc{quantlib,
+  title        = {{QuantLib}},
+  author       = {{Ballabio, Luigi and the QuantLib contributors}},
+  howpublished = {\url{https://www.quantlib.org}},
+  note         = {Verified at branch master; 54 country calendars, no Vietnam}
+}
+
+@misc{exchangecalendars,
+  title        = {{exchange\_calendars}},
+  author       = {Manoim, Gerry and contributors},
+  howpublished = {\url{https://github.com/gerrymanoim/exchange_calendars}},
+  note         = {74 exchange calendars; no XSTC/Vietnam calendar}
+}
+
+@misc{tqsdk,
+  title        = {{TqSdk}},
+  author       = {{Shinny Technology}},
+  howpublished = {\url{https://github.com/shinnytech/tqsdk-python}},
+  note         = {Chinese-futures SDK with simulated settlement/margin}
+}
+
+@misc{fsb,
+  title        = {{Forex Strategy Builder}},
+  author       = {Popov, Miroslav},
+  howpublished = {\url{https://github.com/nuggett11/Forex-Strategy-Builder}},
+  note         = {Mirror created 2011-04-27; ReadMe v2.57.21.0 (2011-03-21); the ``Ambiguous bars'' interpolation model}
+}
+
+@misc{mt5,
+  title        = {{MetaTrader 5 Strategy Tester -- tick-generation modes and modelling quality}},
+  author       = {{MetaQuotes Software}},
+  howpublished = {MetaTrader 5 / MetaTrader 4 documentation},
+  note         = {Documentation read; not source-verified}
+}
+
+@misc{ninjatrader8,
+  title        = {{NinjaTrader 8 -- Order Fill Resolution}},
+  author       = {{NinjaTrader}},
+  howpublished = {NinjaTrader 8 documentation; cf. TradingView Bar Magnifier, TradeStation Look-Inside-Bar Backtesting},
+  note         = {Documentation read; not source-verified}
+}
+
+% ===========================================================================
+% Market-simulation research (agent-based / generative / LOB)
+% ===========================================================================
+
+@misc{evomarket,
+  title         = {{EvoMarket: A High-Fidelity and Scalable Financial Market Simulator}},
+  author        = {Zhong and Yang and Liu and Tang and Yang},
+  year          = {2026},
+  eprint        = {2604.18046},
+  archivePrefix = {arXiv},
+  primaryClass  = {cs.CE},
+  note          = {Preprint, submitted 20 Apr 2026 (Harbin Institute of Technology / SUSTech / Zhongguancun Academy); no code released, so all capability claims are from the paper}
+}
+
+@inproceedings{mars,
+  title         = {{MarS: A Financial Market Simulation Engine Powered by Generative Foundation Model}},
+  author        = {{Microsoft Research}},
+  booktitle     = {International Conference on Learning Representations (ICLR)},
+  year          = {2025},
+  eprint        = {2409.07486},
+  archivePrefix = {arXiv},
+  note          = {MIT-licensed; matching engine inside a generative order-flow world model. Author list unverified from the review}
+}
+
+@misc{jain,
+  title         = {{Limit Order Book Simulations: A Review}},
+  author        = {Jain and others},
+  eprint        = {2402.17359},
+  archivePrefix = {arXiv},
+  note          = {Cited for positioning; full author list unverified from the review}
+}
+
+@misc{mizuta2023,
+  title         = {{Agent-based model study of price-limit effects}},
+  author        = {Mizuta and Yagi},
+  eprint        = {2309.10220},
+  archivePrefix = {arXiv},
+  note          = {Exact title unverified from the review}
+}
+
+@article{abmmagnet,
+  title   = {{The Magnet Effect of Price Limits: An Agent-Based Approach}},
+  journal = {Emerging Markets Finance and Trade},
+  volume  = {61},
+  number  = {7},
+  doi     = {10.1080/1540496X.2024.2434042},
+  note    = {Authors and year unverified from the review}
+}
+
+% ===========================================================================
+% Backtesting fidelity, trading costs, and replication
+% ===========================================================================
+
+@article{pattonweller2020,
+  title   = {{What You See Is Not What You Get: The Costs of Trading Market Anomalies}},
+  author  = {Patton and Weller},
+  journal = {Journal of Financial Economics},
+  volume  = {137},
+  number  = {2},
+  year    = {2020},
+  note    = {SSRN 3034796}
+}
+
+@misc{claeys2026,
+  title        = {{When Backtests Guess: How Trading Platforms Silently Fabricate Results}},
+  author       = {Claeys, Michael},
+  year         = {2026},
+  howpublished = {SSRN preprint 6240638},
+  doi          = {10.2139/ssrn.6240638},
+  note         = {Crossref-deposited 3 Apr 2026; single-author, non-peer-reviewed preprint. Abstract read verbatim; full text and the five platform names unverified (Cloudflare-blocked)}
+}
+
+@article{menkveld2024,
+  title   = {{Nonstandard Errors}},
+  author  = {Menkveld, Albert J. and others},
+  journal = {Journal of Finance},
+  volume  = {79},
+  number  = {3},
+  pages   = {2339--2390},
+  year    = {2024},
+  note    = {SSRN 3961574}
+}
+
+@article{pbo2016,
+  title   = {{The Probability of Backtest Overfitting}},
+  author  = {Bailey, David H. and Borwein, Jonathan and L{\'o}pez de Prado, Marcos and Zhu, Qiji Jim},
+  journal = {Journal of Computational Finance},
+  volume  = {20},
+  number  = {4},
+  year    = {2016},
+  note    = {SSRN 2326253}
+}
+
+@article{dsr2014,
+  title   = {{The Deflated Sharpe Ratio: Correcting for Selection Bias, Backtest Overfitting, and Non-Normality}},
+  author  = {Bailey, David H. and L{\'o}pez de Prado, Marcos},
+  journal = {Journal of Portfolio Management},
+  year    = {2014},
+  note    = {SSRN 2460551}
+}
+
+@article{pmfc2014,
+  title   = {{Pseudo-Mathematics and Financial Charlatanism: The Effects of Backtest Overfitting on Out-of-Sample Performance}},
+  author  = {Bailey, David H. and Borwein, Jonathan and L{\'o}pez de Prado, Marcos and Zhu, Qiji Jim},
+  journal = {Notices of the American Mathematical Society},
+  volume  = {61},
+  number  = {5},
+  year    = {2014}
+}
+
+@article{ahm2019,
+  title   = {{A Backtesting Protocol in the Era of Machine Learning}},
+  author  = {Arnott, Rob and Harvey, Campbell R. and Markowitz, Harry},
+  journal = {Journal of Financial Data Science},
+  volume  = {1},
+  number  = {1},
+  year    = {2019},
+  note    = {SSRN 3275654}
+}
+
+@article{hlz2016,
+  title   = {{... and the Cross-Section of Expected Returns}},
+  author  = {Harvey, Campbell R. and Liu, Yan and Zhu, Heqing},
+  journal = {Review of Financial Studies},
+  volume  = {29},
+  number  = {1},
+  year    = {2016},
+  note    = {NBER w20592}
+}
+
+@article{hxz2020,
+  title   = {{Replicating Anomalies}},
+  author  = {Hou, Kewei and Xue, Chen and Zhang, Lu},
+  journal = {Review of Financial Studies},
+  volume  = {33},
+  number  = {5},
+  year    = {2020},
+  note    = {NBER w23394}
+}
+
+@article{jkp2023,
+  title   = {{Is There a Replication Crisis in Finance?}},
+  author  = {Jensen, Theis Ingerslev and Kelly, Bryan and Pedersen, Lasse Heje},
+  journal = {Journal of Finance},
+  volume  = {78},
+  number  = {5},
+  year    = {2023}
+}
+
+@article{novymarx2016,
+  title   = {{A Taxonomy of Anomalies and Their Trading Costs}},
+  author  = {Novy-Marx, Robert and Velikov, Mihail},
+  journal = {Review of Financial Studies},
+  volume  = {29},
+  number  = {1},
+  year    = {2016},
+  note    = {NBER w20721}
+}
+
+@misc{frazzini,
+  title  = {{Trading Costs}},
+  author = {Frazzini, Andrea and Israel, Ronen and Moskowitz, Tobias J.},
+  note   = {Trading-costs evidence from over \$1tn of live trades; title/venue/year unverified from the review}
+}
+
+@misc{du2025,
+  title         = {{Machine Learning Enhanced Multi-Factor Quantitative Trading}},
+  author        = {Du},
+  eprint        = {2507.07107},
+  archivePrefix = {arXiv},
+  note          = {Single-author preprint, self-reported, not peer-reviewed}
+}
+
+@misc{ir2026,
+  title         = {{Implementation Risk in Portfolio Backtesting}},
+  author        = {Yin and Miki and Lesnichenko and Gural},
+  year          = {2026},
+  eprint        = {2603.20319},
+  archivePrefix = {arXiv},
+  note          = {19 Mar 2026}
+}
+
+@misc{basel1996,
+  title        = {{Supervisory Framework for the Use of ``Backtesting'' in Conjunction with the Internal Models Approach to Market Risk Capital Requirements}},
+  author       = {{Basel Committee on Banking Supervision}},
+  year         = {1996},
+  howpublished = {Bank for International Settlements}
+}
+
+% ===========================================================================
+% Vietnam: market microstructure, factors, simulators
+% ===========================================================================
+
+@article{votick2023,
+  title   = {{Minimum tick size, market quality and costs of trade execution in Vietnam}},
+  author  = {Vo and Doan},
+  journal = {PLOS ONE},
+  volume  = {18},
+  number  = {5},
+  pages   = {e0285821},
+  year    = {2023},
+  doi     = {10.1371/journal.pone.0285821},
+  note    = {Difference-in-differences on HOSE's real tick-size change of 12 Sep 2016; the empirical warrant for dated rule editions}
+}
+
+@article{vnhls2023,
+  title   = {{Factors and anomalies in the Vietnamese stock market}},
+  author  = {Huang and Liu and Shu},
+  journal = {Pacific-Basin Finance Journal},
+  volume  = {82},
+  pages   = {102176},
+  year    = {2023}
+}
+
+@article{vnnsvm2020,
+  title   = {{Does short-term technical trading exist in the Vietnamese stock market?}},
+  author  = {Nguyen and Sensoy and Vo and von Mettenheim},
+  journal = {Borsa Istanbul Review},
+  year    = {2020}
+}
+
+@article{vnpham2021,
+  title   = {{Multi-agent reinforcement learning approach for hedging portfolio problem}},
+  author  = {Pham and Luu and Tran},
+  journal = {Soft Computing},
+  volume  = {25},
+  number  = {12},
+  pages   = {7877--7885},
+  year    = {2021},
+  doi     = {10.1007/s00500-021-05801-6}
+}
+
+@mastersthesis{lehung2013,
+  title  = {{An HNX matching-engine test double for conformance-testing broker software}},
+  author = {Lê, Đức Hùng},
+  school = {VNU University of Engineering and Technology (VNU-UET)},
+  year   = {2013},
+  note   = {C\#/QuickFIX. Existence, venue, scope and date verified; internals unverified (only a 4-page abstract is public). Handle: repository.vnu.edu.vn/handle/VNU\_123/5950}
+}
+
+@inproceedings{doluong2023,
+  title     = {{Bias-free Trading Algorithms with Momentum Scores for the Vietnamese Stock Market}},
+  author    = {Do and Luong},
+  booktitle = {Proceedings of the 12th International Symposium on Information and Communication Technology (SoICT '23)},
+  year      = {2023},
+  doi       = {10.1145/3628797.3628993},
+  note      = {Abstract only (ACM full text 403)}
+}
+
+@article{jicce2025,
+  title   = {{Design and Implementation of an AI-Driven Algorithmic Trading Simulation Platform for Strategy Backtesting and Forecasting}},
+  author  = {Lee and Nguyen, Van-Hoa and Tran, Quang-Trung and Le, Duc-Quang-Tri and Nguyen, Thi-Dieu-Ngan and Le, Hoanh-Su},
+  journal = {Journal of Information and Communication Convergence Engineering},
+  volume  = {23},
+  number  = {4},
+  pages   = {327--335},
+  year    = {2025},
+  doi     = {10.56977/jicce.2025.23.4.327},
+  note    = {Published 31 Dec 2025; funded by VNU-HCM B2023-34-04. No order admission, order book, matching engine, settlement, margin, auctions, price bands, tick sizes, order types or transaction costs}
+}
+
+@misc{plutus2025,
+  title         = {{PLUTUS Open Source}},
+  author        = {Nguyen and Ta and Vo},
+  year          = {2025},
+  eprint        = {2505.14050},
+  archivePrefix = {arXiv}
+}
+
+@misc{vnband,
+  title  = {{GARCH study of the 2007--2009 HOSE/HNX fluctuation-limit reductions}},
+  note   = {Author, title and venue unverified from the review}
+}
+
+@misc{vnfol,
+  title  = {{Foreign-ownership-limit primers (Vietnam)}},
+  author = {{VinaCapital} and {ASEAN Briefing}},
+  note   = {VinaCapital FOL primer; ASEAN Briefing on the 2025 decree. Web sources; unverified}
+}
+
+% ===========================================================================
+% Vietnamese trading-simulation products (web sources)
+% ===========================================================================
+
+@misc{vietstock,
+  title        = {{Vietstock ``Đấu trường'' trading-contest rules}},
+  author       = {{Vietstock}},
+  howpublished = {2022 Wayback capture (relaunched Dec 2025, rules login-walled)},
+  note         = {The only VN product publishing a tick grid (HOSE 100/500/1,000đ) and bands (7\%/10\%, first-day 20\%) with a 5\%-of-daily-volume participation cap. Post-relaunch rules unverified}
+}
+
+@misc{vnstockgame,
+  title        = {{vnstockgame.com game rules}},
+  howpublished = {\url{https://vnstockgame.com/luat-choi.html}},
+  note         = {Unrelated to the vnstock Python ecosystem; shadow-fills the real tape (not a matching engine). Enforces T+2, bands, lots, ATO/ATC/LO/MP; fee self-contradictory; unverified}
+}
+
+@misc{ssiiwin,
+  title        = {{SSI iWin trading game}},
+  author       = {{SSI Securities}},
+  howpublished = {iwin.ssi.com.vn (NXDOMAIN; last Wayback capture 2022-03-12)},
+  note         = {Defunct; never cite in the present tense. Rule completeness unverified}
+}
+
+@misc{vpssmarteasy,
+  title        = {{VPS SmartEasy derivatives game}},
+  author       = {{VPS Securities}},
+  note         = {FAQ admits orders are not pushed to the exchange matching system; everything else unverified}
+}
+
+% ===========================================================================
+% China / Indonesia / Taiwan / Korea / Thailand: price-limit evidence
+% ===========================================================================
+
+@article{cnchen,
+  title   = {{Daily Price Limits and Destructive Market Behavior}},
+  author  = {Chen and Gao and He and Jiang and Xiong},
+  journal = {Journal of Econometrics},
+  note    = {Year and volume unverified from the review}
+}
+
+@misc{cndu2,
+  title         = {{Price-limit study (China)}},
+  author        = {Du},
+  eprint        = {2506.06356},
+  archivePrefix = {arXiv},
+  note          = {Title unverified from the review}
+}
+
+@article{cnchinext,
+  title   = {{Effectiveness of price limits: Evidence from China's ChiNext market}},
+  journal = {PLOS ONE},
+  year    = {2023},
+  doi     = {10.1371/journal.pone.0287548},
+  note    = {Authors unverified from the review}
+}
+
+@article{cnasym,
+  title   = {{Asymmetric effectiveness of price limits}},
+  journal = {Review of Quantitative Finance and Accounting},
+  year    = {2024},
+  doi     = {10.1007/s11156-024-01333-w},
+  note    = {Authors unverified from the review}
+}
+
+@misc{cnmom,
+  title  = {{Price Limit Dominates Daily Momentum Effect in the Chinese Stock Market}},
+  year   = {2025},
+  note   = {Authors and venue unverified from the review}
+}
+
+@article{cnt1,
+  title   = {{A unique ``T+1 trading rule'' in China: Theory and evidence}},
+  journal = {Journal of Banking and Finance},
+  note    = {Authors and year unverified from the review}
+}
+
+@misc{idara,
+  title        = {{Auto-rejection (ARA/ARB) explainers, Indonesia}},
+  howpublished = {AEI Indonesia; Kompas, 2023-08-31},
+  note         = {Symmetric ARA/ARB at 35\%; web sources, unverified}
+}
+
+@article{twmagnet,
+  title   = {{Price-limit ``magnet effect'' study (Taiwan)}},
+  author  = {Cho and Russell and Tiao and Tsay},
+  journal = {Journal of Empirical Finance},
+  year    = {2003},
+  note    = {Exact title unverified from the review}
+}
+
+@misc{twvalue,
+  title        = {{Taiwan value-premium / limit-hit-frequency study}},
+  howpublished = {Pacific-Basin Finance Journal},
+  note         = {Authors, title and year unverified from the review}
+}
+
+@misc{krband,
+  title         = {{Korea 2015 price-band relaxation study}},
+  eprint        = {1805.04728},
+  archivePrefix = {arXiv},
+  note          = {Authors and title unverified from the review}
+}
+
+@misc{thband,
+  title  = {{Thailand SET price-band level (post-COVID)}},
+  note   = {Unverified -- to be checked at set.or.th}
+}
+
+% ===========================================================================
+% Project rulebook (internal, this repository)
+% ===========================================================================
+
+@misc{rulebook,
+  title  = {{Vietnamese exchange rulebook 2020--2026}},
+  author = {{Plutus project}},
+  year   = {2026},
+  note   = {docs/reference/vn-exchange-rulebook-2020-2026.md (this repository); \S6.3 VSD margin-utilisation tiers, ``Article 13'' chain withdrawn 2026-08-26}
+}

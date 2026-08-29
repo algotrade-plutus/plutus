@@ -65,27 +65,66 @@ def _time_query(conn, sql: str, repeats: int = 3) -> float:
 # --------------------------------------------------------------------------
 
 def measure_test_suite(repo_root: Path) -> Dict[str, Any]:
-    """Count collected tests. Backs the README test badge."""
-    try:
-        proc = subprocess.run(
-            [sys.executable, "-m", "pytest", "--collect-only", "-q"],
-            cwd=repo_root,
-            capture_output=True,
-            text=True,
-            timeout=600,
-            env={"PYTHONPATH": str(repo_root / "src"), "PATH": "/usr/bin:/bin"},
-        )
-    except (subprocess.TimeoutExpired, OSError) as exc:
-        return {"error": f"could not collect tests: {exc}"}
+    """Count collected tests across the three suites. Backs the README test badge.
 
-    collected = None
-    for line in proc.stdout.splitlines():
-        if "test" in line and "collected" in line:
-            for token in line.split():
-                if token.isdigit():
-                    collected = int(token)
-                    break
-    return {"collected": collected, "backs": "README test badge"}
+    A single root-level ``pytest --collect-only`` cannot answer this. It aborts
+    on ``ModuleNotFoundError: fastmcp`` -- ``tests/test_mcp/conftest.py`` imports
+    ``plutus.mcp``, which imports ``fastmcp``, an optional ``[mcp]`` extra that a
+    default install does not carry -- and ``pyproject``'s ``testpaths`` covers
+    ``tests/`` only, so ``scenarios/`` and ``strategies/`` are never collected at
+    all. Together those two made the old single-shot collection return ``None``.
+
+    So collect the three suites the paper actually counts -- ``tests/market``,
+    ``scenarios`` and ``strategies`` -- one invocation each, ``--ignore`` the
+    fastmcp-dependent MCP tests, and sum. Per-suite counts are returned as well,
+    so a drift in one suite stays visible instead of being folded into a total.
+    """
+    import os
+    import re
+
+    suites = ("tests/market", "scenarios", "strategies")
+    env = {
+        "PYTHONPATH": f"{repo_root / 'src'}{os.pathsep}{repo_root}",
+        "PATH": "/usr/bin:/bin",
+    }
+
+    per_suite: Dict[str, Optional[int]] = {}
+    errors: Dict[str, str] = {}
+    for suite in suites:
+        try:
+            proc = subprocess.run(
+                [sys.executable, "-m", "pytest", suite, "--collect-only", "-q",
+                 "--ignore", "tests/test_mcp", "-p", "no:cacheprovider"],
+                cwd=repo_root,
+                capture_output=True,
+                text=True,
+                timeout=600,
+                env=env,
+            )
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            per_suite[suite] = None
+            errors[suite] = f"could not collect: {exc}"
+            continue
+
+        matches = re.findall(r"(\d+)\s+tests?\s+collected", proc.stdout)
+        if matches:
+            per_suite[suite] = int(matches[-1])
+        else:
+            per_suite[suite] = None
+            tail = (proc.stderr or proc.stdout).strip().splitlines()[-1:]
+            errors[suite] = "no collection summary" + (
+                f": {tail[0]}" if tail else "")
+
+    counted = [n for n in per_suite.values() if n is not None]
+    collected = sum(counted) if counted else None
+    result: Dict[str, Any] = {
+        "collected": collected,
+        "per_suite": per_suite,
+        "backs": "README test badge",
+    }
+    if errors:
+        result["errors"] = errors
+    return result
 
 
 def measure_storage(
