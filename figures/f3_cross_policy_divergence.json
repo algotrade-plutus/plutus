@@ -1,0 +1,42 @@
+{
+  "fill_axis": {
+    "soft": {
+      "end_equity": 9801722.0,
+      "return_pct": -0.75495695,
+      "fills": 5,
+      "forced": 2,
+      "indeterminate_rate": 0.0
+    },
+    "hard": {
+      "end_equity": 40000000.0,
+      "return_pct": 0.0,
+      "fills": 0,
+      "forced": 0,
+      "indeterminate_rate": 0.5
+    },
+    "probabilistic": {
+      "end_equity": 40000000.0,
+      "return_pct": 0.0,
+      "fills": 0,
+      "forced": 0,
+      "indeterminate_rate": 0.5
+    }
+  },
+  "queue_axis": {
+    "optimistic": {
+      "maker_shares": 152600,
+      "taker_shares": 3100,
+      "indeterminate_rate": 0.0
+    },
+    "conservative": {
+      "maker_shares": 123700,
+      "taker_shares": 0,
+      "indeterminate_rate": 0.16666666666666666
+    },
+    "probabilistic": {
+      "maker_shares": 137600,
+      "taker_shares": 600,
+      "indeterminate_rate": 0.0
+    }
+  }
+}
