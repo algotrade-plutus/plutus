@@ -113,6 +113,28 @@ The pillars:
 
 ---
 
+## 2a. Policy surface — what we model, by the numbers
+
+The system models the combined policy of the **exchanges (HSX/HNX/UPCoM)**, the
+**VSDC/depository**, and the **brokers** — one effective-dated model across all
+three. Every policy fact carries provenance: a citation + confidence grade, or an
+explicit *unsourced / unpublished* marker (the model records what it cannot source
+as data, never as silence).
+
+| Layer | Sourced | Encoded in code |
+|---|---:|---|
+| Exchange + VSDC/depository — the dated rulebook | **434** primary rule rows (+175 annotations) | **97** dated editions across **12** `RuleName` families (`rulebook.py`) |
+| Broker derivatives-margin policy | **14** firms surveyed | **244** provenance-tagged data points (`broker_profile.py`) |
+| **Combined** | **678** | **341** |
+
+The "~400" figure that circulated is the **rulebook's primary rule rows alone**
+(hand-counted 400, script-corrected to **434** on 2026-08-26) — the exchange + VSDC
+layer; the broker survey's **244** is additional. "Encoded in code" is the
+load-bearing subset the engine enforces as effective-dated editions; the ~337
+uncounted source rows are corpus measurements, rejected readings, and caveats
+*about* those rules, not separate enforced rules. A "policy fact" is one dated rule
+row or one broker policy field — both provenance-tagged, hence combinable.
+
 ## 3. The mechanics inventory
 
 Full detail: `docs/reference/FEATURES.md`. Confidence grades below are the

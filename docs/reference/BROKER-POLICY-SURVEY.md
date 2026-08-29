@@ -14,10 +14,13 @@ status says which. **Silence means "fully sourced," never "we did not check."**
 **Scale.** The survey encodes **244 distinct, provenance-tagged policy data points**
 across all 18 registry entries (**200** across the 15 base profiles; **183** across
 the 14 real firms), plus 69 verbatim Vietnamese quotes and 144 flagged gap
-instances. *(There is no structural count equal to 400; if a draft cited "≈400
-policy docs," it should read **244** — or "≈200 across 15 profiles" / "183 across 14
-firms." As source **documents**, the count is ≈14–18: roughly one dominant document
-per firm, plus SSI's dated vintages.)*
+instances. *(This is the broker layer only. The "≈400" figure that circulated is a
+different, larger body — the **rulebook's primary rule rows** (exchange + VSDC),
+hand-counted 400 and script-corrected to **434**, of which the code encodes 97 —
+not the broker survey. See `PAPER-COMPENDIUM.md` §2a for the combined tally: 678
+sourced / 341 encoded across all three layers. As source **documents**, this broker
+survey draws on ≈14–18: roughly one dominant document per firm, plus SSI's dated
+vintages.)*
 
 **Sourcing caveat (carry into every citation).** No broker value here comes from
 *công báo* (the gazette) — the gazette backs only the VSDC/QĐ regulatory layer.
