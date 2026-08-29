@@ -675,9 +675,13 @@ Invariants, asserted:
 ## 13. Deferred, with reasons
 
 - **Event-driven callbacks.** Synchronous is simpler to test and reason about.
-- **Queue-position matching against a full reconstructed book.** 81% of
+- **Recovering our own queue *rank* against a full reconstructed book.** 81% of
   best-quote changes carry no trade, and there are no order ids, so order flow
-  cannot be recovered. `Probabilistic` is the honest ceiling here.
+  cannot be recovered and our actual position in the queue cannot be established.
+  This is distinct from the **declared** queue-policy axis (optimistic /
+  conservative / probabilistic) the book-walk maker fill exercises and the paper
+  reports as F3 — that axis is built; what stays deferred is recovering the *true*
+  rank the data cannot show.
 - **The live Calibrator.** Deferred — but see §14.
 - **Continuous-session matching validated empirically.** Report the
   `INDETERMINATE` rate as a bound on ignorance instead.

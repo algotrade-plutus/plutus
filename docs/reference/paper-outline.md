@@ -94,8 +94,9 @@ Six moves, roughly one sentence each.
    400-row **dated** rulebook resolved per simulated instant — spanning the KRX cutover of
    2025-05-05, three equity venues with different bands, a price-dependent tick grid and
    first-day and post-suspension band exceptions — a VSDC settlement-business-day calendar
-   wired to unsettled cash and unsettled shares, MR = IM + VM tested as utilisation in a
-   segregated deposit account, and INDETERMINATE as a per-order status attributed to the
+   wired to unsettled cash and unsettled shares, a segregated derivatives deposit run as **two
+   dated margin editions** — `MR = IM + VM` pre-KRX and the QĐ 26 scenario-margin stack
+   `MR = Max(ΣPgm, 0)` post-KRX — and INDETERMINATE as a per-order status attributed to the
    rule that could not be evaluated.
 5. **Results, one line.** The headline numbers from §7 — the blocked-entry rate at the
    tradeable lag, the tick-grid conformity contrast, the bar-vs-tick lock divergence, the
@@ -178,7 +179,7 @@ verifiable and all about the shape of the rulebook rather than about priority:
 
 | What EvoMarket has | What differs here |
 |---|---|
-| One symmetric ±10% band, uniform ¥0.01 tick, T+1 — the rules China actually has | Three equity venues with different bands, a **price-dependent** tick grid, first-day and post-suspension band exceptions, plus a **separate derivatives venue with IM + VM margin** |
+| One symmetric ±10% band, uniform ¥0.01 tick, T+1 — the rules China actually has | Three equity venues with different bands, a **price-dependent** tick grid, first-day and post-suspension band exceptions, plus a **separate derivatives venue with a dated margin regime (IM + VM pre-KRX, a scenario-margin stack after 2025-05-05)** |
 | Rules as fixed constants | Rules as **effective-dated editions**, spanning a real regime change (KRX, 2025-05-05) |
 | No code released | Open source, with `reproduce_measurements.py` regenerating every number |
 | Equities only | Equities **and** derivatives, with a segregated margin account |
@@ -213,9 +214,13 @@ with widened regimes and both degenerate branches; the 10→100 round-lot change
 2021-01-04; T+2 counted in VSDC settlement business days with the 13:00 allocation deadline;
 100% pre-funding and Circular 68/2024's non-pre-funding carve-out for foreign institutions
 from 2024-11-02; foreign-ownership room and its pre-/post-KRX rejection triggers; and the
-derivatives regime — segregated deposit, MR = IM + VM, VM loss-only, utilisation tiers at
-80/90/100%, and **no published maintenance ratio**. Each with its dated citation and its
-confidence level from the rulebook. Close with the KRX cutover of 2025-05-05 presented as a
+derivatives regime as **two dated editions** in a segregated deposit: pre-KRX (≤2025-05-04)
+`MR = IM + VM`, VM loss-only, and **no published maintenance ratio** (the 80/90/100
+*margin*-utilisation ladder once cited to "Article 13" is **unverified**, `low` — not a
+gazetted rule); post-KRX (2025-05-05→) the scenario-margin stack `MR = Max(ΣPgm, 0)` the code
+implements (`scenario_margin.py`, QĐ 26 Phụ lục 2), where the only gazetted 80/90/100 is the
+**position-limit** monitor (QĐ 26 Điều 29), not a margin trigger. Each with its dated citation
+and its confidence level from the rulebook. Close with the KRX cutover of 2025-05-05 presented as a
 dated rule edition rather than a migration — **and with Vo & Doan (2023) as the evidence
 that a dated edition is not bookkeeping**: their difference-in-differences study of the
 12 Sep 2016 HOSE tick-size change finds trading costs fell, and fell non-uniformly across
@@ -251,12 +256,22 @@ rule.
 
 ### §6 Implementation and reproducibility
 
-Short. The module layout, the test count, and `reproduce_measurements.py` as the single
-entry point that regenerates every number the paper states. Name the corpus explicitly
-(daily bars 2000-07-28 → 2022-12-30, 2,511,874 rows, 1,725 tickers; tick 2020-12-02 →
-2022-12-30) and state that band-dependent results are inherently 2021–2022 because
-`quote_ceil` begins 2021-02-05. Include the dataset-defect audit as evidence that the
-corpus was characterised rather than assumed clean.
+Short. The module layout, the per-suite test counts (market 1628 / scenarios 38 / strategies
+11), and `reproduce_measurements.py`. **Data posture, stated honestly and up front: we do not
+claim a corpus.** The library is **bring-your-own-data** — it characterises whatever feed you
+point it at — and reproducibility is **two-tier**: (a) a **reproducible core** shipped in-repo
+— the Jx + Sx suites and their fixtures, so `clone → pip install → pytest` reproduces them for
+any third party; and (b) **provenance-documented demonstrations** — the headline measurement
+numbers, some computed against production data we do not redistribute, each tagged with its
+provenance. `reproduce_measurements.py` regenerates the corpus-available ones; a separate,
+clearly-labelled path regenerates the production-sourced ones — the honest claim is that
+two-tier statement, not "regenerates *every* number". **Our data ceiling, named:** production
+tick market data plus a **reconstructed 3-level book (with sizes)** — **not** the exchange's
+full order book (all levels, order ids, the true queue, deletions), which we never imply we
+have. Band-dependent results are inherently 2021–2022 because `quote_ceil` begins 2021-02-05.
+Include the ten-check dataset-defect audit as a **demonstration of a capability** — the library
+characterises whatever feed you point it at — run on the shipped fixtures; at most a neutral
+"computed on N instrument-days of sample data", never a boast about corpus scale.
 
 ### §7 Results
 
@@ -271,10 +286,12 @@ Mandatory, and written before the results are polished, not after. See §5 of th
 
 The Calibrator gold-standard validation against the firm's own 2021–2022 order and reject
 logs; the post-KRX rulebook population; the corporate-action engine; foreign-room
-enforcement with both date-switched branches; portfolio margining, which cannot be
-reproduced without Phụ lục 02; event-driven callbacks; and queue-position matching against a
-reconstructed book, which the data cannot support because 81% of best-quote changes carry no
-trade and no order ids exist.
+enforcement with both date-switched branches; **pre-KRX (QĐ 96-era)** portfolio margining,
+which cannot be reproduced without the QĐ 96-era appendix VSDC does not publish (the post-KRX
+offsets are now primary-sourced from QĐ 26 Phụ lục 2 and modelled); event-driven callbacks;
+and **recovering our own queue *rank*** against a reconstructed book — distinct from the
+**declared** queue axis reported in §7/F3, which is built — which the data cannot support
+because 81% of best-quote changes carry no trade and no order ids exist.
 
 ### §10 Conclusion
 
@@ -295,11 +312,9 @@ are prohibited; see the header of this outline.
 | Front-month VN30F longs margin-called, 10-session hold | **12.60%** (48 / 381) | §7 derivatives subsection | Evidence the utilisation test fires at realistic frequency. Carries a **modelling assumption**: no margin data exists in either corpus, so the rate depends on the assumed IM ratio and buffer. Must be restated with the corrected dated series (10 → 13 → 17%), never with the retired 17.5% constant. |
 | Tick-grid conformity, library rule vs a flat 0.1 grid | **99.9988%** vs **83.86%** | §3 (rule surface) and §7 | The single cleanest demonstration that a price-dependent grid is not cosmetic: the naive flat grid misclassifies one price in six. |
 | Bar-vs-tick lock agreement | **97.56%** on 173,168 ticker-days | §5 (indeterminacy) and §7 | Evidence for the resolution-dependence claim: a bar-inferred lock and a tick-observed lock disagree ~1 day in 41. Report the `locked_at_close` arm as the comparison; the `locked_all_session` arm is contrast only. |
-| Off-grid UPCOM closes | 15,504 across 30 tickers | §6 (corpus audit) | Refutes our own earlier claim that a non-HSX tick audit would be vacuous. Report as a corpus finding, and note the follow-up: the exceptions are venue-transfer artefacts, not a tick exception. |
 | Foreign room below one 100-share lot | **34,653** observations; FPT 2022-12-30 down to 11 shares | §8 threats (T1) | Evidence that the scope cut is a **choice**, not a discovery that the constraint never binds. Not a modelling result. |
-| Close-as-settlement substitution error | 46 expiries 2022-08-18 → 2026-08-20; mean signed **+0.024%**, mean absolute **0.042%**, σ **0.071%**, worst **0.333%** (VN30F2603); 37/46 within 0.05%, 45/46 within 0.20% | §8 threats (T2) | Evidence the fallback is ~4 bp in the typical case. Must be reported with the sample size and with the observation that VN30F2206 — the contract earlier documents leaned on — sits near the **worst** of the distribution, not the middle. |
 | Ten-check dataset audit incidences | e.g. inverted bands 1,272 rows on 3 days (0.155%); OHLC-invariant violations 327 + 99 of 3,877,981; HSX tick-grid 13 of 1,101,201 | §6 | Evidence the corpus was characterised, not assumed clean. Two defect classes (inverted bands, OHLC invariants) are independent, so a row can fail one and pass the other. |
-| Test count | 630 collected | §6 | Reproducibility, not correctness. Do not present a test count as validation of the rules. |
+| Test count | market 1628 / scenarios 38 / strategies 11 | §6 | Reproducibility, not correctness. Do not present a test count as validation of the rules. |
 
 **Two figures the paper must generate that do not yet exist**, both from spec §11 Tier 3:
 
@@ -356,40 +371,40 @@ enforcement work cannot start until that is settled, and any statistic pooled ac
 Revisit trigger: any result claiming to represent a foreign account, or the post-KRX
 rulebook landing, at which point both branches must exist anyway.
 
-### 5.3 Close-as-settlement fallback on expiry
+### 5.3 Close-as-settlement fallback on expiry — a graceful-degradation feature, not a cost our results invoke
 
-Where the data source supplies a settlement price, the simulator uses it and there is no
-approximation to declare. Where it does not, the simulator falls back to the expiring
-contract's close on expiry day, and **records that substitution on the result** — a number
-computed on the close-proxy says so.
+Where the data source supplies a settlement price, the simulator uses it — and **our own
+results always supply the real settlement price, so they never invoke the fallback**. The
+close-as-settlement substitution is retained as a **graceful-degradation feature** for users
+who lack a settlement series: where none is supplied, the simulator falls back to the
+expiring contract's close on expiry day and **flags that substitution on the result** — a
+number computed on the close-proxy says so, rather than passing silently as if it were
+gazetted. Because our results never lean on it, **there is no substitution-error measurement
+to report here**; the feature's contract is that it announces its own substitution, not that
+it is accurate.
 
-**Measured across all 46 expiries from 2022-08-18 to 2026-08-20: mean signed error
-+0.024%, mean absolute error 0.042%, standard deviation 0.071%, worst case 0.333%
-(VN30F2603, 2026-03-19); 37/46 within 0.05%, 42/46 within 0.10%, 45/46 within 0.20%.**
-About four basis points in the typical case.
+One dated subtlety the feature must still respect when it does fire: the published settlement
+is an average over the last 30 minutes (14:15–14:45, including the ATC), not the close, and
+the averaged subject changed mid-corpus on an exact boundary — the last futures-tracked row
+is 2022-08-16 and the first VN30INDEX row is 2022-08-17 — so the settlement basis is itself
+**dated** and is resolved at the expiry date rather than by one formula for all history.
 
-Three things this entry must also say. The published settlement is an average over the last
-30 minutes (14:15–14:45, including the ATC), not the close. The averaged subject changed
-mid-corpus on an exact boundary — the last futures-tracked row is 2022-08-16 and the first
-VN30INDEX row is 2022-08-17 — so the settlement basis is itself dated and must be resolved at
-the expiry date rather than by one formula for all history. And earlier drafts of our own
-documents quoted a ~0.4% figure from a single contract, VN30F2206, which sits near the
-**worst** of the distribution; that is the argument against citing an n=1 measurement, made
-against our own prior claim, and it belongs in the paper.
-
-Revisit trigger: any result whose P&L is materially sensitive to expiry-day pricing.
+Revisit trigger: any result whose P&L is materially sensitive to expiry-day pricing and that
+cannot supply a real settlement series.
 
 ### 5.4 Continuous-session fill determination is not empirically validated
 
 Fill determination inside the continuous session is not validated against ground truth, and
 no validation is claimed. This is why the indeterminate rate is reported **as a bound on
 ignorance rather than as a fill rate**. Three supporting facts that make the limitation
-concrete rather than rhetorical: the corpus carries a three-level price ladder but bid/ask
-**sizes** are not populated in this release, so depth-of-book liquidity cannot be measured —
-only prices; 81% of best-quote changes carry no trade, so order flow cannot be recovered and
-queue position cannot be inferred; and timestamps are vendor capture times with a median of
-13 captures per ticker-day, so only the top liquidity quintile supports intraday work at
-all. Auction fills are the exception and should be stated as such — they fill at the
+concrete rather than rhetorical: **sizes are available where the sized feed is wired** — the sized dev extract
+(`dataset/hermes-dev-extract`, 1,390,914 size rows; production carries far more) populates
+the three-level book, and the book-walk maker fill (S8/S9) reads real sizes; it is the
+size-less **default** adapters that serve prices only, so on those feeds depth-of-book
+liquidity cannot be measured. What no feed can recover is our **own queue rank**: 81% of
+best-quote changes carry no trade and there are no order ids, so order flow cannot be
+reconstructed; and timestamps are vendor capture times with a median of 13 captures per
+ticker-day, so only the top liquidity quintile supports intraday work at all. Auction fills are the exception and should be stated as such — they fill at the
 published open/close, which is cheap and correct.
 
 Planned resolution, deferred and named as deferred: the firm's own 2021–2022 order and
@@ -405,12 +420,21 @@ series currently arrives through the same pipeline we maintain.
   22.5% of the coverage window (2020-01-01 → 2021-07-04) has no primary text at any venue;
   UPCoM before 2022-11-16 is effectively uncovered. State the confidence distribution, do
   not average it away.
-- **Derivatives margin is weak on values, strong on shape.** The central structural finding
-  — no published maintenance ratio, utilisation test instead — is primary-sourced. The
-  initial-margin series (10/13/17%) is press-sourced with **no `quyết định` number in
+- **Derivatives margin is weak on values, strong on shape, and now split by regime.** The
+  central structural finding — **no published maintenance ratio** — is primary-sourced.
+  Pre-KRX (≤2025-05-04) `MR = IM + VM`; the 80/90/100 *margin*-utilisation ladder once cited
+  to "Article 13" is now **unverified** (`low`) — the citation chain collapsed at QĐ 26,
+  whose Điều 13 carries no percentage — so it is stated as an assumption, not a sourced rule.
+  Post-KRX (2025-05-05→) the scenario-margin stack `MR = Max(ΣPgm, 0)` is **primary-sourced**
+  from QĐ 26 and its Phụ lục 2 (obtained 2026-08-26) and implemented in `scenario_margin.py`.
+  The initial-margin series (10/13/17%) is press-sourced with **no `quyết định` number in
   existence**, and the ratio is published per contract, so the correct data structure is
-  `(contract_code, effective_date) → ratio`, not a scalar. Portfolio margining / spread
-  credits are **unverifiable**: the formula is in Phụ lục 02, which VSDC does not publish.
+  `(contract_code, effective_date) → ratio`, not a scalar. **Post-KRX** portfolio margining /
+  spread credits are now **primary-sourced** from Phụ lục 2 (the cross-underlying offsetting
+  amount `OA` within a Kendall-tau ≥ 0.9 underlying-asset group, and the calendar basis-margin
+  add-on `Sm`); only **pre-KRX (QĐ 96-era)** portfolio margining remains unverifiable — the
+  QĐ 96-era "Phụ lục 02" on VSDC's page is a different appendix of a different instrument and
+  must not be back-dated from the one now in hand.
 - **Landing the session does not retro-validate the published numbers.** Three of the
   headline figures come from SQL that parallels the rules rather than calling them; the
   parallel SQL remains their source until it is replaced by real calls. Say so.

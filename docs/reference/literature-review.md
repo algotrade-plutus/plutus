@@ -268,7 +268,9 @@ them before making any claim of its own.
    three sites including `_on_settle` **[V]** `[TQ-trade]`. A regime with no published
    maintenance ratio, IM plus daily variation collection, tested as utilisation, is also
    China futures (风险度) and broadly India (SPAN + exposure + daily MTM) **[R]** —
-   **Vietnam's regime is not structurally unique.**
+   **Vietnam's pre-KRX regime is not structurally unique** (and post-KRX it moved to
+   scenario margin, further still from a bare utilisation test; the 80/90/100 margin ladder
+   once attributed here is unverified — see §4.1).
 6. **Fill determination is already user-replaceable in at least five systems**: LEAN
    `[V]` `[L-fill]`, NautilusTrader `[V]` `[N-fill]`, Zipline-reloaded `[V]` `[Z-slip]`,
    RQAlpha `[V]` `[RQ-match]`, hftbacktest `[V]` `[H-queue]`, plus PyAlgoTrade `[V]`
@@ -308,7 +310,8 @@ them before making any claim of its own.
      band, a **uniform ¥0.01 tick**, and T+1. Vietnam has **three equity venues with
      different bands** (±7% HOSE / ±10% HNX / ±15% UPCoM), a **price-dependent tick grid**,
      **first-day and post-suspension band exceptions**, and a **separate derivatives venue
-     with IM + VM margin**. A fixed-constant implementation is adequate for the first and
+     with IM + VM margin** (itself dated: IM + VM pre-KRX, a scenario-margin stack after
+     2025-05-05). A fixed-constant implementation is adequate for the first and
      structurally cannot express the second.
    - **EvoMarket's rules are fixed constants with no versioning and no effective dates**
      **[V-neg]** `[E-paper]`. It cannot answer "what would this have done under the rules
@@ -781,7 +784,8 @@ publishes a tick grid, bands and a participation cap — §2.5).
 > differs is the shape of the rulebook and its versioning — China A-shares is a one-band,
 > uniform-¥0.01-tick, T+1 regime expressible as constants, whereas Vietnam has three equity
 > venues with different bands, a price-dependent tick grid, first-day and post-suspension
-> band exceptions, a separate derivatives venue with IM + VM margin, and a rule change
+> band exceptions, a separate derivatives venue whose margin regime is itself dated (IM + VM before the KRX
+> cutover, the QĐ 26 scenario-margin stack `MR = Max(ΣPgm, 0)` after), and a rule change
 > inside the window (2025-05-05) that only a dated edition can represent. Vietnamese prior
 > art exists and is named rather than ignored: a 2013 VNU-UET HNX matching-engine test
 > double predating derivatives, T+2, bands and auctions; a 2021 daily-bar
@@ -820,9 +824,15 @@ Three supporting sentences, also verbatim, that pre-empt the specific refutation
 > used exceeds portfolio value × (1 + buffer), and TqSdk computes
 > `risk_ratio = margin / balance` at daily settlement. Nor is the absence of a published
 > maintenance ratio unique to Vietnam — Chinese futures (风险度) and Indian SPAN-plus-exposure
-> share the structure. Our narrower claim is the specific composition: MR = IM + VM with VM
-> accruing only on losing positions, in a derivatives account segregated from the equity
-> account under VSD/VSDC rules, tested at the published utilisation tiers.
+> share the structure. Our narrower claim is the specific composition, **regime-split by
+> effective date**: pre-KRX (≤2025-05-04), `MR = IM + VM` with VM accruing only on losing
+> positions, in a derivatives account segregated from the equity account under VSD/VSDC
+> rules; post-KRX (2025-05-05→), the QĐ 26 scenario-margin stack `MR = Max(ΣPgm, 0)`, in
+> which variation margin is no longer a component of MR and daily P&L settles separately in
+> cash. The 80/90/100 *margin*-utilisation ladder once carried here is **withdrawn** — its
+> "Article 13" citation collapsed (QĐ 26 Điều 13 carries no percentage), so it is unverified
+> (`low`) pre-KRX, and post-KRX the only gazetted 80/90/100 is the **position-limit** monitor
+> of QĐ 26 Điều 29, not a margin trigger.
 
 > **On tick grids.** Already conceded in your prior survey — LEAN's
 > `EquityPriceVariationModel` implements Reg NMS Rule 612, so *price-dependent* tick grids
@@ -830,11 +840,17 @@ Three supporting sentences, also verbatim, that pre-empt the specific refutation
 > concept.
 
 **Two items to verify before publication, flagged by the attack itself. [U]** (i) The VSD
-80/90/100% utilisation tiers are load-bearing for the margin sentence. *Status in this
-repo: the rulebook §6.3 now sources them to Article 13 of the derivatives margin rulebook
-chain (QĐ 96/QĐ-VSD → QĐ 61/QĐ-VSD Art. 13 → QĐ 12/QĐ-HĐTV → QĐ 26/QĐ-HĐTV) at
-confidence `high`, with the note that one older MBS PDF misprints level 3 as 90%* `[rb]`.
-(ii) vnstockgame's lot rule — see §2.3 item 10.
+80/90/100% margin-**utilisation** tiers were load-bearing for the margin sentence, and their
+citation has since collapsed — so the sentence must not lean on them. *Status in this repo
+(rulebook §6.3, corrected 2026-08-26): the "Article 13" attribution is **withdrawn**. QĐ 26's
+Điều 13 contains no percentage of any kind, and the only 80/90/100 anywhere in QĐ 26 is
+**Điều 29**, which measures the **position limit**, not margin. For 2025-05-05 → current the
+tiers are therefore **not a margin rule at all**; for the pre-KRX interval (2017-05-01 →
+2025-05-04) they are **UNVERIFIED, not disproven** — the chain QĐ 96/QĐ-VSD → QĐ 61/QĐ-VSD →
+QĐ 12/QĐ-HĐTV is broken at its final link (QĐ 26 does not say it) and the two middle links have
+never been read — so the row is now confidence `low`. Do not cite "Article 13" for the margin
+tiers, and do not present them as a sourced margin rule* `[rb]`. (ii) vnstockgame's lot rule —
+see §2.3 item 10.
 
 ### 4.2 Data-source degradation and indeterminacy — narrowed twice
 
@@ -938,6 +954,21 @@ sentence *"Run one strategy against all three policies and report the spread… 
 selling point"* and the phrase "pluggable policy". That is design-internal vocabulary. It
 must not be carried into the paper in that form; §4.3 above is the publishable form.
 
+**The same guardrail binds the new maker-fill work, and it is easy to trip.** The
+tape-driven maker-fill specs (`2026-08-28-tape-driven-maker-fill-design.md`, and the S8/S9
+strategies) also run one maker under three queue assumptions (optimistic / conservative /
+probabilistic) and call the divergence "the honest headline" of the intraday effort. In
+design-internal vocabulary that is fine; carried into the paper *as* "the spread is the
+reported result" it trips the binding guardrail above (Claeys 2026 owns that headline).
+Two facts keep it clear of the guardrail and must be stated in the paper's own words. First,
+S9 measures maker **shares** — the fraction of a resting order the queue lets through
+(`maker_shares`), the queue effect in isolation — **not P&L**; it is a sensitivity
+measurement, not a best-case/worst-case money spread. Second, per §4.3 the queue spread is
+reported **jointly with the indeterminate rate**, attributed to the exchange rule that could
+not be evaluated, and is **not** offered as a standalone "report the spread" novelty. Keep
+S8/S9 on the surviving side of the guardrail: the *joint*, rule-attributed, per-resolution
+form is what is ours, not the spread as such.
+
 ### 4.4 What is left, in one place
 
 | Component | Status after attacks |
@@ -949,7 +980,7 @@ must not be carried into the paper in that form; §4.3 above is the publishable 
 | "First to combine call auctions, price limits and a settlement cycle" | **Dropped entirely and prohibited.** EvoMarket (April 2026) does exactly this for China A-shares. |
 | Reporting the spread across fill assumptions as such | **Dropped as novelty.** Claeys (2026) reports the best/worst spread as his headline on 2.06 M bars. What survives is that our spread is bounded by **admissibility**, not only OHLC geometry. |
 | Settlement-business-day calendar wired to unsettled cash **and** unsettled shares in an order-driven engine | **Survives.** T+N and settlement-vs-trading calendars are both precedented; the wiring is not. |
-| MR = IM + VM, VM loss-only, segregated derivatives account, published utilisation tiers | **Survives as a composition only.** Utilisation tests, warning tiers and no-published-maintenance-ratio regimes are all precedented. |
+| Segregated derivatives account run as **two dated margin editions**: pre-KRX (≤2025-05-04) `MR = IM + VM`, VM loss-only; post-KRX (2025-05-05→) the QĐ 26 scenario stack `MR = Max(ΣPgm, 0)`, no VM component | **Survives as a composition only, and is now regime-split.** Utilisation tests, warning tiers and no-published-maintenance-ratio regimes are all precedented; the 80/90/100 *margin* ladder once cited here is **withdrawn** (unverified/`low` pre-KRX; post-KRX it is QĐ 26 Điều 29's **position-limit** monitor, not margin). |
 | Per-order INDETERMINATE for ambiguity of fill **existence**, through a broker-facing API, attributed to a named exchange rule | **Survives.** Bar-level path-ordering ambiguity with an aggregate count is prior art from 2011. |
 | Joint reporting of indeterminate rate and cross-policy divergence, per data resolution and per exchange rule | **Survives.** Reporting a divergence across execution conventions is routine practice; the joint, rule-attributed, per-resolution form is not. |
 | "Data-source agnostic"; "published data contract"; "explicit degradation"; "fidelity adapts to resolution" | **Dropped as novelty.** Established practice in LEAN, NautilusTrader, MT5, NinjaTrader, TradingView, TradeStation. |
@@ -979,9 +1010,11 @@ across price bands, so a simulator carrying one edition of the grid gets the oth
 wrong by a margin someone published. Second, it wires a **VSDC settlement-business-day
 calendar** (which
 diverges from the exchange trading calendar around Tết) to both an unsettled-cash pool and
-an unsettled-share pool, and runs Vietnamese derivatives margin as MR = IM + VM with VM
-accruing only on losing positions in a segregated deposit account tested at published
-utilisation tiers. Third, it returns **INDETERMINATE as a per-order status through the
+an unsettled-share pool, and runs Vietnamese derivatives margin as **two dated editions** in
+a segregated deposit account — pre-KRX (≤2025-05-04) `MR = IM + VM` with VM accruing only on
+losing positions, and post-KRX (2025-05-05→) the QĐ 26 scenario-margin stack
+`MR = Max(ΣPgm, 0)` the code implements (`scenario_margin.py`), in which daily P&L settles
+separately in cash. Third, it returns **INDETERMINATE as a per-order status through the
 broker-facing API for ambiguity of fill *existence*, attributed to the exchange rule that
 could not be evaluated**, and reports that rate jointly with the divergence across fill
 policies, per data resolution and per rule. **In the same breath, the scope limits:** there
@@ -1160,7 +1193,7 @@ Format: `key` — what it is · read as · locator.
 | `th-band` | Thailand SET band level post-COVID | **[U]** — verify at set.or.th |
 | `abm-mizuta` | Mizuta & Yagi, arXiv:2309.10220 | [V] |
 | `abm-magnet` | "The Magnet Effect of Price Limits: An Agent-Based Approach," *EMFT* 61(7), DOI 10.1080/1540496X.2024.2434042 | [R] |
-| `rb` | `docs/reference/vn-exchange-rulebook-2020-2026.md` §6.3 (VSD utilisation tiers, Art. 13 chain) | [V] this repo |
+| `rb` | `docs/reference/vn-exchange-rulebook-2020-2026.md` §6.3 (VSD margin-utilisation tiers — the "Art. 13" chain is **withdrawn**, corrected 2026-08-26: pre-KRX `low`/UNVERIFIED, and post-KRX the only 80/90/100 in QĐ 26 is Điều 29 = position limits, not margin) | [V] this repo |
 
 ---
 
