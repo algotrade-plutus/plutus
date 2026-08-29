@@ -5,7 +5,7 @@ and trust. Kept short on purpose: the full inventory is `FEATURES.md`, and this 
 the subset that blocks a release.
 
 Status as of 2026-08-29. Suites collected per-suite under the venv
-(`.venv/bin/python -m pytest`): **`tests/market` 1638 · `scenarios` 38 · `strategies` 13.**
+(`.venv/bin/python -m pytest`): **`tests/market` 1646 · `scenarios` 38 · `strategies` 13.**
 `scenarios` is fully green, and the 17 `tests/datahub/test_cli.py` CLI tests a *bare* `python -m
 pytest` once reported as failures **pass under the venv** (they spawn `python -m plutus.datahub`
 as a subprocess; outside the venv the child could not import `plutus` — an environment artefact,
