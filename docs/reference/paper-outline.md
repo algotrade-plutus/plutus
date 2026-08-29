@@ -256,8 +256,8 @@ rule.
 
 ### §6 Implementation and reproducibility
 
-Short. The module layout, the per-suite test counts (market 1628 / scenarios 38 / strategies
-11), and `reproduce_measurements.py`. **Data posture, stated honestly and up front: we do not
+Short. The module layout, the per-suite test counts (market 1638 / scenarios 38 / strategies
+13), and `reproduce_measurements.py`. **Data posture, stated honestly and up front: we do not
 claim a corpus.** The library is **bring-your-own-data** — it characterises whatever feed you
 point it at — and reproducibility is **two-tier**: (a) a **reproducible core** shipped in-repo
 — the Jx + Sx suites and their fixtures, so `clone → pip install → pytest` reproduces them for
@@ -314,7 +314,7 @@ are prohibited; see the header of this outline.
 | Bar-vs-tick lock agreement | **97.56%** on 173,168 ticker-days | §5 (indeterminacy) and §7 | Evidence for the resolution-dependence claim: a bar-inferred lock and a tick-observed lock disagree ~1 day in 41. Report the `locked_at_close` arm as the comparison; the `locked_all_session` arm is contrast only. |
 | Foreign room below one 100-share lot | **34,653** observations; FPT 2022-12-30 down to 11 shares | §8 threats (T1) | Evidence that the scope cut is a **choice**, not a discovery that the constraint never binds. Not a modelling result. |
 | Ten-check dataset audit incidences | e.g. inverted bands 1,272 rows on 3 days (0.155%); OHLC-invariant violations 327 + 99 of 3,877,981; HSX tick-grid 13 of 1,101,201 | §6 | Evidence the corpus was characterised, not assumed clean. Two defect classes (inverted bands, OHLC invariants) are independent, so a row can fail one and pass the other. |
-| Test count | market 1628 / scenarios 38 / strategies 11 | §6 | Reproducibility, not correctness. Do not present a test count as validation of the rules. |
+| Test count | market 1638 / scenarios 38 / strategies 13 | §6 | Reproducibility, not correctness. Do not present a test count as validation of the rules. |
 
 **Two figures the paper must generate that do not yet exist**, both from spec §11 Tier 3:
 

@@ -32,7 +32,7 @@ This file is the substitute for a memory the next session will not have.
   by `test_exchange.py::test_d71_tick_atc_does_not_fill_at_the_stale_last` and demonstrated by
   scenario **J37**; the §17 row is annotated FIXED below
 - **Suite:** collected per-suite under the venv (`.venv/bin/python -m pytest`), 2026-08-29:
-  **`tests/market` 1628 · `scenarios` 38 · `strategies` 11.** `scenarios` is fully green.
+  **`tests/market` 1638 · `scenarios` 38 · `strategies` 13.** `scenarios` is fully green.
   **Caveat on market/strategies pass count:** **MUST #4 (daily variation-margin) has landed
   2026-08-29** — `settle_daily` is wired into `exchange._overnight_margin` (moves cash + rolls
   the baseline, both regimes). The three items that were **red on the in-progress tree** were
@@ -1658,7 +1658,7 @@ queue-position rows, §16.3 #26) have been restated as **"queue position, not de
 
 **Suite:** not re-run by this pass; nothing here changed code. The header's 2,308 figure
 predated `test_book_walk.py` and `test_depth_adapter.py` and has **since been re-measured** —
-the header now records per-suite counts (market 1628 / scenarios 38 / strategies 11) with the
+the header now records per-suite counts (market 1638 / scenarios 38 / strategies 13) with the
 caveat that market/strategies were not cleanly re-measured — the working tree held in-progress
 MUST #4 (daily-VM) changes at the time, against which S1/S7 and one margin-incidence test were
 red (WIP, not a committed defect). `scenarios` is green; the `tests/datahub/test_cli.py`
