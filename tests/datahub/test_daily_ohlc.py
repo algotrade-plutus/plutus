@@ -147,12 +147,3 @@ def test_missing_field_error_names_field_and_query():
     message = str(excinfo.value)
     assert 'matched_price' in message
     assert "get_ohlc(interval='5m')" in message
-
-
-def test_bot_module_imports_and_refuses_to_run():
-    """WP1d: bot.py must import cleanly and never fake a backtest."""
-    from plutus.core.bot import Bot
-
-    bot = Bot(algorithm=None, portfolio=None, datahub=None)
-    with pytest.raises(NotImplementedError):
-        bot.run()

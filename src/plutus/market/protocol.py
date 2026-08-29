@@ -17,8 +17,9 @@ from decimal import Decimal
 from enum import Enum
 from typing import Optional, Tuple
 
-# Importable and safe. Unlike plutus.core.position / transaction / portfolio /
-# algorithm / bot, which all raise ModuleNotFoundError on a bare `import utils`.
+# order.py is a live, safe value type. The legacy position / transaction /
+# portfolio / algorithm / bot modules have been archived out of the package
+# (see archive/legacy-trader-stack/); nothing here depends on them.
 from plutus.core.order import OrderType, Side
 
 __all__ = [
@@ -179,8 +180,8 @@ class Order:
 class Position:
     """An open position, for position-survival evaluation.
 
-    Deliberately NOT ``plutus.core.position.Position``: that module is
-    unimportable, and it requires ``portfolio_id`` and ``capital`` -- portfolio
+    Deliberately NOT the legacy ``core.position.Position`` (archived out of the
+    package): that one required ``portfolio_id`` and ``capital`` -- portfolio
     concepts this package excludes by design.
     """
 

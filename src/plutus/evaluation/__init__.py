@@ -1,4 +1,10 @@
-"""Performance evaluation module for trading algorithms.
+"""Performance evaluation — an optional, post-hoc metrics helper.
+
+**Scope.** This subpackage is *not* part of Plutus's exchange model. It computes
+risk/return statistics from a returns series the **caller** supplies; it does not
+generate returns, run a strategy, or simulate a market. The exchange model
+(``plutus.market`` / ``plutus.market.session``) ships no backtester, portfolio,
+or P&L — this helper is a separate convenience and can be ignored entirely.
 
 This module provides comprehensive performance evaluation tools including:
 - PerformanceEvaluator: Main class for calculating 20+ performance metrics

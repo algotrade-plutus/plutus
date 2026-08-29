@@ -5,8 +5,8 @@ market data queried directly from CSV/Parquet with no database to install, and
 the market's own structural rules (price-limit bands, price-dependent tick
 grids, round lots, trading sessions) as first-class objects.
 
-Plutus does **not** ship a backtesting or live-execution engine. See
-:mod:`plutus.core.bot`.
+Plutus does **not** ship a backtesting or live-execution engine. An earlier
+attempt at one was removed from the package; see ``archive/legacy-trader-stack``.
 
 Example:
     >>> from plutus.datahub import OHLCQuery
