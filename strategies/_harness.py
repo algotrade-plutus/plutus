@@ -22,8 +22,11 @@ Two pieces:
   margin lifecycle never runs.
 
 Reproducibility: point ``PLUTUS_DATA_ROOT`` at your corpus (a directory of
-``quote_*.parquet`` files). Unset falls back to the author's machine, so the
-suite runs here out of the box and is one env var away from running anywhere.
+``quote_*.parquet`` files). Unset falls back to the **shipped in-repo fixtures**
+(``strategies/fixtures/parquet`` -- the minimal daily slice this suite reads,
+Workstream W7), so a fresh ``clone -> pip install -> pytest strategies/`` runs
+out of the box with no external dataset, and is one env var away from the full
+corpus. See ``strategies/fixtures/regenerate.py`` for what the slice contains.
 """
 from __future__ import annotations
 
@@ -39,8 +42,11 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 from plutus.market.session import ExchangeSession
 from plutus.market.adapters.datahub import DataHubSource
 
-#: Fallback corpus (author's machine). Override with PLUTUS_DATA_ROOT.
-DEFAULT_DATA_ROOT = "/Users/nadan/algotrade-research/dataset/hermes-parquet"
+#: Fallback corpus: the shipped in-repo fixtures (Workstream W7), so the suite
+#: runs on a bare clone with no external dataset. Override with PLUTUS_DATA_ROOT
+#: to read the full corpus instead. See ``strategies/fixtures/``.
+FIXTURES_DATA_ROOT = str(Path(__file__).resolve().parent / "fixtures" / "parquet")
+DEFAULT_DATA_ROOT = FIXTURES_DATA_ROOT
 
 #: The daily-resolution adapter over the corpus.
 DEFAULT_ADAPTER = "plutus.market.adapters.datahub.DataHubSource"

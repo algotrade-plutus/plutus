@@ -44,15 +44,19 @@ from plutus.core.order import OrderType, Side
 
 PRICE_SCALE = Decimal(1000)          # corpus prices are thousands of đồng
 
+#: The shipped in-repo fixtures (Workstream W7): the minimal intraday book/tape
+#: slice S8/S9 read (FPT 2022-11-09 + the VN30F2504 variant), plus the daily
+#: price/band slice, so a bare clone runs with no external extract mounted. The
+#: env vars override each to the full corpus. See ``strategies/fixtures/``.
+_FIXTURES = Path(__file__).resolve().parent / "fixtures"
+
 
 def _extract() -> Path:
-    return Path(os.environ.get("PLUTUS_DEPTH_ROOT",
-                               "/Users/nadan/algotrade-research/dataset/hermes-dev-extract"))
+    return Path(os.environ.get("PLUTUS_DEPTH_ROOT", str(_FIXTURES / "extract")))
 
 
 def _prices() -> str:
-    return os.environ.get("PLUTUS_DATA_ROOT",
-                          "/Users/nadan/algotrade-research/dataset/hermes-parquet")
+    return os.environ.get("PLUTUS_DATA_ROOT", str(_FIXTURES / "parquet"))
 
 
 def tape_available() -> bool:
