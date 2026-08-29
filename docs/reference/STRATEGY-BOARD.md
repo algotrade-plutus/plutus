@@ -7,6 +7,13 @@ Where a scenario *stages* a rule, a strategy makes the same moment **emerge from
 corpus data**. Same two tiers, same oracle (the catalogue citations), same rule: **on failure we
 fix the simulator, never the strategy.**
 
+> **Current status (2026-08-29): 9 strategies (S1–S9), all Tier 2; suite green.** S1–S7 (the
+> daily layer) reached Tier 2 on 2026-08-28; **S8/S9** — the intraday inventory market-maker and
+> the queue-sensitivity study — landed after, on the tape-driven maker fill. The two real library
+> builds below were regression-verified at 1,596 market tests; the suite is now **1,646** (+8 FEL).
+> Also since: **daily VM cash settlement (MUST #4) landed 2026-08-29**, which shifts S1's margin
+> lifecycle from "call → forced" to a jump **straight to forced** (see S1 below).
+
 ## Two tiers
 - **T1 — it runs:** the loop completes the whole window, no crash, every order gets a real answer,
   no unwarranted INDETERMINATE, the equity curve is produced.
@@ -25,8 +32,11 @@ fix the simulator, never the strategy.**
 | **S5** | High-turnover advance scalper | throttled by T+2 without the advance; the advance costs a fee | J15 J16 J24 · J1 impl · J25 next | ✅ | ✅ | passed on the existing library |
 | **S6** | Regime-straddle across KRX cutover | trades live pre-KRX; refuses post-KRX (model unsourced) | J18 J19 · J27 in scen. | ✅ | ✅ | pre-KRX live; post-KRX at rulebook level |
 | **S7** | Fidelity-sensitivity harness | S1's history is −76% or 0% purely by fill policy | J10 J20 · J13 J21 J22 in scen. | ✅ | ✅ | passed on the existing library |
+| **S8** | Intraday inventory market-maker | two-sided **maker** fills off the tape at its own prices; inventory skew fires; T+2 blocks the intraday round-trip | J28 J30 J32 | ✅ | ✅ | **BUILT** tape-driven maker fill |
+| **S9** | Queue-sensitivity study | same maker, three queue assumptions, quote held identical → **~18.9% maker-fill swing** is the queue's alone | J29 J33 | ✅ | ✅ | on the maker-fill build |
 
-Every one of the 27 scenarios is folded into ≥1 strategy (matrix in the design doc §5).
+Every one of the 27 catalogue scenarios is folded into ≥1 strategy (matrix in the design doc §5);
+the J28–J37 intraday extension is exercised by S8/S9.
 
 ## Build order (by importance to users)
 1. **Harness** (`_harness.py`) — Strategy protocol + `run()` day-loop + `RunLedger`/conservation.
@@ -121,25 +131,31 @@ Every one of the 27 scenarios is folded into ≥1 strategy (matrix in the design
   (the enum shows `MTL` both sides — MP and MTL are one member — so the type-flip isn't strategy-
   assertable here).
 
-## FINAL — 7 / 7 strategies Tier 2 (2026-08-28)
+## FINAL — 9 / 9 strategies Tier 2
+
+*(S1–S7 completed 2026-08-28; S8/S9 landed after, on the tape-driven maker fill.)*
 
 | Strategy | Emergent finding | Build |
 |---|---|---|
-| S1 VN30F mean-reversion | over-lever → 2 calls → forced liquidation, −76% | existing lib |
+| S1 VN30F mean-reversion | over-lever → daily VM depletes the deposit **past the call rung → forced liquidation**, −76% | existing lib |
 | S2 leveraged equity momentum | stop gapped through 14 limit-down locks → forced sale, −86% | existing lib |
 | S3 basket vs future + ex-date | two pools; held HPG paid 4.5M gross through the session | **`apply_corporate_action`** |
 | S4 auction-only rebalancer | 8 ATO@open, 5 ATC@close, 0 continuous fills, via the session | **`AuctionAwareDataHubSource`** |
 | S5 advance-turnover scalper | throttled 4 days by T+2 without the advance; advance fee 545k | existing lib |
 | S6 KRX regime-straddle | trades live pre-KRX; refuses post-KRX (model unsourced) | existing lib |
 | S7 fill sensitivity | S1's history is −76% or 0% purely by fill policy | existing lib |
+| S8 intraday market-maker | two-sided **maker** fills off the tape; inventory skew fires; no intraday round-trip (T+2) | **tape-driven maker fill** |
+| S9 queue-sensitivity | the queue assumption alone moves the maker fill **~18.9%** | on the maker build |
 
-**Two real library builds** (`ExchangeSession.apply_corporate_action`,
-`adapters/auction_daily.AuctionAwareDataHubSource`), each smoke-tested and regression-verified at
-**1596 market tests, twice**. Five of seven passed on the existing engine — the sim was faithful
-enough that the strategy suite mostly *confirmed* fidelity (forced liquidation executes; a sale into
-a limit-down lock is refused) rather than forcing fixes. Follow-ups, none blocking: `J9`/`J17`/`J22`
-thin-leg/round-lot/cap in S3; `J12` MOK/MAK in S4; the `D71` tick-path ATC one-condition fix;
-`RunLedger.equity()` netting the advance/pending receivable; `J25` a data-gap run.
+**Two real library builds for the daily suite** (`ExchangeSession.apply_corporate_action`,
+`adapters/auction_daily.AuctionAwareDataHubSource`), each regression-verified at **1,596 market
+tests** (the suite is now **1,646** with FEL); five of the seven daily strategies passed on the
+existing engine — the sim was faithful enough that the suite mostly *confirmed* fidelity (forced
+liquidation executes; a sale into a limit-down lock is refused) rather than forcing fixes.
+**S8/S9** run on the **tape-driven maker fill** (the intraday book-walk + maker-from-tape layer).
+Follow-ups, none blocking: `J9`/`J17`/`J22` thin-leg/round-lot/cap in S3; `J12` MOK/MAK in S4;
+`RunLedger.equity()` netting the advance/pending receivable; `J25` a data-gap run. (The `D71`
+tick-path ATC fix has since **landed** — MUST #5.)
 
 ## Running
 ```bash

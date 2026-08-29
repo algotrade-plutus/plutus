@@ -5,6 +5,13 @@ The 27 catalogue scenarios (`SCENARIO-CATALOGUE.md`) are our acceptance spec. Ea
 library surface, the way a `pip install`'d strategy developer interacts with Plutus. This
 board is the worksheet we drive down, top to bottom, in **importance-to-users** order.
 
+> **Current status (2026-08-29): 37 files / 38 tests, all green; all five MUST items landed.**
+> The importance-ordered table below is the original **J1–J27** (the `SCENARIO-CATALOGUE.md`
+> set). The intraday extension **J28–J37** (book-walk / queue / maker / tape / tick, driven
+> through the *public* `session.submit`/`advance_to`) is summarised in its own section after
+> the table. The market suite is now **1,646** (the builds recorded below landed at 1,596).
+> The "Catalogue status" column is the 2026-08-27 snapshot; every row is Tier 1 + Tier 2 today.
+
 ## How to read it
 
 Two tiers of pass, per the working method:
@@ -45,7 +52,7 @@ surface surface-gaps the privileged tests hid (J1 already did — see below).
 | 11 | J14 | ATO vs a marketable LO into the same auction | Blocked | **T1 ✅ T2 ✅** | ATO & LO both cross at published open 73.3 (policy-level, like J13) |
 | 12 | J7 | Auction-only strategy (ATO/ATC) | Blocked | **T1 ✅ T2 ✅** | ATO→open 73.3, ATC→close 74.0 (policy-level, like J13) |
 | **Margin, leverage, forced close — the dangerous mechanisms** |
-| 13 | J3 | Leveraged VN30F into drawdown → call → forced liquidation | Partial | **T1 ✅ T2 ✅** | **MUST #3 BUILT** — forced liq now executes (net→0); MUST #4 (VM daily) declared pending |
+| 13 | J3 | Leveraged VN30F into drawdown → call → forced liquidation | Partial | **T1 ✅ T2 ✅** | **MUST #3 + #4 BUILT** — forced liq executes (net→0); VM now settles in cash daily (2026-08-29) |
 | 14 | J5 | Margin-financed equity called → force-sold (bán giải chấp) | Yes | **T1 ✅ T2 ✅** | HPG margin: loan 92M → 5 calls → 21 forced sales, all executed |
 | 15 | J26 | Day-trader vs overnight holder: the two margin layers | Yes | **T1 ✅ T2 ✅** | swing IM 12.285M vs day IM 0 (VN30F2212, pre-KRX) |
 | 16 | J18 | VSD initial-margin change (2022-12-15): 13% → 17% overnight | Yes | **T1 ✅ T2 ✅** | IM 13.78M→18.02M, ratio 0.13→0.17, +30.8% (VN30F2301) |
@@ -63,6 +70,27 @@ surface surface-gaps the privileged tests hid (J1 already did — see below).
 | 26 | J25 | A strategy meeting a data gap | Yes | **T1 ✅ T2 ✅** | is_clean=False at indeterminate=0; 4 blind spots named |
 | 27 | J10 | Naive fill-at-close backtest vs Plutus — the delta | Yes | **T1 ✅ T2 ✅** | naive exits (holds 0); Plutus BAND_LOCK (holds 1000) |
 
+## The intraday extension — J28–J37 (added after the catalogue; through the public session)
+
+These drive the depth/tape machinery **through `session.submit`/`advance_to`** — what J13/J21
+could only show off-session. All need the dev-extract book/tape (`hermes-dev-extract`) and
+`skipif`-skip cleanly without it; **all green.** They are the acceptance side of the intraday
+book-walk (J28–J31), the tape-driven maker fill (J32–J36), and the tick-path closing auction
+(J37). Companion strategies: S8/S9.
+
+| J# | Mechanism | Note |
+|----|-----------|------|
+| J28 | Book-walk **taker** fill through the session | marketable BUY fills at the resting ask level (73.40), not a bar close; provenance names `book_walk` + queue (QĐ 352 Điều 6.3) |
+| J29 | Queue policy by config | same order, three fills (optimistic / conservative / probabilistic), each stamped in provenance |
+| J30 | Marketable order **sweeps** the book | one fill per ask level at each level's own price; cash < worst-price × qty; `MODELLED` evidence |
+| J31 | Stale book | a 60s staleness budget refuses a fill on a ~30-min-old book (stays live), not rejected; removing the budget fills it |
+| J32 | **Maker fill from the tape** | resting SELL fills as trades print through at its own price (`MODELLED`) while the best bid never reaches it; second test: no double-book across advances |
+| J33 | Maker queue spread on one tape | optimistic 6000 / conservative 1000 / probabilistic 2500 — the queue assumption *is* the spread |
+| J34 | Maker where nothing trades through | a **definite** no-fill (served-but-empty tape = knowledge); rests full; ignorance stays clean |
+| J35 | Maker on a tape it can't see | **INDETERMINATE naming VOLUME** (unserved tape), stays live — the epistemic opposite of J34 |
+| J36 | Tape integrity | sized tape from `quote.total` deltas sums to the real 697,700; `matchedvolume` is lossy (402,300) and not used |
+| J37 | Tick-path closing auction | returns the **published close** (98.0), never the stale `last` (100.0) — **fixes D71 = MUST #5** |
+
 ## Infrastructure
 
 - **Venv:** `.venv` (Python 3.12), package installed editable — `.venv/bin/pip install -e
@@ -72,10 +100,12 @@ surface surface-gaps the privileged tests hid (J1 already did — see below).
   holds the shared corpus-discovery + `build_session` plumbing; scenario bodies read as a
   user's own program.
 
-## ✅ COMPLETE — 27 / 27 scenarios Tier 2 (2026-08-28)
+## ✅ COMPLETE — all scenarios Tier 2
 
-Every catalogue scenario runs as user code against the public library surface and its outcome
-matches the cited Vietnamese rule. `.venv/bin/python -m pytest scenarios/` → **27 passed**.
+**As of 2026-08-29: 38 tests green.** The original J1–J27 reached Tier 2 on 2026-08-28; the
+J28–J37 intraday extension landed after. Every scenario runs as user code against the public
+library surface and its outcome matches the cited Vietnamese rule.
+`.venv/bin/python -m pytest scenarios/` → **38 passed**.
 
 **Real library builds this pass (each regression-gated on the 1,596-test market suite):**
 - **MUST #2** — `amend` re-runs encumbrance + admission (amend-up re-funds, odd-lot decrease
@@ -85,12 +115,14 @@ matches the cited Vietnamese rule. `.venv/bin/python -m pytest scenarios/` → *
 - Adapter fix — `DataHubSource` accepts a root string so the documented `from_config` path
   wires the corpus.
 
-**Still declared (not blockers to the suite, tracked on the checklist):** MUST #4 (VM settles
-in cash daily — J3 declares VM cumulative-since-entry, A60); MUST #5 / the auction phase
-source (J7/J14 are demonstrated at the policy level, like the injected book walk J13/J21 —
-the session-path source that emits an auction phase is the remaining wiring); post-KRX
-scenario-margin `SMrate`/`MF` values (J19 shows the model is dated and the post-KRX side
-honestly raises `UnresolvedRule`).
+**Since landed (2026-08-29):** **MUST #4** — VM now settles in cash daily (`settle_daily` wired
+into `exchange._overnight_margin`, `3e7e17a`); J3/J6/J26 carry it. **MUST #5** — the tick-path
+closing auction returns the published close, not a stale `last` (D71 fixed, `74e667a`); exhibited
+by **J37**. The auction *phase-carrying data path* for the default daily session (J7/J14) remains a
+checklist SHOULD, not a MUST — the auction fill itself is built and demonstrated (S4 crosses 8 ATO
+/ 5 ATC through the session on `AuctionAwareDataHubSource`). **Still declared:** post-KRX
+scenario-margin `SMrate`/`MF` values (J19 shows the model is dated and the post-KRX side honestly
+raises `UnresolvedRule`).
 
 ## Data sourcing (planned — never a blocker)
 
@@ -126,9 +158,10 @@ Credential + DB details are in memory (`production-db-access`, `local-quote-db-t
   executes (gated on `in_forced_breach` latched before the mark). Verified: leveraged VN30F
   long → margin call → forced liquidation `executed=True`, position net→0. **1,596 market
   tests pass**; the three tests that pinned the Tier-1 non-execution pass unchanged because
-  they end on the first (cure-window) forced mark. **MUST #4** (VM settles in cash daily,
-  A60) is a separate semantic change that ripples through the derivatives tests — declared
-  pending, VM is reported cumulative-since-entry. `scenarios/test_j3_forced_liquidation.py`.
+  they end on the first (cure-window) forced mark. **MUST #4** (VM settles in cash daily, A60)
+  was a separate semantic change — **since landed 2026-08-29** (`settle_daily` wired into
+  `exchange._overnight_margin`, `3e7e17a`): VM is now the day's move settled in cash, not
+  cumulative-since-entry. `scenarios/test_j3_forced_liquidation.py`.
 - **J27 — DONE, Tier 1 + Tier 2 green, via a real library build (MUST #2).** `amend` now
   re-runs the encumbrance and admission: an amend-up grows the reservation (70M → 105M) or is
   refused `INSUFFICIENT_CASH`; a price amendment is re-checked against the band; a decrease
@@ -155,10 +188,10 @@ Credential + DB details are in memory (`production-db-access`, `local-quote-db-t
     named by a dotted path. Fixed by letting `DataHubSource.__init__` accept a root string.
     35 adapter tests still pass. This is the kind of surface-gap only *user-code* runs find.
 
-## The five MUST items, as scenario failures
+## The five MUST items — all landed
 
-The publish checklist's MUST list is just "which scenarios are red," and the board shows it:
-MUST #1 (order-book walk) gates the **sweep** half of J13 and J21; MUST #2 (amend re-runs
-encumbrance/admission) is J27; MUST #3/#4 (forced liquidation executes / VM settles) are J3;
-the auction phase data path is J14 and J7. Driving those scenarios green *is* clearing the
-release gate.
+The publish checklist's MUST list is just "which scenarios are red." **All five are now green:**
+**#1** order-book walk (J13 sweep · J28 · J30); **#2** amend re-runs encumbrance/admission (J27);
+**#3** forced liquidation executes (J3 · J5); **#4** VM settles in cash daily (J3 · J6 · J26,
+`3e7e17a`, 2026-08-29); **#5** tick-path close-as-ATC (J37, `74e667a`, 2026-08-29). The release
+gate is clear.
