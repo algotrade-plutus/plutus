@@ -70,6 +70,9 @@ from plutus.market.session.exchange import (
     EXCHANGE_BY_VENUE, ExchangeSession, IntervalSource, Session,
     charge_class_for, load_data_source, parse_config,
 )
+from plutus.market.session.evidence_level import (
+    AssumptionKind, FillEvidenceLevel, assumption_kind, fill_evidence_level,
+)
 from plutus.market.session.fills import (
     BaseFillPolicy, FillPolicy, HardFillPolicy, SoftFillPolicy,
     build_fill_policy, floor_to_lot, participation_cap,
@@ -141,6 +144,7 @@ __all__ = [
     'FillPolicy', 'BaseFillPolicy', 'SoftFillPolicy', 'HardFillPolicy',
     'build_fill_policy', 'floor_to_lot', 'participation_cap',
     'Fill', 'FillDecision', 'FillOutcome', 'FillEvidence', 'MarketInterval',
+    'FillEvidenceLevel', 'AssumptionKind', 'fill_evidence_level', 'assumption_kind',
     'DataField',
     # -- results and provenance -------------------------------------------
     'Accepted', 'Rejected', 'Cancelled', 'Amended', 'Transferred',
