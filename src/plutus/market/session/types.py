@@ -614,12 +614,17 @@ class FillEvidence(str, Enum):
 
 
 class DataField(str, Enum):
-    """A field of the data-source contract, named on an ``INDETERMINATE``.
+    """The **cause** named on an ``INDETERMINATE`` -- almost always a missing
+    field of the data-source contract, and in one case the resolution itself.
 
     Design section 9.2: "**Nothing silently defaults.** A missing field
     produces ``INDETERMINATE`` with the field named, and the session reports
     the rate." This enum is what "named" means -- a free-form string could not
-    be counted, and :class:`IndeterminateReport` counts by field.
+    be counted, and :class:`IndeterminateReport` counts by it. All members are
+    absent *data fields* except :attr:`FILL_UNOBSERVABLE_AT_RESOLUTION`, which
+    is a cause of a different kind -- the resolution limit, present even when
+    the data is complete -- kept on this same axis because it is likewise a
+    named, countable cause of an indeterminate (see that member).
     """
 
     LAST = 'last'
@@ -640,6 +645,16 @@ class DataField(str, Enum):
     must name this field, not ``BOOK``."""
     FOREIGN_ROOM = 'foreign_room'
     SETTLEMENT_PRICE = 'settlement_price'
+    FILL_UNOBSERVABLE_AT_RESOLUTION = 'fill_unobservable_at_resolution'
+    """**Not a missing field -- the resolution limit itself.** A bar can show
+    the market touched an order's price and still not establish whether *that*
+    order filled: time priority decides it, and with no order ids (and 81% of
+    best-quote changes carrying no trade) it cannot be recovered from a bar. No
+    amount of *additional* data fixes it -- only a finer resolution does -- so
+    it is the honest floor a bar-resolution run reports, and the one cause whose
+    share *falls* as the data gets finer rather than as it gets more complete.
+    Named by :func:`fills._touched`; the counterpart data-ceiling causes at tick
+    resolution (``BOOK``/``BOOK_SIZE``/``VOLUME``) are ordinary missing fields."""
 
 
 # --------------------------------------------------------------------------

@@ -2638,5 +2638,5 @@ def _touched(observed: Decimal) -> FillDecision:
         f'through it; whether this order was ahead in the time-priority queue '
         f'cannot be recovered -- there are no order ids and 81% of best-quote '
         f'changes carry no trade',
-        (),
+        (DataField.FILL_UNOBSERVABLE_AT_RESOLUTION,),
     )

@@ -307,18 +307,22 @@ def test_hard_fills_only_on_a_trade_strictly_through_the_limit(side, extreme,
     assert decision.outcome is expect
 
 
-def test_the_touch_is_indeterminate_with_nothing_missing():
-    """Touched-at-limit is the one INDETERMINATE that names no missing field.
+def test_the_touch_is_indeterminate_naming_the_resolution_limit():
+    """Touched-at-limit is the one INDETERMINATE whose cause is the resolution,
+    not a missing field.
 
-    The distinction matters for `IndeterminateReport`: this is not a data gap
-    that a better adapter could close, it is unrecoverable from any corpus
-    without order ids. 81% of best-quote changes carry no trade, so order flow
-    cannot be reconstructed even in principle from what we have.
+    The distinction matters for `IndeterminateReport`: this is not a data gap a
+    better adapter could close, it is unrecoverable from any corpus without
+    order ids (81% of best-quote changes carry no trade). So it names
+    ``FILL_UNOBSERVABLE_AT_RESOLUTION`` -- a named, countable cause on the same
+    axis as the missing fields, but the one whose share falls with finer
+    resolution rather than with more complete data (F2).
     """
     decision = HardFillPolicy().evaluate(
         _order(), _interval(low=LIMIT), HSX_EXCHANGE, instrument=HSX_LOT)
     assert decision.outcome is FillOutcome.INDETERMINATE
-    assert decision.missing == frozenset()
+    assert decision.missing == frozenset(
+        {DataField.FILL_UNOBSERVABLE_AT_RESOLUTION})
     assert 'time-priority' in decision.reason
 
 
@@ -681,8 +685,10 @@ def test_soft_and_hard_diverge_exactly_at_the_touch():
     assert soft.outcome is FillOutcome.FILL and soft.quantity == 1000
     assert soft.evidence is FillEvidence.TOUCHED_AT_LIMIT
     assert hard.outcome is FillOutcome.INDETERMINATE
-    # Not a data gap: the interval is complete. The gap is queue position.
-    assert hard.missing == frozenset()
+    # Not a data gap: the interval is complete. The cause is the resolution --
+    # the touch is unobservable at this resolution, and named as such.
+    assert hard.missing == frozenset(
+        {DataField.FILL_UNOBSERVABLE_AT_RESOLUTION})
     assert 'time-priority' in hard.reason
     # And each carries the assumption that produced it, so the two runs cannot
     # be compared without knowing which is which.
