@@ -1,4 +1,13 @@
-"""How often would the exchange call a front-month VN30F long?
+"""How often would the exchange call a front-month VN30F long? (RETIRED path.)
+
+**Retired from the paper's measurement path (W4).** This module applies a
+**flat** VSD initial-margin rate and never settles variation margin in cash, so
+its incidence is not the Vietnamese regime's -- no regime has a flat maintenance
+rate. ``reproduce_measurements.py`` now measures margin incidence with
+``margin_incidence_account.measure_account_margin_incidence``: the real
+``DerivativesAccount`` on the **dated** VSD series (10 -> 13 -> 17%) with MUST #4
+daily variation-margin cash settlement. This module is kept only as the legacy
+comparator these two are contrasted against.
 
 The entry policy is part of the result and is stated in the output: enter long
 one contract at each session close of the front-month series, hold H sessions
@@ -8,10 +17,11 @@ Front-month membership comes from ``quote_futurecontractcode`` where
 ``futurecode = 'VN30F1M'``, which begins 2021-06-01 (VN30F2101-2105 are absent
 from the corpus entirely, so no front-month series can start earlier).
 
-The margin rate is a **modelling assumption** -- 17.5% VSD initial plus a 5%
-broker buffer -- because no margin data exists in either corpus. Reporting
-incidence across a range of rates is therefore part of the deliverable, not a
-fallback.
+The margin rate here is a **flat modelling assumption** -- a fixed VSD initial
+rate plus a 5% broker buffer, swept across a range -- which is precisely why the
+path is retired: the flat rate is not dated and no maintenance ratio exists in
+either regime. The dated 10/13/17% series lives in ``plutus.market.margin.
+vsd_initial_margin`` and is what the account path applies.
 
 Do not report a buy-and-hold-to-expiry figure as an incidence: holding every
 contract from first close to last calls all of them at these rates, which is a

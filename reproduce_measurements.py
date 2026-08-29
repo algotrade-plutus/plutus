@@ -344,23 +344,65 @@ def measure_exchange_grid(data_root: Path) -> Dict[str, Any]:
     )}
 
 
+def _wilson_ci(k: int, n: int, z: float = 1.96) -> Dict[str, float]:
+    """95% Wilson score interval for a proportion k/n, for the headline rates."""
+    if n <= 0:
+        return {"lo": 0.0, "hi": 0.0}
+    import math
+    p = k / n
+    d = 1.0 + z * z / n
+    centre = (p + z * z / (2 * n)) / d
+    half = (z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n))) / d
+    return {"lo": round(centre - half, 4), "hi": round(centre + half, 4)}
+
+
 def measure_exchange_margin(data_root: Path) -> Dict[str, Any]:
-    """Front-month margin-call incidence, plus a rate sensitivity panel."""
+    """Front-month VN30F margin incidence from the real account model, plus the
+    KRX-cutover regime split.
+
+    Drives an actual ``DerivativesAccount`` through
+    ``deposit.account_margin_requirement`` on the **dated** VSD initial-margin
+    series (10 -> 13 -> 17%) with **daily variation-margin cash settlement**
+    (MUST #4), replacing the retired flat-maintenance-ratio measurement that
+    fired on a fictional ``margin.ratio < 0.17`` -- a quantity the engine itself
+    disavows; no Vietnamese regime has a maintenance ratio. ``funding_multiple``
+    is the one free parameter (deposit as a multiple of the opening requirement),
+    reported at the fitted value and swept so the assumption is visible. Headline
+    rates carry a 95% Wilson interval. ``regime_split`` is the dated-editions
+    demonstration: the same book under pre-KRX IM vs the post-KRX scenario grid.
+    """
     try:
         from decimal import Decimal
 
-        from measurements.margin_incidence import measure_margin_incidence
+        from measurements.margin_incidence_account import (
+            BEST_JOINT_FIT, measure_account_margin_incidence)
+        from measurements.regime_split import measure_regime_split
     except ImportError as exc:  # pragma: no cover
         return {"error": f"could not import measurements: {exc}"}
 
-    out = {f"hold_{h}": measure_margin_incidence(
-        str(data_root), holding_days=h).to_dict() for h in (5, 10, 20)}
-    out["sweep"] = {
-        rate: measure_margin_incidence(
-            str(data_root), holding_days=10,
-            initial_rate=Decimal(rate)).to_dict()
-        for rate in ("0.150", "0.175", "0.200", "0.225", "0.250", "0.300")
+    def _with_ci(r: Dict[str, Any]) -> Dict[str, Any]:
+        n = int(r.get("entries") or 0)
+        r["call_ci95"] = _wilson_ci(int(r.get("called") or 0), n)
+        r["forced_ci95"] = _wilson_ci(int(r.get("forced") or 0), n)
+        return r
+
+    out: Dict[str, Any] = {
+        f"hold_{h}": _with_ci(measure_account_margin_incidence(
+            str(data_root), holding_days=h, funding_multiple=BEST_JOINT_FIT,
+            settle_daily=True).to_dict())
+        for h in (5, 10, 20)
     }
+    # The one free parameter, made visible: incidence across funding levels at
+    # the 10-session hold (deposit as a multiple of the opening requirement).
+    out["funding_sweep"] = {
+        str(m): measure_account_margin_incidence(
+            str(data_root), holding_days=10, funding_multiple=m,
+            settle_daily=True).to_dict()
+        for m in (Decimal("1.2"), BEST_JOINT_FIT, Decimal("1.6"), Decimal("2.0"))
+    }
+    out["regime_split"] = measure_regime_split(str(data_root))
+    out["model"] = ("account: dated VSD IM series + daily cash settlement "
+                    "(QD 26 Dieu 20); no maintenance ratio")
     return out
 
 

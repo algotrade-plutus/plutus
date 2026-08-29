@@ -694,3 +694,23 @@ def test_the_provenance_does_not_reassert_the_refuted_disagreement():
     assert 'SUPERSEDED' in reproduction
     assert '1.4110' in reproduction
     assert 'margin-model-adjudication' in reproduction
+
+
+@requires_corpus
+def test_the_krx_cutover_raises_the_requirement_on_the_same_book(corpus_root):
+    """Dated rule editions, measured (the derivatives half of the lead claim).
+
+    The same VN30F book faces a materially higher requirement under the post-KRX
+    scenario grid than under the pre-KRX IM -- each resolved under its own
+    regime's rules, because the engine refuses the post-KRX parameters at a
+    pre-KRX date (the effective-dating machinery working, not a counterfactual).
+    """
+    from measurements.regime_split import measure_regime_split
+
+    out = measure_regime_split(str(corpus_root))
+    assert out['positions'] == 381
+    assert out['refused'] == 0
+    # ~30% stricter: the KRX rule edition alone, with the book held fixed.
+    ratio = Decimal(out['mean_ratio'])
+    assert Decimal('1.25') < ratio < Decimal('1.35'), ratio
+    assert Decimal(out['post_krx_mean_mr']) > Decimal(out['pre_krx_mean_mr'])
