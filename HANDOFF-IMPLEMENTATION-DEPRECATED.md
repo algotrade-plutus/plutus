@@ -1,5 +1,13 @@
 # Implementation handoff — Plutus library, RIVF'26 ecosystem paper
 
+> **⚠️ DEPRECATED / SUPERSEDED — kept for history only.** This is the original
+> 15 Aug 2026 work order; it has been overtaken by the exchange fill model, the
+> simulator, and everything since. Several of its load-bearing claims failed
+> later verification (see the `handoff-doc-corrections` memory). **For the current
+> state, start at `docs/reference/PAPER-HANDOFF.md`** (launchpad) →
+> `docs/reference/PAPER-COMPENDIUM.md` (full record). Do not treat anything below
+> as current.
+
 **Written 15 Aug 2026.** Audience: the Claude Code session (and the user) doing the
 actual development. This document is the work order. It assumes no memory of the
 sessions that produced `DIRECTION.md`, `IMPROVEMENTS.md`, `ROADMAP_HAH.md`, or

@@ -1,7 +1,7 @@
 # Design — `plutus.market`: an executable exchange fill model for Vietnamese markets
 
 **Date:** 2026-08-24 · **Status:** approved for planning · **Supersedes:** the WP3
-"VietnamFillModel" sketch in `HANDOFF-IMPLEMENTATION.md`.
+"VietnamFillModel" sketch in `HANDOFF-IMPLEMENTATION-DEPRECATED.md`.
 
 ---
 

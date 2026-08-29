@@ -55,7 +55,7 @@ def test_hsx_tick_grid(price, admitted):
 
 def test_hsx_tick_band_boundary_is_lower_inclusive():
     """At exactly 10.00 the tick is 0.05, not 0.01. The code is authoritative;
-    HANDOFF-IMPLEMENTATION.md:163 states the opposite and is wrong."""
+    HANDOFF-IMPLEMENTATION-DEPRECATED.md:163 states the opposite and is wrong."""
     state = _state(reference=Decimal('10'), ceiling=Decimal('20'),
                    floor=Decimal('1'), last=Decimal('10'))
     assert HSX_EXCHANGE.admits(

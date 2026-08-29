@@ -896,7 +896,7 @@ git commit -m "Add exchange verdict types with a working JSON contract"
 
 **Two traps, both verified:**
 - `get_hsx_tick_size` returns **`None`** for a price no band matches (e.g. negative, or `Infinity`) despite being annotated `-> Decimal`. The predicate must map `None` to `INDETERMINATE`, not assume a `Decimal`.
-- Tick bands are **lower-inclusive / upper-exclusive**: `[0,10)`, `[10,50)`, `[50,inf)`. So `get_hsx_tick_size('FPT', Decimal('10'))` is `0.05`, not `0.01`. (`HANDOFF-IMPLEMENTATION.md:163` states the opposite; the code is authoritative.)
+- Tick bands are **lower-inclusive / upper-exclusive**: `[0,10)`, `[10,50)`, `[50,inf)`. So `get_hsx_tick_size('FPT', Decimal('10'))` is `0.05`, not `0.01`. (`HANDOFF-IMPLEMENTATION-DEPRECATED.md:163` states the opposite; the code is authoritative.)
 
 - [ ] **Step 1: Write the failing test**
 
