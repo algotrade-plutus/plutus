@@ -1643,7 +1643,10 @@ class BookWalkFillPolicy(_CappedFillPolicy):
         order has already filled, so a cumulative tape is not re-booked each
         tick. The fill price is the order's own resting price -- a maker earns
         what it posted -- and evidence is ``MODELLED``: inferred from the tape
-        and a declared queue position, never a print observed to be ours.
+        and a declared queue position, never a print observed to be ours. The
+        decision is stamped ``is_maker=True`` so the fill event carries the arm
+        it took, and a strategy need not re-derive marketability to tell a maker
+        fill from a taker sweep.
 
         **Arrival is ``submitted_at``.** An order amended in place (a re-quote)
         keeps its original ``submitted_at``, which would credit a new price with
@@ -1695,7 +1698,11 @@ class BookWalkFillPolicy(_CappedFillPolicy):
             return FillDecision.no_fill(
                 f'{claim.note}; and {claim.quantity} is below one round lot of '
                 f'{lot}, so it keeps resting until a whole lot has printed')
-        return FillDecision.fill(floored, price, FillEvidence.MODELLED)
+        # ``is_maker`` marks the arm on the decision, so the fill event can be
+        # read back as a maker fill without re-deriving marketability; the
+        # taker sweep leaves it False (SweptFillDecision.swept does not set it).
+        return replace(FillDecision.fill(floored, price, FillEvidence.MODELLED),
+                       is_maker=True)
 
     def _position_at(self, order: OrderRecord,
                      price: Decimal) -> Optional[QueuePosition]:

@@ -3261,6 +3261,7 @@ class ExchangeSession:
             price=decision.price, ts=ts,
             evidence=decision.evidence or FillEvidence.MODELLED,
             confidence=decision.confidence,
+            is_maker=decision.is_maker,
         )
         rules = self._rulebook.at(ts)
         profile = self._config.broker_profile

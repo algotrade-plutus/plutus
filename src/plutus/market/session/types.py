@@ -1037,6 +1037,11 @@ class Fill:
     evidence: FillEvidence
     confidence: Decimal = Decimal('1')
     charges: Tuple['Charge', ...] = ()
+    is_maker: bool = False
+    """``True`` when this execution came from the maker arm (a resting order
+    filled off the tape), ``False`` for a taker sweep or any non-book-walk
+    policy. Mirrors :attr:`FillDecision.is_maker`; carried onto the fill event
+    so a strategy reads the arm the session took rather than guessing it."""
 
     @property
     def gross_value(self) -> Decimal:
@@ -1083,6 +1088,17 @@ class FillDecision:
     evidence: Optional[FillEvidence] = None
     reason: Optional[str] = None
     missing: FrozenSet[DataField] = frozenset()
+    is_maker: bool = False
+    """Which **arm** produced this fill, not evidence about the trade.
+    ``True`` only for a resting order filled from the tape as a maker
+    (:meth:`BookWalkFillPolicy._maker`); ``False`` for a taker sweep
+    (:class:`SweptFillDecision`) and for every non-book-walk policy. It rides
+    onto the :class:`Fill` and the fill event so a reader can tell the two
+    apart without re-deriving marketability -- a copy that could drift from the
+    routing rule. Deliberately separate from :attr:`evidence`, which is the
+    Hard/Soft signal axis: an optimistic sweep and a maker fill are both
+    ``MODELLED`` there, and conflating "which arm" with "what evidence" would
+    corrupt the axis the fill policies actually branch on."""
 
     @classmethod
     def fill(
@@ -1956,6 +1972,7 @@ class Event:
                    detail={'fill_id': fill.fill_id,
                            'evidence': fill.evidence,
                            'confidence': fill.confidence,
+                           'maker': fill.is_maker,
                            'remaining': record.remaining_quantity})
 
     @classmethod

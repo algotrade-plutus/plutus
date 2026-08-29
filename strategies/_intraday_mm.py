@@ -233,27 +233,20 @@ def run_market_maker(mm: InventoryMarketMaker, *, queue: str = "optimistic",
         ask = book.ask.best.price if book.ask.best else None
         return bid, ask, book.is_crossed
 
-    def _record_fills(mark, events, touch):
-        """Classify each fill maker vs taker by the arm's OWN routing test: an
-        order that was **marketable at the fill instant** was swept as a taker
-        (the queue axis does not govern it); one that was not rested and filled
-        from the tape (a maker fill). This is exact -- it is the same predicate
-        ``BookWalkFillPolicy._is_marketable`` uses -- unlike a price==limit guess
-        that a touching book would misclassify."""
-        bid, ask, _crossed = touch
+    def _record_fills(mark, events):
+        """Classify each fill by the arm the SESSION actually took, read off the
+        fill event. ``detail['maker']`` is stamped by the exchange: True when a
+        resting order filled from the tape as a maker, False when it was swept as
+        a taker. Reading the stamped arm -- rather than re-deriving marketability
+        here -- makes this a single source of truth: it can never disagree with
+        the routing the session performed, however that routing later changes."""
         for e in events:
             if _kind(e) not in ("filled", "partially_filled"):
                 continue
-            side, limit = orders.get(e.order_id, (None, None))
-            if limit is None:
-                marketable = True
-            elif side is Side.BUY:
-                marketable = ask is not None and ask <= limit
-            else:                                   # SELL
-                marketable = bid is not None and bid >= limit
+            side, _limit = orders.get(e.order_id, (None, None))
             ledger.fills.append({
                 "mark": mark, "side": side, "quantity": e.quantity,
-                "price": e.price, "maker": limit is not None and not marketable})
+                "price": e.price, "maker": bool(e.detail.get("maker"))})
 
     def _position() -> Tuple[int, int]:
         h = session.holdings(mm.ticker)
@@ -288,7 +281,7 @@ def run_market_maker(mm: InventoryMarketMaker, *, queue: str = "optimistic",
     for mark in schedule[1:]:
         now = datetime.combine(d, mark)
         events = session.advance_to(now)
-        _record_fills(mark, events, _touch(now))
+        _record_fills(mark, events)
         for record in session.orders():                        # cancel, re-quote
             if not record.is_terminal:
                 session.cancel(record.order_id)
@@ -300,7 +293,7 @@ def run_market_maker(mm: InventoryMarketMaker, *, queue: str = "optimistic",
 
     # End of day: stop quoting and let the last interval's fills land.
     close = datetime.combine(d, time(14, 40))
-    _record_fills(time(14, 40), session.advance_to(close), _touch(close))
+    _record_fills(time(14, 40), session.advance_to(close))
     for record in session.orders():
         if not record.is_terminal:
             session.cancel(record.order_id)

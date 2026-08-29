@@ -33,7 +33,7 @@ EXPECTED — Tier 2
     * The three queues fill **different** maker amounts: the assumption alone
       moves the result.
     * optimistic > conservative (front fills more than back), probabilistic
-      between; the spread is **material** (> 10% of the optimistic maker fill).
+      between; the spread is **material** (> 15% of the optimistic maker fill).
     * The decisions were queue-independent (the ask-guard never fired), so the
       spread is the queue's, not the strategy's.
     * Every run conserves đồng and self-reports its queue.
@@ -48,8 +48,8 @@ import pytest
 
 from _intraday_mm import InventoryMarketMaker, run_market_maker, tape_available, FINE_MARKS
 
-TARGET = 200000        # ample inventory: the T+2 ask-guard never bites
-SIZE = 8000
+TARGET = 400000        # ample inventory: the T+2 ask-guard never bites
+SIZE = 20000           # sized so the queue-ahead bites hard -> a wide spread
 
 
 def _run(queue: str, seed=None):
@@ -85,7 +85,11 @@ def test_s9_queue_sensitivity():
     assert con <= prob <= opt, (con, prob, opt)
 
     # The spread is material -- the number a backtester hides by picking one arm.
-    assert (opt - con) / opt > 0.10, (opt, con)
+    # opt/con are deterministic (neither uses the seed), so this measures ~18.9%
+    # on the pinned 2022-11-09 tape; the 0.15 floor leaves ~4 points of margin so
+    # incidental upstream drift can't silently erode it, while anything that moves
+    # it below 15% is a real regression worth failing on.
+    assert (opt - con) / opt > 0.15, (opt, con)
 
     for name, led in runs.items():
         # The decisions were queue-independent: the ask-guard never fired, so
