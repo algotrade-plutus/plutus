@@ -471,6 +471,38 @@ def measure_exchange_bar_vs_tick(
     return measure_bar_vs_tick(str(data_root), str(raw_root)).to_dict()
 
 
+def measure_exchange_indeterminacy(
+    data_root: Path, tick_root: Optional[Path]
+) -> Dict[str, Any]:
+    """F2 -- the indeterminate rate per (resolution x cause).
+
+    Runs the same probe over one population of HSX instrument-days at BAR
+    resolution (``hard`` fill) and TICK resolution (``book_walk``, both queue
+    arms) and reads each run's ``indeterminate_report()`` back. The finding is
+    the *shift in cause*: the resolution-limit cause
+    (``fill_unobservable_at_resolution``) dominates at bar and is structurally
+    zero at tick, where only data-ceiling causes (book sizes, sized tape) remain.
+
+    Needs the ``local_quote`` tick extract in addition to the daily corpus; skips
+    with a stated reason without it, matching the bar-vs-tick convention above.
+    The figure itself is written by the module's own ``main`` -- here we only
+    gather the numbers.
+    """
+    try:
+        from measurements.indeterminate_rate import (
+            DEFAULT_TICK_ROOT, measure_indeterminate_rate)
+    except ImportError as exc:  # pragma: no cover
+        return {"error": f"could not import measurements: {exc}"}
+
+    tick = tick_root or Path(DEFAULT_TICK_ROOT)
+    if not (tick / "local_quote_bidprice.parquet").exists():
+        return {"skipped": "tick extract not found; F2 needs the local_quote "
+                           "order-book ladder (pass --tick-root)"}
+
+    result = measure_indeterminate_rate(str(data_root), str(tick))
+    return result.to_dict()
+
+
 # --------------------------------------------------------------------------
 # entry point
 # --------------------------------------------------------------------------
@@ -490,6 +522,11 @@ def main() -> int:
     parser.add_argument(
         "--raw-root", type=Path, default=None,
         help="Full raw CSV archive, for the headline dataset size.",
+    )
+    parser.add_argument(
+        "--tick-root", type=Path, default=None,
+        help="Tick extract with the local_quote order book, for the F2 "
+             "indeterminate-rate contrast. Defaults to the module's root.",
     )
     parser.add_argument(
         "--json", type=Path, default=None,
@@ -512,7 +549,7 @@ def main() -> int:
     print("Plutus measurement reproduction")
     print("=" * 72)
 
-    print("\n[1/9] storage ...")
+    print("\n[1/10] storage ...")
     results["storage"] = measure_storage(args.data_root, args.csv_root, args.raw_root)
     s = results["storage"]
     print(f"      parquet corpus : {s.get('parquet_human')}")
@@ -522,21 +559,21 @@ def main() -> int:
         print(f"      reduction      : {s['reduction_pct']}% "
               f"over {s['comparable_tables']} comparable tables")
 
-    print("\n[2/9] daily coverage ...")
+    print("\n[2/10] daily coverage ...")
     results["coverage"] = measure_coverage(args.data_root)
     cov = results["coverage"].get("ohlc_with_volume")
     if cov:
         print(f"      {cov['first_day']} -> {cov['last_day']}: "
               f"{cov['rows']:,} rows, {cov['tickers']} tickers")
 
-    print("\n[3/9] query speed ...")
+    print("\n[3/10] query speed ...")
     results["speed"] = measure_query_speed(args.data_root, args.csv_root)
     sp = results["speed"]
     for shape in ("full_scan", "filtered", "group_by", "metadata_only"):
         if shape in sp:
             print(f"      {shape:15s} {sp[shape]['speedup']}x")
 
-    print("\n[4/9] field availability ...")
+    print("\n[4/10] field availability ...")
     results["fields"] = measure_field_availability(args.data_root)
     fc = results["fields"].get("counts")
     if fc:
@@ -547,33 +584,33 @@ def main() -> int:
 
     if args.skip_tests:
         results["tests"] = {"skipped": True}
-        print("\n[5/9] test suite ... skipped")
+        print("\n[5/10] test suite ... skipped")
     else:
-        print("\n[5/9] test suite ...")
+        print("\n[5/10] test suite ...")
         results["tests"] = measure_test_suite(repo_root)
         print(f"      collected: {results['tests'].get('collected')}")
 
-    print("\n[6/9] exchange admission (equity headline) ...")
+    print("\n[6/10] exchange admission (equity headline) ...")
     results["exchange_admission"] = measure_exchange_admission(args.data_root)
     for key, value in results["exchange_admission"].items():
         if isinstance(value, dict) and "rate" in value:
             print(f"      {key:<26} {value['blocked']:>7,} / "
                   f"{value['attempts']:>8,} = {value['rate']:.4%}")
 
-    print("\n[7/9] tick-grid conformity ...")
+    print("\n[7/10] tick-grid conformity ...")
     results["exchange_grid"] = measure_exchange_grid(args.data_root)
     for universe, value in results["exchange_grid"].items():
         print(f"      {universe:<22} library {value['library_rate']:.4%}  "
               f"naive {value['naive_rate']:.4%}")
 
-    print("\n[8/9] derivatives margin incidence ...")
+    print("\n[8/10] derivatives margin incidence ...")
     results["exchange_margin"] = measure_exchange_margin(args.data_root)
     for hold in (5, 10, 20):
         value = results["exchange_margin"][f"hold_{hold}"]
         print(f"      hold {hold:>2}  {value['called']:>4,} / "
               f"{value['entries']:>4,} = {value['call_rate']:.2%}")
 
-    print("\n[9/9] bar-vs-tick divergence ...")
+    print("\n[9/10] bar-vs-tick divergence ...")
     results["exchange_bar_vs_tick"] = measure_exchange_bar_vs_tick(
         args.data_root, args.raw_root)
     div = results["exchange_bar_vs_tick"]
@@ -583,6 +620,21 @@ def main() -> int:
         print(f"      n={div['n']:,}  bar {div['bar_blocked']:,}  "
               f"tick {div['tick_blocked_at_close']:,}  "
               f"agreement {div['agreement']:.4%}")
+
+    print("\n[10/10] indeterminate rate (F2, resolution x cause) ...")
+    results["exchange_indeterminacy"] = measure_exchange_indeterminacy(
+        args.data_root, args.tick_root)
+    ind = results["exchange_indeterminacy"]
+    if "skipped" in ind:
+        print(f"      skipped: {ind['skipped']}")
+    elif "error" in ind:
+        print(f"      error: {ind['error']}")
+    else:
+        print(f"      {ind['instrument_days']} instrument-days")
+        for a in ind["arms"]:
+            print(f"      {a['label']:<34} rate {a['rate']:.1%}  "
+                  f"res-limit {a['resolution_limit_share']:.0%}  "
+                  f"data-ceiling {a['data_ceiling_share']:.0%}")
 
     if args.json:
         args.json.write_text(json.dumps(results, indent=2, default=str))

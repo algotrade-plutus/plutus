@@ -1,0 +1,80 @@
+{
+  "population": "HSX instrument-days with BOTH a daily bar and a reconstructed order book (the extract's local_quote ladder -- its only HSX equity names): 66 days across 3 tickers, 2022-10-20..2022-11-30. A narrow population by design; F2 is a methodological contrast, and 66 days x a three-order probe is thousands of fill evaluations",
+  "instrument_days": 66,
+  "tickers": {
+    "FPT": 22,
+    "HPG": 22,
+    "HTV": 22
+  },
+  "arms": [
+    {
+      "label": "BAR / hard",
+      "resolution": "bar",
+      "policy": "hard",
+      "evaluations": 970,
+      "indeterminate": 970,
+      "rate": 1.0,
+      "ci_low": 0.9960553550211899,
+      "ci_high": 1.0,
+      "by_cause": {
+        "fill_unobservable_at_resolution": {
+          "count": 655,
+          "share": 0.6752577319587629,
+          "class": "resolution-limit"
+        },
+        "low": {
+          "count": 315,
+          "share": 0.3247422680412371,
+          "class": "data-ceiling"
+        }
+      },
+      "resolution_limit_share": 0.6752577319587629,
+      "data_ceiling_share": 0.3247422680412371
+    },
+    {
+      "label": "TICK / book-walk (optimistic)",
+      "resolution": "tick",
+      "policy": "book_walk:optimistic",
+      "evaluations": 1212,
+      "indeterminate": 1037,
+      "rate": 0.8556105610561056,
+      "ci_low": 0.8346983398779437,
+      "ci_high": 0.8742756745762903,
+      "by_cause": {
+        "volume": {
+          "count": 1037,
+          "share": 0.8556105610561056,
+          "class": "data-ceiling"
+        }
+      },
+      "resolution_limit_share": 0.0,
+      "data_ceiling_share": 0.8556105610561056
+    },
+    {
+      "label": "TICK / book-walk (conservative)",
+      "resolution": "tick",
+      "policy": "book_walk:conservative",
+      "evaluations": 1545,
+      "indeterminate": 1541,
+      "rate": 0.997411003236246,
+      "ci_low": 0.9933618913847333,
+      "ci_high": 0.9989927432660526,
+      "by_cause": {
+        "book_size": {
+          "count": 650,
+          "share": 0.42071197411003236,
+          "class": "data-ceiling"
+        },
+        "volume": {
+          "count": 891,
+          "share": 0.5766990291262136,
+          "class": "data-ceiling"
+        }
+      },
+      "resolution_limit_share": 0.0,
+      "data_ceiling_share": 0.997411003236246
+    }
+  ],
+  "finding": "Refining bar->tick does not remove the indeterminacy; it trades the resolution-limit cause (fill_unobservable_at_resolution, dominant at BAR, structurally ZERO at TICK) for data-ceiling causes (book_size/volume). The tick rate depends on the queue assumption (F3's axis): optimistic decides most touches so the rate falls; conservative names the full data ceiling so it does not -- but neither tick arm carries any resolution-limit cause.",
+  "backs": "paper's third contribution: the indeterminate rate is a property of (resolution x data completeness), not a single backtest number -- and the bar-resolution floor is intrinsic"
+}
