@@ -55,9 +55,10 @@ from plutus.market.session.book_walk import (BOOK_WALK_KIND,
                                              ConservativeQueue, LadderFault,
                                              OptimisticQueue,
                                              ProbabilisticQueue, QueueClaim,
-                                             QueuePolicy, QueueRequest,
+                                             QueuePolicy, QueuePosition,
+                                             QueueRequest, MakerQueuePolicy,
                                              Remainder, SweepStop,
-                                             SweptFillDecision,
+                                             SweptFillDecision, maker_fill,
                                              queue_draw_key, sweep_ignorance,
                                              walk_book)
 from plutus.market.session.fills import (FillPolicy, SoftFillPolicy,
@@ -195,10 +196,28 @@ def _order(*, side=Side.BUY, quantity=6000, limit=Decimal('73.9'),
     )
 
 
-def _policy(source, *, queue=None, cap=None, stale=None, auction=None):
+def _policy(source, *, queue=None, cap=None, stale=None, auction=None,
+            tape=None):
     return BookWalkFillPolicy(
         source, queue=queue or OptimisticQueue(), max_participation=cap,
-        max_staleness=stale, auction=auction)
+        max_staleness=stale, tape=tape, auction=auction)
+
+
+class _FakeTape:
+    """A tape that reports a fixed prints-through total, for the maker arm.
+
+    Isolates the arm from the reconstruction: the real :class:`TapeSource` is
+    pinned in ``test_tape_adapter.py``; here the number is handed in so the
+    fill maths is what is under test. ``None`` stands for an unserved window.
+    """
+
+    def __init__(self, prints):
+        self._prints = prints
+        self.calls = []
+
+    def prints_through(self, ticker, price, side, since, until):
+        self.calls.append((ticker, price, side, since, until))
+        return self._prints
 
 
 def _decide(source, *, order=None, interval=None, **kw):
@@ -1105,7 +1124,7 @@ class TestThePolicy:
         signature = policy_of(decision)
         assert signature == (
             'book_walk(queue=probabilistic(seed=20220329,ahead=uniform),'
-            'max_participation=0.10,max_staleness=30.0s,auction=off)')
+            'max_participation=0.10,max_staleness=30.0s,tape=off,auction=off)')
         assert str(SEED) in signature
 
     def test_the_evidence_of_a_sweep_is_modelled(self, local):
@@ -1279,17 +1298,211 @@ class TestConfigRegistration:
     """No corpus needed."""
 
     def test_build_fill_policy_refuses_book_walk_with_a_useful_sentence(self):
-        """Registered so the name is *known* and the refusal can say why. It
-        needs a book provider and a queue assumption that `FillPolicyConfig`
-        has no field for, and defaulting either would be the silent
-        substitution `build_fill_policy` exists to refuse."""
-        with pytest.raises(ValueError, match='cannot be built from a config'):
+        """`build_fill_policy` cannot build book_walk here: it has no book
+        provider, and this module cannot import `book_walk` (that module imports
+        this one). The session builds it at `build_book_walk_policy` with its own
+        DepthSource; the queue assumption now travels in `FillPolicyConfig.queue`,
+        so what is missing here is only the provider."""
+        with pytest.raises(ValueError, match='needs a book provider'):
             build_fill_policy(FillPolicyConfig(kind=BOOK_WALK_KIND))
 
     def test_the_refusal_names_the_route_that_does_work(self):
-        with pytest.raises(ValueError, match='BookWalkFillPolicy'):
+        # The session config route, and the direct build_book_walk_policy call.
+        with pytest.raises(ValueError, match='build_book_walk_policy'):
             build_fill_policy(FillPolicyConfig(kind='book_walk'))
 
     def test_an_unknown_kind_is_still_unknown(self):
         with pytest.raises(ValueError, match='unknown fill policy'):
             build_fill_policy(FillPolicyConfig(kind='sweep'))
+
+
+class TestTheMakerAxis:
+    """The queue as a **position**, and a resting order filled by the tape.
+
+    No corpus: ``ahead`` is a pure position and ``maker_fill`` a pure function,
+    so the whole maker mechanic is pinned here before any tape or session. The
+    worked example is the author's: sell 500 with 1,000 already displayed at the
+    price -- the front fills on the first prints, the back only once 1,000 has
+    traded through, the draw in between.
+    """
+
+    def _req(self, displayed, *, side=Side.SELL, remaining=500,
+             order_id='o1', price='73'):
+        return QueueRequest(ticker='FPT', ts=DAY, side=side, order_id=order_id,
+                            level=_level(price=price, size=displayed),
+                            remaining=remaining)
+
+    def test_the_three_positions_are_front_back_and_between(self):
+        req = self._req(1000)
+        assert OptimisticQueue().ahead(req).ahead == 0            # the front
+        assert ConservativeQueue().ahead(req).ahead == 1000       # the back
+        drawn = ProbabilisticQueue(7).ahead(req).ahead
+        assert 0 <= drawn <= 1000                                 # between
+
+    def test_front_of_queue_fills_on_the_prints(self):
+        pos = OptimisticQueue().ahead(self._req(1000))
+        assert maker_fill(pos, 500, 500).quantity == 500     # a 500 print fills
+        assert maker_fill(pos, 300, 500).quantity == 300     # a 300 print, 300
+
+    def test_back_of_queue_waits_for_the_queue_to_clear(self):
+        pos = ConservativeQueue().ahead(self._req(1000))
+        assert maker_fill(pos, 500, 500).quantity == 0       # 500 < 1000 ahead
+        assert maker_fill(pos, 1200, 500).quantity == 200    # 1200-1000, capped
+
+    def test_probabilistic_is_reproducible_and_between_the_bounds(self):
+        req = self._req(1000)
+        first = ProbabilisticQueue(7).ahead(req)
+        assert first.ahead == ProbabilisticQueue(7).ahead(req).ahead   # seeded
+        mid = maker_fill(first, 1200, 500).quantity
+        opt = maker_fill(OptimisticQueue().ahead(req), 1200, 500).quantity
+        con = maker_fill(ConservativeQueue().ahead(req), 1200, 500).quantity
+        assert con <= mid <= opt                             # (200 <= mid <= 500)
+
+    def test_an_unserved_tape_is_indeterminate_not_zero(self):
+        pos = OptimisticQueue().ahead(self._req(1000))
+        claim = maker_fill(pos, None, 500)
+        assert not claim.determinate and claim.quantity == 0
+        assert DataField.VOLUME in claim.missing
+
+    def test_the_fill_never_exceeds_the_order(self):
+        pos = OptimisticQueue().ahead(self._req(1000))
+        assert maker_fill(pos, 100000, 500).quantity == 500
+
+    def test_cumulative_prints_do_not_re_book_across_intervals(self):
+        # prints are cumulative and plateau at 1400; a conservative maker (1000
+        # ahead) owes min(500, 1400-1000) = 400 in total. Booking each interval
+        # as the increment over already_filled must converge to 400 and never
+        # re-book the cumulative entitlement into an over-fill.
+        pos = ConservativeQueue().ahead(self._req(1000))
+        booked = 0
+        for prints in (500, 900, 1200, 1400, 1400):        # cumulative, plateaus
+            booked += maker_fill(pos, prints, 500,
+                                 already_filled=booked).quantity
+        assert booked == 400, booked
+
+    def test_zero_prints_on_a_served_tape_is_a_definite_no_fill(self):
+        # 0 (served, nothing traded through) is a DETERMINATE no-fill -- the
+        # order rests -- not INDETERMINATE. The distinction J34 rests on.
+        pos = OptimisticQueue().ahead(self._req(1000))
+        claim = maker_fill(pos, 0, 500)
+        assert claim.determinate and claim.quantity == 0 and not claim.missing
+
+    def test_the_maker_position_agrees_with_the_taker_claim(self):
+        # ahead == displayed - claim.quantity for the probabilistic draw, so a
+        # taker and a maker place the order in the SAME spot in the queue -- the
+        # one axis, not two that can drift.
+        req = self._req(1000)
+        queue = ProbabilisticQueue(7)
+        assert queue.ahead(req).ahead == req.displayed - queue.claim(req).quantity
+
+    def test_negative_inputs_are_integration_bugs(self):
+        pos = OptimisticQueue().ahead(self._req(1000))
+        with pytest.raises(ValueError, match='print total may not be negative'):
+            maker_fill(pos, -1, 500)
+        with pytest.raises(ValueError, match='order_size may not be negative'):
+            maker_fill(pos, 100, -1)
+        with pytest.raises(ValueError, match='already_filled may not be'):
+            maker_fill(pos, 100, 500, already_filled=-1)
+        with pytest.raises(ValueError, match='position may not be negative'):
+            QueuePosition(-1, 'x')
+
+    def test_shipped_policies_are_maker_capable_a_taker_only_one_is_not(self):
+        for policy in (OptimisticQueue(), ConservativeQueue(),
+                       ProbabilisticQueue(7)):
+            assert isinstance(policy, MakerQueuePolicy)
+
+        class _TakerOnly:
+            signature = 'taker'
+
+            def claim(self, request):
+                return QueueClaim(0, True, 'x')
+
+        assert not isinstance(_TakerOnly(), MakerQueuePolicy)
+        assert isinstance(_TakerOnly(), QueuePolicy)      # still a taker policy
+
+
+@requires_extract
+class TestTheMakerArm:
+    """A resting order filled by the tape, through the policy's public surface.
+
+    The book is the real FPT ladder at 09:16:05 (73.40x5700, 73.50x200,
+    73.90x1000); the tape is a fake so the *fill maths* is what is exercised.
+    A SELL at 73.90 does not cross the 73.30 bid, so it rests -- the maker arm,
+    not the sweep. Order and interval share the clean instant, so the queue
+    ahead is read from that book.
+    """
+
+    def _sell(self, price='73.90', quantity=500):
+        return _order(side=Side.SELL, quantity=quantity, limit=Decimal(price),
+                      order_id='M-1', ts=FPT_CLEAN)
+
+    def _decide(self, policy, order):
+        return policy.evaluate(order, _interval(), HSX_EXCHANGE,
+                               instrument=HSX_LOT)
+
+    def test_a_resting_sell_fills_from_the_tape_at_its_own_price(self, local):
+        # Optimistic (front): 400 printed through 73.90 fills 400 of the 500,
+        # at the resting price, MODELLED -- and it is NOT a sweep (no walk).
+        policy = _policy(local, queue=OptimisticQueue(), tape=_FakeTape(400))
+        d = self._decide(policy, self._sell())
+        assert d.outcome is FillOutcome.FILL
+        assert d.quantity == 400 and d.price == Decimal('73.90')
+        assert d.evidence is FillEvidence.MODELLED
+        assert getattr(d, 'walk', None) is None          # maker, not taker
+
+    def test_the_back_of_the_queue_waits_for_the_displayed_to_clear(self, local):
+        # Conservative: 1,000 rest ahead at 73.90 (the level's displayed size).
+        # 500 prints clear nothing for us; 1,400 clear the 1,000 and fill 400.
+        thin = _policy(local, queue=ConservativeQueue(), tape=_FakeTape(500))
+        assert self._decide(thin, self._sell()).outcome is FillOutcome.NO_FILL
+        thick = _policy(local, queue=ConservativeQueue(), tape=_FakeTape(1400))
+        d = self._decide(thick, self._sell())
+        assert d.outcome is FillOutcome.FILL and d.quantity == 400
+
+    def test_a_marketable_order_still_takes_the_book(self, local):
+        # A SELL at 73.00 crosses the 73.30 bid -> the taker sweep, which
+        # produces a SweptFillDecision carrying a walk.
+        policy = _policy(local, queue=OptimisticQueue(), tape=_FakeTape(999))
+        d = self._decide(policy, _order(side=Side.SELL, quantity=500,
+                                        limit=Decimal('73.00'), ts=FPT_CLEAN))
+        assert getattr(d, 'walk', None) is not None      # taker, not maker
+
+    def test_a_resting_order_with_no_tape_rests_as_a_taker_would(self, local):
+        # No tape wired = a taker-only policy: an order that does not cross rests
+        # (NO_FILL), the same definite outcome as before the maker arm. A tape
+        # that is present but unserved is the INDETERMINATE case (below).
+        policy = _policy(local, queue=OptimisticQueue(), tape=None)
+        d = self._decide(policy, self._sell())
+        assert d.outcome is FillOutcome.NO_FILL
+        assert 'no sized tape' in (d.reason or '')
+
+    def test_an_unserved_tape_is_indeterminate_naming_volume(self, local):
+        policy = _policy(local, queue=OptimisticQueue(), tape=_FakeTape(None))
+        d = self._decide(policy, self._sell())
+        assert d.outcome is FillOutcome.INDETERMINATE
+        assert DataField.VOLUME in d.missing
+
+    def test_a_price_beyond_the_ladder_is_indeterminate_for_a_positioned_queue(
+            self, local):
+        # 74.30 is above the deepest observed ask (73.90): the queue ahead is
+        # unknowable, so conservative/probabilistic refuse INDETERMINATE rather
+        # than collapse to the optimistic front-of-queue.
+        con = _policy(local, queue=ConservativeQueue(), tape=_FakeTape(5000))
+        d = self._decide(con, self._sell(price='74.30'))
+        assert d.outcome is FillOutcome.INDETERMINATE
+        assert DataField.BOOK_SIZE in d.missing
+        # Optimistic assumes the front, needs no book, and still fills.
+        opt = _policy(local, queue=OptimisticQueue(), tape=_FakeTape(5000))
+        assert self._decide(
+            opt, self._sell(price='74.30')).outcome is FillOutcome.FILL
+
+    def test_a_maker_fill_is_floored_to_a_round_lot(self, local):
+        # 250 printed through, front of queue -> 250 owed, floored to 200 (the
+        # HSX board lot is 100); the 50 keeps resting until a whole lot prints.
+        policy = _policy(local, queue=OptimisticQueue(), tape=_FakeTape(250))
+        d = self._decide(policy, self._sell())
+        assert d.outcome is FillOutcome.FILL and d.quantity == 200
+
+    def test_the_provenance_records_that_a_tape_was_used(self, local):
+        policy = _policy(local, queue=OptimisticQueue(), tape=_FakeTape(400))
+        assert 'tape=on' in policy.signature

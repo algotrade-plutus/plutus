@@ -2099,7 +2099,7 @@ def compare_policies(
 #: function until somebody wires it, which is the only kind of guard that
 #: survives the person who wrote it.
 HONOURED_CONFIG_FIELDS: FrozenSet[str] = frozenset({
-    'kind', 'max_participation', 'seed',
+    'kind', 'max_participation', 'seed', 'queue', 'max_staleness',
 })
 
 #: Which ``FillPolicyConfig`` fields each kind can actually act on. A field
@@ -2125,7 +2125,8 @@ _FIELDS_BY_KIND: Mapping[str, FrozenSet[str]] = {
 #: every ``soft`` run that wrote 0.10 an uncapped one. The field is
 #: ``Optional[Decimal] = None`` in ``types.py`` now: ``None`` is unset, and
 #: every written value, 0.10 included, is honoured.
-_UNSET_IS_NONE: FrozenSet[str] = frozenset({'seed', 'max_participation'})
+_UNSET_IS_NONE: FrozenSet[str] = frozenset(
+    {'seed', 'max_participation', 'queue', 'max_staleness'})
 
 
 def _refuse_fields_that_cannot_be_honoured(config: FillPolicyConfig,
@@ -2258,21 +2259,21 @@ def build_fill_policy(config: FillPolicyConfig) -> FillPolicy:
     """
     kind = (config.kind or '').strip().lower()
     if kind == BOOK_WALK_KIND:
-        # Registered so the name is *known* and the refusal can say why, rather
-        # than reporting a real policy as an unknown one. It is not buildable
-        # from a config and never will be: it needs a book provider (a
-        # ``DepthSource`` over a depth root) and a queue policy, neither of
-        # which ``FillPolicyConfig`` can carry, and defaulting either would be
-        # exactly the silent substitution this function exists to refuse.
+        # Not buildable *here*: it needs the book provider, which this function
+        # is not given (and this module cannot import ``book_walk`` -- that
+        # module imports this one). The session builds it at
+        # ``build_book_walk_policy`` with its own ``DepthSource`` as the
+        # provider; the queue assumption travels in ``FillPolicyConfig.queue``.
+        # A direct caller with no session takes the same route by hand.
         raise ValueError(
-            f'the {BOOK_WALK_KIND!r} fill policy cannot be built from a config '
-            f'block: it sweeps a reconstructed order book, so it needs a book '
-            f'provider and a queue assumption that FillPolicyConfig has no '
-            f'field for. Construct it and hand it over directly -- '
-            f'ExchangeSession.build(..., fill_policy=BookWalkFillPolicy('
-            f'DepthSource(root), queue=OptimisticQueue(), '
-            f'max_participation=None, max_staleness=None)) -- from '
-            f'plutus.market.session.book_walk'
+            f'the {BOOK_WALK_KIND!r} fill policy is built by the session, not '
+            f'here: it sweeps a reconstructed order book, so it needs a book '
+            f'provider. Configure it on a DepthSource-backed session -- '
+            f'fill_policy={{"kind": "book_walk", "queue": "conservative"}} -- '
+            f'and ExchangeSession binds the DepthSource as its provider; or '
+            f'construct it directly with '
+            f'plutus.market.session.book_walk.build_book_walk_policy(config, '
+            f'book_provider=DepthSource(root))'
         )
     if kind not in _FIELDS_BY_KIND:
         raise ValueError(
@@ -2365,8 +2366,19 @@ def parse_fill_policy_config(
     # is carried through untouched; None is the absence of one.
     raw = payload.get('max_participation')
     cap = None if raw is None else Decimal(str(raw))
+    # book_walk only; refused for the other kinds by _refuse_fields... A written
+    # value is an instruction (the queue assumption, the staleness budget in
+    # seconds); None is the absence of one.
+    queue = payload.get('queue')
+    if queue is not None and not isinstance(queue, str):
+        raise ValueError(
+            f'fill_policy.queue must be a string '
+            f"('optimistic'/'conservative'/'probabilistic'), got {queue!r}")
+    stale_raw = payload.get('max_staleness')
+    max_staleness = None if stale_raw is None else float(stale_raw)
     return FillPolicyConfig(kind=str(payload.get('kind', 'soft')),
-                            max_participation=cap, seed=seed)
+                            max_participation=cap, seed=seed,
+                            queue=queue, max_staleness=max_staleness)
 
 
 # --------------------------------------------------------------------------

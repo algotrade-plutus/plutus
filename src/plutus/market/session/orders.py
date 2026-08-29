@@ -942,6 +942,7 @@ class OrderBookOfRecord:
         phase: Optional[SessionPhase] = None,
         allow_price_and_quantity: bool = True,
         priority_preserving: bool = True,
+        encumbrances: Optional[Sequence[Encumbrance]] = None,
     ) -> Union[Amended, Rejected]:
         """Amend a resting limit order's price and/or quantity.
 
@@ -1030,10 +1031,20 @@ class OrderBookOfRecord:
                      and amendment_preserves_priority(record.original_quantity,
                                                       new_quantity,
                                                       price_changed))
-        self._store(replace(record,
-                            order=replace(record.order, quantity=new_quantity,
-                                          limit_price=new_price),
-                            updated_at=ts))
+        amended_record = replace(record,
+                                 order=replace(record.order, quantity=new_quantity,
+                                               limit_price=new_price),
+                                 updated_at=ts)
+        # ``exchange.py`` re-runs the funding when it composes admission around
+        # this call and hands back the fresh reservation; store it so the
+        # record's encumbrance matches the amended order rather than the
+        # pre-amendment one. Absent (the book-only path), the reservation is
+        # left as it was -- a pure quantity decrease over-reserves, which is the
+        # conservative direction.
+        if encumbrances is not None:
+            amended_record = replace(amended_record,
+                                     encumbrances=tuple(encumbrances))
+        self._store(amended_record)
         return Amended(order_id=order_id, ts=ts, quantity=new_quantity,
                        limit_price=new_price, priority_preserved=preserved)
 

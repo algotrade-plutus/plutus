@@ -112,8 +112,14 @@ from plutus.market.session.deposit import (
     liquidation_sequence, resolve_contract_multiplier,
 )
 from plutus.market.session.charges import ChargeContext, assess_at_maturity
-from plutus.market.session.fills import (FillPolicy, build_fill_policy,
+from plutus.market.session.corporate import (
+    CorporateAction, CorporateActionApplied, CorporateActionEngine,
+    CorporateActionSchedule)
+from plutus.market.session.fills import (BOOK_WALK_KIND, FillPolicy,
+                                         build_fill_policy,
                                          parse_fill_policy_config)
+from plutus.market.session.book_walk import (BookProvider, TapeProvider,
+                                             build_book_walk_policy)
 from plutus.market.session.ledgers import (
     CashLedger, EncumbranceLedger, HoldingsLedger, SecuritiesAccount,
     assess_charges,
@@ -700,6 +706,7 @@ def parse_config(payload: Mapping[str, Any]) -> SessionConfig:
         adapter=str(data_payload.get('adapter', '')),
         root=str(data_payload.get('root', '')),
         settlement_calendar=data_payload.get('settlement_calendar'),
+        book_root=data_payload.get('book_root'),
     )
     return SessionConfig(
         period_start=_as_date(period['start']),
@@ -1132,7 +1139,42 @@ class ExchangeSession:
         rulebook = rulebook or Rulebook(config.exchange_rules.rulebook,
                                         pins=config.exchange_rules.pins)
         router = SymbolRouter(source, rulebook, listings=listings)
-        policy = fill_policy or build_fill_policy(config.fill_policy)
+        if fill_policy is not None:
+            policy = fill_policy
+        elif config.fill_policy.kind == BOOK_WALK_KIND:
+            # The one policy the session builds itself, because it alone needs a
+            # book provider (fills.build_fill_policy cannot import book_walk).
+            # The book is decoupled from the price/instrument source: admission,
+            # bands and venue come from ``source`` (a DataHubSource), while the
+            # fill sweeps a ``DepthSource``. If the source already provides a
+            # book we use it; otherwise we open a DepthSource over the same
+            # data root (the depth tables sit beside the price tables).
+            if isinstance(source, BookProvider):
+                book_provider: BookProvider = source
+                # A source that also serves the tape (a BookSessionSource) makes
+                # the maker arm available; one that does not leaves resting
+                # orders to rest.
+                tape_provider: Optional[TapeProvider] = (
+                    source if isinstance(source, TapeProvider) else None)
+            elif config.data is not None and (config.data.book_root
+                                              or config.data.root):
+                from plutus.market.adapters.depth import DepthSource
+                from plutus.market.adapters.tape import TapeSource
+                depth_root = config.data.book_root or config.data.root
+                book_provider = DepthSource(depth_root)
+                # The tape tables (``*_matched`` + ``*_total``) sit in the same
+                # root; TapeSource serves nothing (INDETERMINATE) where absent.
+                tape_provider = TapeSource(depth_root)
+            else:
+                raise ValueError(
+                    "fill_policy.kind='book_walk' needs an order book: set "
+                    "data.root to a depth extract (local_quote_* tables) or "
+                    "pass a DepthSource to from_config(..., source=...)")
+            policy = build_book_walk_policy(config.fill_policy,
+                                            book_provider=book_provider,
+                                            tape_provider=tape_provider)
+        else:
+            policy = build_fill_policy(config.fill_policy)
 
         encumbrances = EncumbranceLedger()
         securities = SecuritiesAccount(
@@ -1599,50 +1641,123 @@ class ExchangeSession:
     def amend(self, order_id: OrderId, *, quantity: Optional[int] = None,
               limit_price: Optional[Decimal] = None
               ) -> Union[Amended, Rejected]:
-        """**Tier 2.** Tier 1 implements only a priority-preserving decrease.
+        """Amend a resting order, re-running admission and funding.
 
-        The shape is fixed here so it is not retrofitted later, and the dated
-        rule is consulted rather than assumed: from 2025-05-05 one amendment
-        may change price **or** quantity, never both (VNX QD 22/2025 Dieu
-        21.3), so ``rulebook.edition_at(ts)`` decides and not a constant.
+        An amendment is the one instruction that can change an order's funding
+        requirement and its admissibility *after* admission has already run, so
+        design section 5 requires it to re-run both. This composes the pieces
+        ``submit`` uses, in the same order, against the amended order:
 
-        What Tier 1 will not do is change the funding requirement. Design
-        section 5 requires that "amending must re-run the encumbrance so an
-        amend-up cannot escape funding", and the encumbrance ledger refuses a
-        second reservation on the same key by design -- re-taking would
-        double-count against ``available``. The alternative,
-        release-and-retake, can fail *after* the release and leave a live
-        order unfunded, so an amendment that could raise the requirement is
-        refused outright and the refusal says it is a tier boundary.
+        * **Re-admission** -- the amended quantity is re-checked against the
+          dated round-lot and per-order size cap, and the amended price against
+          the dated tick grid and band. A quantity reduction that lands on an
+          odd lot (100 -> 50 on HOSE after 2021-01-04) is refused ``ROUND_LOT``;
+          a price moved outside the band is refused ``BAND_LIMIT``.
+        * **Re-reservation** -- the old reservation is released and a fresh one
+          taken for the amended order, so an amend-up cannot escape funding: it
+          is refused ``INSUFFICIENT_CASH`` when the larger requirement is not
+          funded. The release-before-take order matters because the ledger
+          tests net of every live order, so the old reservation must be gone or
+          it double-counts. Any refusal restores the original reservation and
+          leaves the order exactly as it was.
 
-        A pure quantity **decrease** is allowed and leaves the original
-        reservation in place. It over-reserves, which is the conservative
-        direction, and the whole reservation is released at the terminal edge
-        either way.
+        The dated in-place rules -- whether one amendment may change both price
+        and quantity (``_may_amend_price_and_quantity``), whether priority
+        survives (``_priority_preserving_at``), the phase locks, and the
+        below-filled floor -- are the book's, applied last, after funding is
+        secured.
+
+        Derivatives amendment re-funding is not built yet and is refused
+        rather than skipped, so a futures amend never bypasses the margin re-run.
         """
         record = self._require(order_id)
         ts = self._now
-        if limit_price is not None:
-            return self._refuse_amend(
-                order_id, ts,
-                'Tier 1 does not amend a price: the reservation was taken at '
-                'the old price, and re-running it needs a release-and-retake '
-                'that can fail after the release and leave a live order '
-                'unfunded')
-        if quantity is None or quantity >= record.original_quantity:
-            return self._refuse_amend(
-                order_id, ts,
-                'Tier 1 amends only downward: an amend-up must re-run the '
-                'encumbrance so it cannot escape funding, which is Tier 2')
+        if quantity is None and limit_price is None:
+            raise ValueError(
+                'amend() must change something: pass quantity, limit_price or '
+                'both')
 
-        phase = self._phase(record.venue,
-                            observed=self._observed_phase(record.order.ticker))
+        if pool_for_venue(record.venue) is Pool.DERIVATIVES:
+            return self._refuse_amend(
+                order_id, ts,
+                'amending a derivatives order is not yet supported; cancel and '
+                'resubmit so the margin requirement is re-run')
+
+        new_quantity = (record.original_quantity if quantity is None
+                        else quantity)
+        new_price = (record.order.limit_price if limit_price is None
+                     else limit_price)
+        amended = replace(record.order, quantity=new_quantity,
+                          limit_price=new_price)
+
+        routed = self._route(amended, order_id, ts)
+        if isinstance(routed, Rejected):
+            return self._reject_unrouted(amended, routed)
+        venue, instrument = routed
+
+        rules = self._rulebook.at(ts)
+        state = self._market_state(amended.ticker, ts)
+        phase = self._phase(venue, observed=state.session)
+        state = replace(state, session=phase)
+        regime_tag = self._rulebook.edition_at(ts).value
+
+        # Re-admission: exactly the rules an amendment can newly violate.
+        refusal = self._size_here(amended, venue, rules, order_id, ts)
+        if refusal is None:
+            tick = self._dated_tick(amended, venue, instrument, rules,
+                                    order_id, ts)
+            if isinstance(tick, Rejected):
+                refusal = tick
+            else:
+                adm = self._venue_at(amended.ticker, ts, tick).admits(
+                    amended, state, instrument=instrument, regime_tag=regime_tag)
+                if adm.verdict is not Verdict.ADMITTED:
+                    refusal = Rejected.from_admissibility(adm, order_id)
+        if refusal is not None:
+            if refusal.regime_tag is None:
+                refusal = replace(refusal, regime_tag=regime_tag)
+            return self._count_rejection(refusal)
+
+        # Re-reservation: release the old, take the new; restore on refusal.
+        self._securities.release(order_id, ts)
+        new_res = self._reserve(amended, order_id, venue, state, rules, ts,
+                                instrument)
+        if isinstance(new_res, Rejected):
+            self._reserve(record.order, order_id, venue, state, rules, ts,
+                          instrument)
+            if new_res.regime_tag is None:
+                new_res = replace(new_res, regime_tag=regime_tag)
+            return self._count_rejection(
+                self._annotate_segregation(new_res, venue))
+
         outcome = self._book.amend(
-            order_id, ts, quantity=quantity, phase=phase,
-            allow_price_and_quantity=self._may_amend_price_and_quantity(ts))
+            order_id, ts, quantity=quantity, limit_price=limit_price,
+            phase=phase,
+            allow_price_and_quantity=self._may_amend_price_and_quantity(ts),
+            priority_preserving=self._priority_preserving_at(ts, venue),
+            encumbrances=(new_res,))
         if isinstance(outcome, Rejected):
-            self._count_rejection(outcome)
+            # A dated in-place rule refused after the swap: put the original
+            # reservation back and leave the order unchanged.
+            self._securities.release(order_id, ts)
+            self._reserve(record.order, order_id, venue, state, rules, ts,
+                          instrument)
+            return self._count_rejection(outcome)
         return outcome
+
+    def _priority_preserving_at(self, ts: datetime, venue: Venue) -> bool:
+        """Whether priority-preserving amendment exists on this venue and date.
+
+        HOSE before 2022-03-31: amendment was cancel-and-re-enter and time
+        priority **always** restarted (QD 352 Dieu 17.1-17.3), so no in-place
+        amendment preserves priority. From 2022-03-31 (VNX QD 17 Dieu 22.3)
+        priority is preserved on a quantity reduction, which the book's
+        ``amendment_preserves_priority`` applies. HNX, UPCoM and HNXDS use that
+        structural rule throughout the window.
+        """
+        if venue is Venue.HSX and ts.date() < date(2022, 3, 31):
+            return False
+        return True
 
     def orders(self, *, state: Optional[OrderState] = None,
                ticker: Optional[str] = None) -> Tuple[OrderRecord, ...]:
@@ -1686,6 +1801,32 @@ class ExchangeSession:
         instants and neither may borrow the other's eligibility.
         """
         return self._securities.holding(ticker)
+
+    def apply_corporate_action(
+        self, action: CorporateAction, *, ts: Optional[datetime] = None,
+    ) -> CorporateActionApplied:
+        """Apply an exogenous corporate action to the securities holdings.
+
+        A corporate-action feed (dividends, splits, rights) is **exogenous
+        data**, so the caller supplies the event and the session applies it to
+        the account it holds -- scaling the held quantity and crediting the
+        cash leg, with market value conserved across the ex-date (A26). This is
+        the session-level entry point for the caller-driven engine that a raw
+        ``SecuritiesAccount`` otherwise had to reach directly; it is
+        deliberately **not** wired into :meth:`advance_to`, because the session
+        carries no corporate-action feed of its own.
+
+        The entitlement is computed on the held total, so a parcel bought on
+        the last cum-rights session and still unsettled on the ex-date is
+        included -- which is exactly whom the T+2 record date is set to catch.
+
+        ``ts`` defaults to :meth:`now`. Returns the applied record (cash leg,
+        holding before and after, whether the cash leg is gross) so a strategy
+        can reconcile the event it just booked.
+        """
+        ts = ts if ts is not None else self._now
+        engine = CorporateActionEngine(CorporateActionSchedule(()))
+        return engine.apply(action, account=self._securities, ts=ts)
 
     def cash(self) -> Cash:
         """Settled cash, what live orders have committed, and pending proceeds.
@@ -1904,6 +2045,65 @@ class ExchangeSession:
         """
         return getattr(self._monitor, 'liquidation',
                        LiquidationRule.LARGEST_LOSS_FIRST)
+
+    def _execute_forced_close(self, marks: Mapping[str, Decimal],
+                              rule: LiquidationRule, ts: datetime,
+                              ) -> Tuple[Tuple[str, str], ...]:
+        """MUST #3: close positions in a forced breach with real orders.
+
+        The equity *ban giai chap* executes through :meth:`submit`, and so does
+        this. Each offsetting order -- sell a long, buy back a short, in the
+        selection rule's order -- faces the same band, tick, lot and fill
+        policy as any order, which is exactly why a locked book refuses it
+        (``BAND_LOCK``) and the position rides. That refusal is the measured
+        17.6% permissive cost the report alone hid, and reporting it truthfully
+        is the point of the loop.
+
+        A contract that already carries a live order (a close from an earlier
+        session that has not filled, or one the caller placed) is skipped, so a
+        resting close is never re-submitted into a double. The close is priced
+        at the contract's current mark: on a tradeable day that is marketable
+        and fills at the next advance; on a locked day it is at the band and is
+        refused.
+
+        Returns ``(contract_code, verdict)`` for each leg it acted on.
+        """
+        positions = self._derivatives.positions()
+        if not positions:
+            return ()
+        live = {record.order.ticker
+                for record in self._live_derivative_orders()}
+        sequence = liquidation_sequence(self._derivatives, marks, rule) \
+            or tuple(sorted(positions))
+        placed: List[Tuple[str, str]] = []
+        submitted_any = False
+        for code in sequence:
+            position = positions.get(code)
+            if position is None or position.net_quantity == 0 or code in live:
+                continue
+            state = self._market_state(code, ts)
+            side = Side.SELL if position.net_quantity > 0 else Side.BUY
+            # Price at the band edge so the close is marketable regardless of
+            # which way the mark moved -- the floor for a sell, the ceiling for
+            # a buy. On a locked book the edge IS the mark and the order is
+            # refused BAND_LOCK, which is the position riding, correctly. Fall
+            # back to the mark when the band is unknown.
+            edge = state.floor if side is Side.SELL else state.ceiling
+            price = edge if edge is not None else getattr(state, 'last', None)
+            if price is None:
+                continue          # no mark to price the close on a blind session
+            result = self.submit(Order(
+                ticker=code, side=side, quantity=abs(position.net_quantity),
+                order_type=OrderType.LIMIT, limit_price=price))
+            placed.append((code, type(result).__name__))
+            submitted_any = submitted_any or isinstance(result, Accepted)
+        # The forced close is an intraday event on the breach day: fill it in
+        # the same advance rather than leaving it to a next-day evaluation that
+        # a day order would not survive. Re-running the fill pass is safe --
+        # terminal orders are skipped and a NO_FILL records nothing.
+        if submitted_any:
+            self._evaluate_fills(ts)
+        return tuple(placed)
 
     def indeterminate_report(self) -> RunIgnorance:
         """How much of the run rested on something the run did not have.
@@ -3022,6 +3222,13 @@ class ExchangeSession:
                 any ledger has moved, so the session is left exactly as it
                 was and a caller that catches it holds consistent books.
         """
+        walk = getattr(decision, 'walk', None)
+        if walk is not None and len(walk.tranches) > 1:
+            # A sweep that took several levels is several fills at several
+            # prices, not one fill at the worst of them. Spend the tranches.
+            self._apply_swept(record, decision, ts, instrument)
+            return
+
         refusal = self._fill_refusal(record, decision, ts)
         if refusal is not None:
             raise ValueError(refusal)
@@ -3056,6 +3263,101 @@ class ExchangeSession:
                                         charges)
 
         after, _ = self._book.apply_fill(record.order_id, fill)
+        if after.is_live:
+            self._book.set_encumbrances(
+                record.order_id,
+                self._securities.encumbrances.of(record.order_id))
+
+    def _apply_swept(self, record: OrderRecord, decision: FillDecision,
+                     ts: datetime,
+                     instrument: Optional[InstrumentSpec]) -> None:
+        """Spend a multi-level sweep tranche by tranche, charged once.
+
+        A sweep that walked three ask levels moved ``sum(price x quantity)``
+        in cash, at three prices. :class:`SweptFillDecision` cannot carry that
+        -- it holds one price and one quantity and projects the sweep onto its
+        **worst** touched price for a caller that predates depth (see that
+        class). Booking the ledger at that projection over-charges every
+        tranche past the touch: 6,900 shares at 95.90 when 5,700 traded at
+        95.40. The tranches on :attr:`SweptFillDecision.walk` are the real
+        record, and this method books one :class:`Fill` per tranche at the
+        tranche's own resting price (QD 352 Dieu 6.3, one match at the resting
+        order's price) -- so the cash spent is the exact consideration and the
+        holdings carry a per-lot cost basis.
+
+        **The order's charges are assessed once, on the whole consideration.**
+        ``minimum_per_order`` is a clamp on the *order* (``charges.py``), and a
+        sweep is one order that happened to match at several prices; levying
+        the minimum per tranche would charge a small-order floor three times.
+        The assessment needs a notional equal to the consideration, which no
+        single on-grid price expresses, so it runs against an aggregate priced
+        at the walk's VWAP -- a charge basis only, never booked as a fill. The
+        charges ride on the first tranche's fill; the rest carry none, because
+        one order pays its charge once.
+
+        **Atomicity is the single-fill path's, unchanged.** The only refusals
+        ``OrderBookOfRecord.apply_fill`` can raise -- a terminal order, an MOK
+        partial, a fill past original -- are a function of the *total*
+        quantity, so the one aggregate :meth:`_fill_refusal` clears every
+        tranche prefix. A swept MOK is a kill at ``BookWalkFillPolicy._decide``
+        and never arrives here as a fill. Each tranche is affordable because
+        the reservation was taken at the order's limit and every tranche price
+        is at or through it, so the running consideration never exceeds what
+        was reserved -- no tranche can fail funding after an earlier one moved.
+        """
+        walk = decision.walk
+        refusal = self._fill_refusal(record, decision, ts)
+        if refusal is not None:
+            raise ValueError(refusal)
+
+        rules = self._rulebook.at(ts)
+        profile = self._config.broker_profile
+        kind = instrument.kind if instrument is not None else (
+            InstrumentKind.FUTURE if record.venue is Venue.HNXDS
+            else InstrumentKind.STOCK)
+        pool = pool_for_venue(record.venue)
+
+        def _tranche_fill(quantity: int, price: Decimal,
+                          charges: Tuple[Charge, ...]) -> Fill:
+            return Fill(
+                fill_id=self._next_fill_id(), order_id=record.order_id,
+                ticker=record.order.ticker, venue=record.venue,
+                side=record.order.side, quantity=quantity, price=price, ts=ts,
+                evidence=decision.evidence or FillEvidence.MODELLED,
+                confidence=decision.confidence, charges=charges)
+
+        # The order's charges, assessed once. The aggregate is priced at the
+        # VWAP so its notional is exactly the sweep's consideration; it is a
+        # charge basis and is never booked.
+        aggregate = Fill(
+            fill_id=FillId('SWEEP'), order_id=record.order_id,
+            ticker=record.order.ticker, venue=record.venue,
+            side=record.order.side, quantity=walk.filled_quantity,
+            price=walk.vwap, ts=ts,
+            evidence=decision.evidence or FillEvidence.MODELLED,
+            confidence=decision.confidence)
+        if pool is Pool.DERIVATIVES:
+            order_charges = self._derivative_charges(aggregate, rules)
+        else:
+            order_charges = assess_charges(rules, profile, aggregate,
+                                           charge_class_for(kind))
+
+        after = record
+        for index, tranche in enumerate(walk.tranches):
+            fill = _tranche_fill(tranche.quantity, tranche.price,
+                                 order_charges if index == 0 else ())
+            if pool is Pool.DERIVATIVES:
+                self._derivatives.apply_fill(
+                    fill, rules, ts,
+                    expiry=self._expiry_for(fill.ticker, instrument))
+                if fill.charges:
+                    self._debit_charges(fill.charges, ts, f'on {fill.fill_id}')
+                    self._deposit_charges.extend(fill.charges)
+            else:
+                self._securities.apply_fill(
+                    fill, self._settles_at(fill, kind), fill.charges)
+            after, _ = self._book.apply_fill(record.order_id, fill)
+
         if after.is_live:
             self._book.set_encumbrances(
                 record.order_id,
@@ -3478,6 +3780,12 @@ class ExchangeSession:
         # in place when the account comes back, so afterwards there is no way
         # to tell a clearance from an ordinary quiet mark.
         call_before = self._monitor.outstanding_call
+        # A forced close is not immediate: QD 26 Dieu 13.3 gives a cure window
+        # before positions are shut, so the *first* mark that reports FORCED
+        # only reports -- the account is given the session to cure. Execution
+        # happens once the breach has persisted past that first mark, which is
+        # what ``in_forced_breach`` being latched BEFORE this mark tells us.
+        forced_before = self._monitor.in_forced_breach
         self._exercise(Component.DERIVATIVES_LADDER)
         for news in self._monitor.on_mark(self._derivatives, view, rules, ts):
             # A call that was outstanding and is now answered gets its own
@@ -3502,17 +3810,35 @@ class ExchangeSession:
             if kind is EventKind.FORCED_LIQUIDATION:
                 rule = self._liquidation_rule()
                 pro_rata = rule is LiquidationRule.PRO_RATA
+                # Snapshot the report from the positions as they stand NOW,
+                # because executing the close empties the very positions the
+                # sequence and legs describe.
+                sequence = (None if pro_rata else
+                            liquidation_sequence(self._derivatives, marks, rule))
+                legs = tuple(sorted(self._derivatives.positions()))
+                deposit_before = self._derivatives.deposit_balance
+                # Execute the close: submit real offsetting orders through the
+                # order path, in the selection rule's order. They face the same
+                # band, tick, lot and fill policy as any order -- so a locked
+                # book refuses them (BAND_LOCK) and the position rides, which is
+                # the measured 17.6% permissive cost the report alone hid.
+                # PRO_RATA is an allocation, not an ordering; its per-leg
+                # quantity is not yet computed, so it is still report-only.
+                closed = (() if pro_rata or not forced_before
+                          else self._execute_forced_close(marks, rule, ts))
                 detail = {
                     'selection_rule': rule,
-                    'sequence': (None if pro_rata else
-                                 liquidation_sequence(self._derivatives,
-                                                      marks, rule)),
-                    'legs': tuple(sorted(self._derivatives.positions())),
+                    'sequence': sequence,
+                    'legs': legs,
                     'price_basis': 'the contract mark at this instant',
-                    'deposit_balance': self._derivatives.deposit_balance,
-                    'executed': False,
-                    'reason': 'Tier 1 reports a forced close and does not '
-                              'execute one; the loop is Tier 2',
+                    'deposit_balance': deposit_before,
+                    'executed': bool(closed),
+                    'closed': closed,
+                    'reason': ('offsetting close orders submitted through the '
+                               'order path; a locked book refuses them and the '
+                               'position rides' if closed else
+                               'nothing to close, or a close is already live '
+                               'for every leg, or PRO_RATA (report-only)'),
                 }
                 if pro_rata:
                     detail['allocation'] = (

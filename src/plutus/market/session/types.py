@@ -2751,6 +2751,14 @@ class FillPolicyConfig:
     kind: str = 'soft'
     max_participation: Optional[Decimal] = None
     seed: Optional[int] = None
+    #: ``book_walk`` only: the queue assumption -- ``'optimistic'`` /
+    #: ``'conservative'`` / ``'probabilistic'``. Named, never defaulted, and it
+    #: rides in the policy's signature so the run records which one it used.
+    queue: Optional[str] = None
+    #: ``book_walk`` only: seconds. A resting side older than this at an order's
+    #: instant is refused ``INDETERMINATE``; ``None`` accepts any age. Size it
+    #: against the lunch break, not the median (see ``BookWalkFillPolicy``).
+    max_staleness: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -2770,6 +2778,10 @@ class DataConfig:
     adapter: str
     root: str
     settlement_calendar: Optional[str] = None
+    #: An optional separate root for order-book depth (``local_quote_*`` tables),
+    #: used by a ``book_walk`` fill policy. Prices/bands come from ``root`` (which
+    #: may carry no book); the book is swept from here. Defaults to ``root``.
+    book_root: Optional[str] = None
 
 
 @dataclass(frozen=True)

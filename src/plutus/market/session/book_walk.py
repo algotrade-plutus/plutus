@@ -152,25 +152,27 @@ from typing import (Callable, ClassVar, FrozenSet, Iterable, List, Optional,
 
 from plutus.core.order import Side
 from plutus.market.adapters.depth import (MAX_DEPTH, DepthBook, DepthLevel,
-                                          SideAvailability)
+                                          DepthSide, SideAvailability)
 from plutus.market.protocol import LockEvidence, Resolution
 from plutus.market.session.fills import (BOOK_WALK_KIND, NO_MARKET_IMPACT,
                                          POLICY_SEPARATOR, FillPolicy,
                                          _CappedFillPolicy, fill_draw,
                                          floor_to_lot, participation_cap)
 from plutus.market.session.types import (DataField, FillDecision, FillEvidence,
-                                         FillOutcome, MarketInterval,
-                                         OrderRecord, TimeInForce)
+                                         FillOutcome, FillPolicyConfig,
+                                         MarketInterval, OrderRecord,
+                                         TimeInForce)
 
 __all__ = [
     'SWEEP_IS_CONTINUOUS_ONLY', 'DEPTH_IS_NOT_EXTRAPOLATED',
     'QUEUE_DRAW_DOMAIN',
     'Bound', 'LadderFault', 'Remainder', 'SweepStop',
     'QueueClaim', 'QueuePolicy', 'QueueRequest', 'PrintsThrough',
+    'QueuePosition', 'MakerQueuePolicy', 'maker_fill',
     'OptimisticQueue', 'ConservativeQueue', 'ProbabilisticQueue',
     'Tranche', 'BookWalk', 'walk_book', 'queue_draw_key',
-    'BookProvider', 'BookWalkFillPolicy', 'SweptFillDecision',
-    'sweep_ignorance',
+    'BookProvider', 'TapeProvider', 'BookWalkFillPolicy', 'SweptFillDecision',
+    'sweep_ignorance', 'build_book_walk_policy',
 ]
 
 
@@ -406,6 +408,49 @@ class QueueClaim:
                 'that would publish a guess as a decision')
 
 
+@dataclass(frozen=True)
+class QueuePosition:
+    """How many shares rest **ahead of us** at our price -- the queue axis as a
+    pure position, and the input a *maker* fill applies to the tape's prints.
+
+    The three shipped policies are three positions: the front (``0``, optimistic),
+    the back (all ``displayed``, conservative), and a seeded draw between them
+    (probabilistic). A *taker*'s :meth:`QueuePolicy.claim` applies the same
+    position to the book's displayed depth; a *maker* applies it to the volume
+    that printed through its price (:func:`maker_fill`). One axis, two arms --
+    design 2026-08-28 §5.2. This is deliberately *not* a ``QueueClaim``: a claim
+    is a quantity we get, a position is where we stand, and the maker arm turns
+    the second into the first only once it also knows the prints.
+    """
+
+    ahead: int
+    note: str
+
+    def __post_init__(self):
+        if self.ahead < 0:
+            raise ValueError(
+                f'a queue position may not be negative, got {self.ahead}')
+
+
+@runtime_checkable
+class MakerQueuePolicy(Protocol):
+    """A queue policy that can place a **resting** order in its queue.
+
+    Separate from :class:`QueuePolicy` on purpose: that one prices a *taker*
+    against the displayed book and is all a caller crossing the spread needs;
+    this one prices a *maker* against the tape and is what a passive order
+    needs. Keeping them apart means a third-party taker policy is not forced to
+    implement a maker method it has no use for, and the reverse. The three
+    shipped policies are both.
+    """
+
+    signature: str
+
+    def ahead(self, request: 'QueueRequest') -> QueuePosition:
+        """Shares resting ahead of this order at its price."""
+        ...
+
+
 @runtime_checkable
 class QueuePolicy(Protocol):
     """How much of a displayed level is ours. The axis the author asked for.
@@ -446,6 +491,13 @@ class OptimisticQueue:
 
     signature: ClassVar[str] = 'optimistic'
 
+    #: The front of the queue is a position (0) that does not read the book, so
+    #: an optimistic *maker* fills off the tape alone -- it needs no size at its
+    #: price. The two positioned policies below do (their ``ahead`` reads the
+    #: displayed depth), and a maker arm must refuse them INDETERMINATE where the
+    #: book carries no size, exactly as ``walk_book`` refuses an unsized sweep.
+    needs_queue_ahead: ClassVar[bool] = False
+
     def claim(self, request: QueueRequest) -> QueueClaim:
         return QueueClaim(
             quantity=request.displayed,
@@ -454,6 +506,11 @@ class OptimisticQueue:
                   f'{request.level.depth}, so all {request.displayed} '
                   f'displayed shares are available'),
         )
+
+    def ahead(self, request: QueueRequest) -> QueuePosition:
+        return QueuePosition(
+            0, note=('optimistic queue: assumed first in the queue, so 0 '
+                     'shares rest ahead of this order at its price'))
 
     def __repr__(self) -> str:
         return 'OptimisticQueue()'
@@ -501,6 +558,8 @@ class ConservativeQueue:
     and this module does not invent them.
     """
 
+    needs_queue_ahead: ClassVar[bool] = True
+
     def __init__(self, prints: Optional[PrintsThrough] = None) -> None:
         """
         Args:
@@ -542,6 +601,14 @@ class ConservativeQueue:
                   f'at depth {request.level.depth} are ahead of this order and '
                   f'{printed} traded through, leaving {available}'),
         )
+
+    def ahead(self, request: QueueRequest) -> QueuePosition:
+        displayed = request.displayed
+        return QueuePosition(
+            displayed,
+            note=(f'conservative queue: all {displayed} displayed shares at '
+                  f'depth {request.level.depth} rest ahead of this order, so it '
+                  f'fills only on prints beyond them'))
 
     def __repr__(self) -> str:
         return f'ConservativeQueue(prints={self.prints!r})'
@@ -606,6 +673,8 @@ class ProbabilisticQueue:
     decision and the draw itself is written into every tranche's note, so a
     reader with the decision can recompute the number that made it.
     """
+
+    needs_queue_ahead: ClassVar[bool] = True
 
     def __init__(self, seed: int) -> None:
         """
@@ -672,8 +741,81 @@ class ProbabilisticQueue:
             return (Decimal(displayed - taken + 1)
                     / Decimal(displayed + 1))
 
+    def ahead(self, request: QueueRequest) -> QueuePosition:
+        # The SAME draw ``claim`` uses, so the taker and the maker agree on
+        # where this order stands: claim applies it to the displayed depth,
+        # the maker arm applies it to the prints.
+        displayed = request.displayed
+        value = self.draw(request)
+        count = int(value * (displayed + 1))
+        return QueuePosition(
+            count,
+            note=(f'probabilistic queue: a seeded draw of {value} against seed '
+                  f'{self.seed} places {count} of {displayed} displayed shares '
+                  f'at depth {request.level.depth} ahead of this order '
+                  f'[key {queue_draw_key(request)}]'))
+
     def __repr__(self) -> str:
         return f'ProbabilisticQueue(seed={self.seed})'
+
+
+def maker_fill(position: QueuePosition, prints: Optional[int],
+               order_size: int, already_filled: int = 0) -> QueueClaim:
+    """A resting order's fill **this interval**: the prints that reached it.
+
+    The maker counterpart to a :class:`QueuePolicy`'s taker ``claim``, and the
+    place the two arms meet.
+
+    ``prints`` is the volume that traded at or through this order's price
+    **since it joined the queue** -- a *cumulative* number, from a sized tape,
+    and ``None`` where the tape does not serve the window. ``position.ahead`` is
+    the queue in front of it. The first ``ahead`` shares of the cumulative
+    prints clear that queue; the rest are this order's, so the order's
+    **cumulative entitlement** is::
+
+        entitlement = clamp(prints - ahead, 0, order_size)
+
+    -- exactly :class:`ConservativeQueue`'s ``max(0, printed - displayed)``
+    generalised to any position (the front, ``ahead = 0``, fills on the first
+    print; the back, ``ahead = displayed``, only once the whole visible queue
+    has traded through). Because ``prints`` is cumulative, so is the
+    entitlement; the fill to book **this** interval is the increment over what
+    the order has already filled (design 2026-08-28 §4)::
+
+        return = max(0, entitlement - already_filled)
+
+    Passing ``order_size`` (the *original* order quantity, constant across
+    intervals) and ``already_filled`` -- rather than a shrinking "remaining" --
+    is what stops the cumulative entitlement being re-booked every interval and
+    over-filling an order whose prints have plateaued.
+
+    ``prints is None`` is **INDETERMINATE, never zero**: the tape could not say
+    whether this order filled, the opposite of a definite no-fill, and must not
+    silently suppress a trade the strategy would have made. ``prints == 0`` on a
+    served tape is a *definite* no-fill (``determinate``, ``0``): absence of
+    prints is knowledge.
+    """
+    if order_size < 0:
+        raise ValueError(f'order_size may not be negative, got {order_size}')
+    if already_filled < 0:
+        raise ValueError(
+            f'already_filled may not be negative, got {already_filled}')
+    if prints is None:
+        return QueueClaim(
+            quantity=0, determinate=False,
+            note=(f'{position.note}; but the sized tape does not serve this '
+                  f'window, so how much printed through this resting order '
+                  f'cannot be established'),
+            missing=frozenset({DataField.VOLUME}))
+    if prints < 0:
+        raise ValueError(f'a print total may not be negative, got {prints}')
+    entitlement = max(0, min(order_size, prints - position.ahead))
+    increment = max(0, entitlement - already_filled)
+    return QueueClaim(
+        quantity=increment, determinate=True,
+        note=(f'{position.note}; {prints} printed through and {position.ahead} '
+              f'rested ahead, entitling {entitlement} of {order_size} '
+              f'({already_filled} already filled, so {increment} this interval)'))
 
 
 # --------------------------------------------------------------------------
@@ -1174,6 +1316,23 @@ class BookProvider(Protocol):
         ...
 
 
+@runtime_checkable
+class TapeProvider(Protocol):
+    """Anything that can total the prints through a price over a window.
+
+    ``adapters.tape.TapeSource`` satisfies it structurally and is the intended
+    implementation. ``prints_through`` returns the shares that traded at or
+    through ``price`` in ``[since, until)`` for a resting order of ``side``, or
+    ``None`` where the tape does not serve the window (INDETERMINATE). The
+    Protocol exists so this module does not import the concrete source and a
+    caller may supply their own sized tape.
+    """
+
+    def prints_through(self, ticker: str, price: Decimal, side: Side,
+                       since: datetime, until: datetime) -> Optional[int]:
+        ...
+
+
 @dataclass(frozen=True)
 class SweptFillDecision(FillDecision):
     """A ``FillDecision`` that still knows it was a sweep.
@@ -1186,14 +1345,18 @@ class SweptFillDecision(FillDecision):
 
     Two deliberate lossy projections, both in the restrictive direction:
 
-    **``price`` is the sweep's worst price**, not its average. A buy is booked
-    at the highest price it swept and a sell at the lowest. The average would
-    be off the tick grid, would be a price at which nothing traded, and would
-    make ``quantity * price`` disagree with the cash the sweep actually moved;
-    the worst price is an actual resting price on the actual grid, and erring
-    there costs the simulated account money rather than handing it money it
-    would not have had. ``walk.consideration`` is the exact figure and
-    ``walk.vwap`` is available for reporting.
+    **``price`` is the sweep's worst price**, not its average -- a single-value
+    *summary* for a caller that reads ``FillDecision.price`` without knowing
+    about depth. A buy summarises at the highest price it swept and a sell at
+    the lowest. It is emphatically **not what the account is charged**:
+    ``ExchangeSession._apply_swept`` reads :attr:`walk` and books one fill per
+    tranche at the tranche's own resting price, so the cash moved is exactly
+    ``walk.consideration`` -- ``sum(price * quantity)`` -- and the holdings
+    carry a per-lot cost basis. A depth-unaware reader who takes ``price`` at
+    face value still errs the safe way: the worst price is an actual resting
+    price on the actual grid, and over-stating a sweep's cost never hands the
+    simulated account money it would not have had. The average
+    (``walk.vwap``) is off the tick grid and is for reporting only.
 
     **``missing`` is empty on a partial fill whose remainder is
     ``INDETERMINATE``.** ``exchange.py`` counts ``decision.missing`` only when
@@ -1271,6 +1434,7 @@ class BookWalkFillPolicy(_CappedFillPolicy):
         queue: QueuePolicy,
         max_participation: Optional[Decimal],
         max_staleness: Optional[timedelta],
+        tape: Optional[TapeProvider] = None,
         auction: Optional[FillPolicy] = None,
     ) -> None:
         """
@@ -1336,6 +1500,7 @@ class BookWalkFillPolicy(_CappedFillPolicy):
             raise ValueError(
                 f'a queue signature may not contain {POLICY_SEPARATOR!r}, got '
                 f'{signature!r}; it would make the policy stamp unreadable')
+        self.tape = tape
         self.auction = auction
 
     # -- what a run records ---------------------------------------------
@@ -1349,9 +1514,10 @@ class BookWalkFillPolicy(_CappedFillPolicy):
         auction = ('off' if self.auction is None
                    else getattr(self.auction, 'signature',
                                 getattr(self.auction, 'kind', 'unknown')))
+        tape = 'on' if self.tape is not None else 'off'
         return (f'{self.kind}(queue={self.queue.signature},'
                 f'max_participation={cap},max_staleness={stale},'
-                f'auction={auction})')
+                f'tape={tape},auction={auction})')
 
     @property
     def assumptions(self) -> Tuple[str, ...]:
@@ -1411,14 +1577,181 @@ class BookWalkFillPolicy(_CappedFillPolicy):
 
         book = self.books.book_at(interval.ticker, interval.start,
                                   max_age=self.max_staleness)
-        walk = walk_book(
-            book, side=order.order.side, limit=order.order.limit_price,
-            quantity=order.remaining_quantity, queue=self.queue,
-            order_id=str(order.order_id), max_staleness=self.max_staleness,
-        )
-        return self._decide(walk, order, interval, rules,
-                            already_filled=already_filled,
-                            instrument=instrument)
+        if self._is_marketable(order.order, book):
+            walk = walk_book(
+                book, side=order.order.side, limit=order.order.limit_price,
+                quantity=order.remaining_quantity, queue=self.queue,
+                order_id=str(order.order_id), max_staleness=self.max_staleness,
+            )
+            return self._decide(walk, order, interval, rules,
+                                already_filled=already_filled,
+                                instrument=instrument)
+        # Not marketable: it rests, and fills only as trades print through its
+        # price. That is the maker arm -- a walk of the tape, not the book.
+        return self._maker(order, interval, rules, instrument=instrument)
+
+    def _is_marketable(self, order, book: DepthBook) -> bool:
+        """Whether to treat this order as a taker rather than a resting maker.
+
+        A market order always takes. A limit takes iff it is priced through the
+        touch it would cross: a BUY at or above the best ask, a SELL at or below
+        the best bid.
+
+        When the crossing side is **not observed** (stale-dropped or absent) the
+        order is routed to the **taker** arm, not the maker. This is the honest
+        default: we cannot *confirm* the order rests, and a marketable order
+        mis-routed to the maker would under-fill (rest when it should have
+        taken). The taker walk then returns INDETERMINATE for the unseen book --
+        which is exactly what a stale book at the afternoon reopen should be, and
+        what the maker arm must not paper over with a confident rest. Only an
+        order we can *see* does not cross becomes a maker.
+        """
+        if order.limit_price is None:
+            return True
+        crossing = book.resting_side_for(order.side)
+        if (crossing.availability is not SideAvailability.OBSERVED
+                or crossing.best is None):
+            return True
+        touch = crossing.best.price
+        return (order.limit_price >= touch if order.side is Side.BUY
+                else order.limit_price <= touch)
+
+    def _maker(self, order: OrderRecord, interval: MarketInterval, rules, *,
+               instrument) -> FillDecision:
+        """Fill a **resting** order from the tape, by queue position.
+
+        The maker counterpart to the sweep. The order does not cross, so it
+        joins the queue at its price and fills only as trades print through it.
+        Ingredients, each of which can be missing and each refused honestly:
+
+        * **the prints** since the order arrived -- from the tape. A tape that
+          is wired but does not serve the window is INDETERMINATE (a data gap,
+          not a no-fill). No tape *at all* is a different thing: the policy is
+          configured taker-only, and an order that does not cross simply rests
+          (NO_FILL) under that model, exactly as it did before the maker arm --
+          the reason names the absent tape so the modelling limit is visible;
+        * **the queue ahead** at the order's price when it arrived -- from the
+          book on the order's own side, and needed only by the positioned queues
+          (:attr:`OptimisticQueue.needs_queue_ahead` is ``False``); where a
+          positioned queue cannot read it the fill is INDETERMINATE naming
+          ``BOOK_SIZE``;
+        * **the round lot** -- the maker's fill is floored to the dated trading
+          unit, exactly as the sweep's is, so it never books an odd lot the
+          account cannot later sell.
+
+        The per-interval fill is :func:`maker_fill`'s increment over what the
+        order has already filled, so a cumulative tape is not re-booked each
+        tick. The fill price is the order's own resting price -- a maker earns
+        what it posted -- and evidence is ``MODELLED``: inferred from the tape
+        and a declared queue position, never a print observed to be ours.
+
+        **Arrival is ``submitted_at``.** An order amended in place (a re-quote)
+        keeps its original ``submitted_at``, which would credit a new price with
+        prints from before it rested there; a re-quoting strategy must
+        cancel-and-replace (a fresh id, a fresh arrival), not amend.
+        """
+        ordr = order.order
+        price = ordr.limit_price
+        if price is None:
+            return FillDecision.no_fill(
+                'a market order has no resting price at which to be a maker')
+
+        if self.tape is None:
+            return FillDecision.no_fill(
+                f'this order rests at {price} and does not cross, and no sized '
+                f'tape was supplied to this policy, so it fills only as a taker '
+                f'would (never) and simply rests -- wire a tape to fill it as a '
+                f'maker')
+
+        prints = self.tape.prints_through(
+            ordr.ticker, price, ordr.side, order.submitted_at, interval.start)
+
+        position = self._position_at(order, price)
+        if position is None:
+            return FillDecision.indeterminate(
+                f'a {self.queue.signature} maker resting at {price} needs the '
+                f'size queued ahead of it on the {_name(ordr.side)} side when it '
+                f'arrived, and the book carries none there (unsized, or beyond '
+                f'the deepest observed level, which this module does not '
+                f'extrapolate)',
+                [DataField.BOOK_SIZE])
+
+        claim = maker_fill(position, prints, order.original_quantity,
+                           order.filled_quantity)
+        if not claim.determinate:
+            return FillDecision.indeterminate(
+                claim.note, sorted(claim.missing, key=lambda f: f.value))
+        if claim.quantity <= 0:
+            return FillDecision.no_fill(claim.note)
+
+        lot = self._lot(rules, interval, instrument)
+        if lot is None:
+            return FillDecision.indeterminate(
+                f'{claim.note}; but no round lot is known for '
+                f'{rules.spec.code!r} at {interval.start.date()}, so the maker '
+                f'fill cannot be floored to a whole lot', ())
+        floored = floor_to_lot(claim.quantity, lot)
+        if floored <= 0:
+            return FillDecision.no_fill(
+                f'{claim.note}; and {claim.quantity} is below one round lot of '
+                f'{lot}, so it keeps resting until a whole lot has printed')
+        return FillDecision.fill(floored, price, FillEvidence.MODELLED)
+
+    def _position_at(self, order: OrderRecord,
+                     price: Decimal) -> Optional[QueuePosition]:
+        """The queue ahead of a resting order at its price, as of arrival.
+
+        Optimistic assumes the front and reads no book. A positioned queue reads
+        the displayed size at the order's price on its own side; where that
+        cannot be established (:meth:`_displayed_at` returns ``None``) the arm
+        turns it into an INDETERMINATE naming ``BOOK_SIZE``.
+        """
+        ordr = order.order
+        displayed = 0
+        if getattr(self.queue, 'needs_queue_ahead', True):
+            book = self.books.book_at(ordr.ticker, order.submitted_at,
+                                      max_age=self.max_staleness)
+            own = book.side(ordr.side)
+            if own.availability is not SideAvailability.OBSERVED:
+                return None
+            found = self._displayed_at(own, price, ordr.side)
+            if found is None:
+                return None
+            displayed = found
+        level = DepthLevel(
+            depth=1, price=price, size=displayed,
+            price_as_of=order.submitted_at, size_as_of=order.submitted_at,
+            ts=order.submitted_at)
+        request = QueueRequest(
+            ticker=ordr.ticker, ts=order.submitted_at, side=ordr.side,
+            order_id=str(order.order_id), level=level,
+            remaining=order.remaining_quantity)
+        return self.queue.ahead(request)
+
+    @staticmethod
+    def _displayed_at(side: 'DepthSide', price: Decimal,
+                      resting_side: Side) -> Optional[int]:
+        """Displayed size queued ahead at ``price`` on a resting side.
+
+        * The **level's size** where ``price`` is a listed, sized level.
+        * ``0`` where ``price`` is *within* the observed range but no one is
+          showing there -- an empty queue, so this order is alone at it.
+        * ``None`` -- INDETERMINATE -- where the side carries **no sizes**, or
+          ``price`` is **beyond the deepest observed level**. The queue ahead is
+          then unknowable: the corpus carries three levels and this module does
+          not extrapolate a fourth, exactly as the sweep does not. Returning
+          ``0`` there would collapse the conservative and probabilistic queues
+          to the optimistic front-of-queue, which is the permissive direction.
+        """
+        if not side.has_sizes or not side.levels:
+            return None
+        for level in side.levels:
+            if level.price == price:
+                return level.size
+        deepest = side.levels[-1].price
+        beyond = (price > deepest if resting_side is Side.SELL
+                  else price < deepest)
+        return None if beyond else 0
 
     def _lock_refusal(self, order: OrderRecord,
                       interval: MarketInterval) -> Optional[FillDecision]:
@@ -1590,3 +1923,63 @@ class BookWalkFillPolicy(_CappedFillPolicy):
                 f'kill'), walk=bounded)
 
         return SweptFillDecision.swept(bounded)
+
+
+# --------------------------------------------------------------------------
+# The config → policy bridge (the session's entry point)
+# --------------------------------------------------------------------------
+
+def build_book_walk_policy(
+    config: FillPolicyConfig,
+    *,
+    book_provider: BookProvider,
+    tape_provider: Optional[TapeProvider] = None,
+    auction: Optional[FillPolicy] = None,
+) -> BookWalkFillPolicy:
+    """A :class:`BookWalkFillPolicy` from a config block and an injected book.
+
+    Lives here, not in ``fills.build_fill_policy``, for one reason and one
+    reason only: ``fills`` cannot import this module (this module imports
+    ``fills``), so the config-driven construction of a book-walk policy is
+    unrepresentable there. The session, which imports both, calls this with its
+    own ``DepthSource`` as the ``book_provider``.
+
+    Nothing is defaulted that the run's result turns on: the **queue** is
+    required (named in ``fill_policy.queue``, and a probabilistic queue also
+    requires ``fill_policy.seed``), and the **staleness** budget is the caller's
+    seconds or ``None`` for *accept any age*. Both ride in the policy's
+    :attr:`BookWalkFillPolicy.signature`, so ``SessionProvenance.fill_policy_kind``
+    records which queue and which budget produced the fills.
+
+    Raises:
+        ValueError: on a missing or unknown ``queue``, or a probabilistic queue
+            without a ``seed``.
+    """
+    name = (config.queue or '').strip().lower()
+    if name == 'optimistic':
+        queue: QueuePolicy = OptimisticQueue()
+    elif name == 'conservative':
+        queue = ConservativeQueue()
+    elif name == 'probabilistic':
+        if config.seed is None:
+            raise ValueError(
+                'a probabilistic queue requires fill_policy.seed: a drawn '
+                'queue position that cannot be reproduced is not a result')
+        queue = ProbabilisticQueue(config.seed)
+    else:
+        raise ValueError(
+            f'book_walk requires fill_policy.queue to be one of '
+            f"'optimistic', 'conservative', 'probabilistic'; got "
+            f'{config.queue!r}. The queue assumption is a modelling choice and '
+            f'is never defaulted -- it decides which orders are answerable')
+
+    stale = (None if config.max_staleness is None
+             else timedelta(seconds=float(config.max_staleness)))
+    return BookWalkFillPolicy(
+        book_provider,
+        queue=queue,
+        max_participation=config.max_participation,
+        max_staleness=stale,
+        tape=tape_provider,
+        auction=auction,
+    )

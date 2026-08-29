@@ -13,7 +13,7 @@ shares become sellable.
 
 import json
 from dataclasses import replace
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -25,7 +25,7 @@ from plutus.market.protocol import (
     SessionPhase,
 )
 from plutus.market.session import (
-    EXCHANGE_BY_VENUE, Accepted, ChargeBase, DataField, EventKind,
+    EXCHANGE_BY_VENUE, Accepted, Amended, ChargeBase, DataField, EventKind,
     ExchangeSession, FillDecision, FillEvidence, IndeterminateReport,
     LeviedBy, LiquidationRule, MarginStatus, MarginMonitor, MarketInterval,
     HardFillPolicy, OrderState, Pool, Rejected, Session, SessionProvenance,
@@ -33,6 +33,9 @@ from plutus.market.session import (
 )
 from plutus.market.session.exchange import (
     Blindness, Component, RunIgnorance, RunProvenance,
+)
+from plutus.market.session.book_walk import (
+    BookWalk, Remainder, SweepStop, SweptFillDecision, Tranche,
 )
 from plutus.market.session.overnight import PRE_KRX_CONTINUOUS, OvernightGap
 from plutus.market.session.types import BrokerProfile
@@ -1473,23 +1476,28 @@ def test_the_session_alias_matches_the_spec_example():
     assert Session is ExchangeSession
 
 
-def test_amending_upward_is_refused_as_a_tier_boundary():
-    """An amend-up must re-run the encumbrance, so Tier 1 will not do it.
-
-    Refusing is the conservative direction: the alternative is a
-    release-and-retake that can fail *after* the release and leave a live
-    order unfunded. A pure quantity decrease is allowed and preserves
-    priority, which is the only amendment Vietnam's rules preserve priority
-    for anyway.
+def test_amending_upward_re_runs_the_encumbrance():
+    """An amend-up re-runs the funding (design section 5, publish-checklist
+    MUST #2): funded it succeeds, unfunded it is refused ``INSUFFICIENT_CASH``
+    and the order is left as it was. An increase never preserves priority; a
+    decrease does.
     """
-    session = build()
+    session = build()  # securities cash 150,000,000
     session.advance_to(datetime(2024, 6, 3, 9, 30))
-    ack = session.submit(buy(price='89.0'))
+    ack = session.submit(buy(price='89.0'))          # 1000 @ 89.0, ~89M reserved
 
-    up = session.amend(ack.order_id, quantity=2000)
-    assert isinstance(up, Rejected)
-    assert up.detail['tier'] == 2
+    # A funded amend-up succeeds and gives up priority (an increase).
+    up = session.amend(ack.order_id, quantity=1500)  # 133.5M <= 150M
+    assert isinstance(up, Amended)
+    assert up.quantity == 1500
+    assert up.priority_preserved is False
 
+    # An amend-up the account cannot fund is refused for cash; the order stays.
+    too_big = session.amend(ack.order_id, quantity=2000)  # 178M > 150M
+    assert isinstance(too_big, Rejected)
+    assert too_big.rule.name == 'INSUFFICIENT_CASH'
+
+    # A decrease still succeeds and preserves priority.
     down = session.amend(ack.order_id, quantity=500)
     assert down.quantity == 500
     assert down.priority_preserved is True
@@ -1790,6 +1798,138 @@ def test_a_sale_whose_charges_exceed_its_proceeds_does_not_destroy_shares():
     assert session.cash().pending_total == Decimal('100000') - charged
     assert session.cash().pending_total < Decimal('0')
     assert_invariant_4(session, tickers=('PENNY',))
+
+
+# --------------------------------------------------------------------------
+# A swept fill is charged per tranche, not at the sweep's worst price
+# --------------------------------------------------------------------------
+
+class SweepingPolicy:
+    """A caller-supplied policy that returns a multi-level sweep.
+
+    Stands in for ``BookWalkFillPolicy`` without a reconstructed book: it
+    hands back a :class:`SweptFillDecision` whose walk took several ask levels
+    at several prices. What the session must do with it is spend each tranche
+    at its own resting price -- ``sum(price x quantity)`` -- not book the whole
+    quantity at the worst price the sweep touched. ``FillPolicy`` is a
+    structural extension point, so a third-party policy handing back a sweep is
+    reachable by construction.
+    """
+
+    kind = 'sweeping'
+    signature = 'book_walk(queue=optimistic,max_participation=uncapped)'
+    assumptions = ()
+
+    def __init__(self, tranches):
+        # tranches: list of (price string, quantity)
+        self._tranches = tranches
+
+    def evaluate(self, record, interval, rules, *, already_filled=0,
+                 instrument=None):
+        ts = interval.start
+        tranches = tuple(
+            Tranche(depth=i + 1, price=Decimal(price), quantity=qty,
+                    displayed=qty, price_as_of=ts, size_as_of=ts,
+                    age=timedelta(0), sizes_lag_price=False,
+                    queue_note='optimistic: whole level',
+                    queue_confidence=Decimal('1'))
+            for i, (price, qty) in enumerate(self._tranches))
+        walk = BookWalk(
+            ticker=record.order.ticker, ts=ts, side=record.order.side,
+            limit=record.order.limit_price,
+            requested=record.remaining_quantity, tranches=tranches,
+            stop=SweepStop.FILLED, remainder_status=Remainder.NONE,
+            reason='synthetic multi-level sweep', queue_signature='optimistic')
+        return SweptFillDecision.swept(walk)
+
+
+#: 5,700 at 95.40, 200 at 95.50, 1,000 at 95.90 -- the shape of scenario J30's
+#: FPT sweep, priced into this harness's FPT band (reference ~95.5). The
+#: consideration is 658,780 thousand dong; the worst price the walk touched is
+#: 95.90, and 95.90 x 6,900 = 661,710 is the 2,930,000d over-charge the
+#: single-price projection would have booked.
+SWEEP = [('95.40', 5700), ('95.50', 200), ('95.90', 1000)]
+SWEEP_CONSIDERATION = Decimal('658780')      # 5700*95.40+200*95.50+1000*95.90
+SWEEP_WORST = Decimal('95.90') * 6900        # 661710 -- the bug
+
+
+def test_a_multi_level_sweep_is_charged_the_per_tranche_consideration():
+    """A sweep spends ``sum(price x quantity)``, not ``worst_price x quantity``.
+
+    ``SweptFillDecision`` carries **one** price and cannot represent three
+    fills at three prices, so it projects a sweep onto its worst touched price
+    for a caller that predates depth. That projection must not reach the
+    *ledger*: charging 6,900 shares at 95.90 when 5,700 of them traded at 95.40
+    invents 2,930,000d of cost the account never incurred. The real record is
+    the tranches on ``decision.walk``, and the session spends them -- one fill
+    per level, at the level's own resting price (QD 352 Dieu 6.3).
+    """
+    bars = {('FPT', D1): (Decimal('95'), Decimal('96'), Decimal('95.5'),
+                          1_000_000)}
+    session = atomic_session({}, bars, policy=SweepingPolicy(SWEEP),
+                             cash=1_000_000_000, kind='soft')
+    session.advance_to(datetime(2024, 6, 3, 9, 30))
+
+    ack = session.submit(Order(ticker='FPT', side=Side.BUY, quantity=6900,
+                               order_type=OrderType.LIMIT,
+                               limit_price=Decimal('99.0')))
+    assert isinstance(ack, Accepted)
+    events = session.advance_to(datetime(2024, 6, 3, 14, 0))
+
+    # One fill per level, each at its own resting price -- not one blended fill.
+    fills = [e for e in events
+             if e.kind in (EventKind.FILLED, EventKind.PARTIALLY_FILLED)]
+    assert [(e.price, e.quantity) for e in fills] == [
+        (Decimal('95.40'), 5700), (Decimal('95.50'), 200),
+        (Decimal('95.90'), 1000)], fills
+
+    # The whole order filled.
+    assert session.holdings('FPT').unsettled_quantity == 6900
+    assert session.orders()[0].state is OrderState.FILLED
+
+    # The cash spent, net of whatever charges the schedule levied, is the
+    # consideration -- not the worst-price projection. Tying cash to the
+    # consideration this way needs no knowledge of the fee rows: it fails at
+    # 509,910,000 (the bug) and passes only at 506,980,000.
+    charged = sum((c.total for c in session.charges()), Decimal('0'))
+    assert session.cash().available == (
+        Decimal('1000000000') - SWEEP_CONSIDERATION * 1000 - charged)
+    assert SWEEP_CONSIDERATION < SWEEP_WORST      # the projection over-charges
+
+    # And the multi-fill kept encumbrance conservation (section 12 invariant 4).
+    assert_invariant_4(session, tickers=('FPT',))
+
+
+def test_a_swept_order_pays_its_per_order_minimum_once_not_per_tranche():
+    """The commission minimum is a clamp on the **order**, not on each tranche.
+
+    A sweep is one order that happened to match at three prices. A per-order
+    minimum levied once is the contract-note reading; levying it per tranche
+    would charge a small-order floor three times for one order. The session
+    assesses the sweep's charges once, on the whole consideration, so the
+    minimum binds once.
+    """
+    # A minimum well above the rate charge (0.15% of 506,980,000 = 760,470d),
+    # so it binds -- and small enough that one of it and three of it bracket
+    # a clean threshold.
+    broker = {'name': 'min-commission',
+              'commission': [{'venue': 'HSX', 'base': 'trade_value',
+                              'rate': 0.0015, 'min': 2_000_000}]}
+    bars = {('FPT', D1): (Decimal('95'), Decimal('96'), Decimal('95.5'),
+                          1_000_000)}
+    session = atomic_session({}, bars, policy=SweepingPolicy(SWEEP),
+                             broker=broker, kind='soft')
+    session.advance_to(datetime(2024, 6, 3, 9, 30))
+    session.submit(Order(ticker='FPT', side=Side.BUY, quantity=6900,
+                         order_type=OrderType.LIMIT,
+                         limit_price=Decimal('99.0')))
+    session.advance_to(datetime(2024, 6, 3, 14, 0))
+
+    charged = sum((c.total for c in session.charges()), Decimal('0'))
+    # One 2,000,000d minimum, not three: the total sits below two of them.
+    # (Levied per tranche it would be at least 6,000,000d.)
+    assert charged < Decimal('4000000'), charged
+    assert charged >= Decimal('2000000'), charged
 
 
 def test_the_negative_net_settles_against_the_balance_at_t_plus_2():

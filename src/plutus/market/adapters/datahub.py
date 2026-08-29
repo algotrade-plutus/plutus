@@ -71,6 +71,7 @@ import calendar
 import re
 from datetime import date, datetime, timedelta
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
+from pathlib import Path
 from typing import (Callable, ClassVar, Dict, FrozenSet, Iterator, List,
                     Optional, Tuple, Union)
 
@@ -197,13 +198,23 @@ class DataHubSource:
         DataField.OPEN, DataField.HIGH, DataField.LOW, DataField.BOOK_SIZE,
     })
 
-    def __init__(self, config: DataHubConfig,
+    def __init__(self, config: Union[DataHubConfig, str, Path],
                  resolution: Resolution = Resolution.DAILY):
         if resolution is not Resolution.DAILY:
             raise ValueError(
                 'DataHubSource serves daily resolution only; use '
                 'plutus.market.adapters.tick.TickSource for Resolution.TICK'
             )
+        # A session config names a data adapter by dotted path and
+        # ``load_data_source`` hands the class the ``data.root`` string
+        # directly (its docstring: "root is handed to it when it takes one").
+        # A dotted path cannot name the ``for_root`` classmethod, so accept a
+        # bare root here and wrap it -- otherwise the documented
+        # ``from_config`` path builds a source whose ``config`` is a str and
+        # dies on the first read (``'str' object has no attribute
+        # 'has_field'``).
+        if not isinstance(config, DataHubConfig):
+            config = DataHubConfig(data_root=str(config))
         self.config = config
         self.resolution = resolution
         self._conn = duckdb.connect()
