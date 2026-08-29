@@ -11,6 +11,10 @@ this laptop. **Push before anything else.**
 
 ## 1. How to use this doc
 
+This is the 2-page launchpad. **For the full record — the development arc, the
+mechanics inventory, the margin research, the complete Jx/Sx suites, the defect
+inventory, and a document index — read `docs/reference/PAPER-COMPENDIUM.md`.**
+
 Read §2 (the thesis), §3 (the guardrails — what the paper must NOT overstate),
 and §4 (FEL, the new spine). Then §7 for where every number and figure lives, and
 §9 for the immediate next steps. §8 is the one genuinely unfinished piece (the F2
