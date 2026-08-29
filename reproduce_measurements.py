@@ -314,6 +314,7 @@ def measure_exchange_admission(data_root: Path) -> Dict[str, Any]:
     signal embeds look-ahead, and more than halves when corrected.
     """
     try:
+        from measurements.band_conformance import measure_band_conformance
         from measurements.equity_admission import measure_blocked_entries
     except ImportError as exc:  # pragma: no cover
         return {"error": f"could not import measurements: {exc}"}
@@ -324,9 +325,15 @@ def measure_exchange_admission(data_root: Path) -> Dict[str, Any]:
             r = measure_blocked_entries(str(data_root), lag=lag,
                                         stocks_only=stocks_only)
             out[f"{r.population}_lag{lag}"] = r.to_dict()
+    # Engine-backed band conformance: the library's own reconstruct_bands vs the
+    # vendor ceiling/floor, so the band-family result is the engine reproducing
+    # the observed lock rather than a SQL equality on the vendor field. HSX stock
+    # is the headline (parallels the bar-vs-tick lock).
+    out["band_conformance"] = measure_band_conformance(str(data_root)).to_dict()
     out["note"] = (
         "lag=1 is the tradeable rule and the honest headline; lag=0 is the "
-        "figure prior work quoted and tests the lock on the signal session."
+        "figure prior work quoted and tests the lock on the signal session. "
+        "band_conformance backs these with the engine's own band computation."
     )
     return out
 
