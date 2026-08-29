@@ -36,10 +36,15 @@ MECHANISM / POLICY (oracle — SCENARIO-CATALOGUE.md, folded scenarios)
     * Marketable orders sweep to fill (J13); the leveraged deposit can run out
       (J24).
 
-DECLARED (MUST #4, not yet built): variation margin is measured
-    cumulative-since-entry (A60), not settled in cash daily. S1 is the forcing
-    function for that build; here VM drives the call, and its daily cash
-    settlement is a separate pending item.
+MECHANISM (MUST #4, now built): variation margin **settles in cash daily**
+    (QĐ 26 Điều 20; VSDC "index futures daily variation margin T+1"). The day's
+    loss now leaves the deposit as cash rather than sitting in the requirement,
+    so a violent trend depletes the deposit fast enough that utilisation **jumps
+    straight past the call rung to a forced close** — deposit.py's MarginMonitor
+    reports FORCED "without inventing an intermediate call that never happened".
+    That is the emergent behaviour S1 demonstrates: on the Oct-2022 slide the
+    account is force-closed directly, its grace being the cure window at the
+    forced rung (QĐ 26 Điều 13.3), not a courtesy call first.
 
 SETUP — VN30F2210 (the genuine Aug–Oct 2022 front month), 40,000,000đ deposit
     (one lot is comfortable at ~0.4 utilisation; it is the *over-levering* into
@@ -47,13 +52,15 @@ SETUP — VN30F2210 (the genuine Aug–Oct 2022 front month), 40,000,000đ depos
     real series before this was written).
 
 EXPECTED — Tier 2
-    * Emergence: the signal opens a long and over-levers (net ≥ 2); a margin
-      CALL is issued, and not on day one — it emerges after the drawdown.
+    * Emergence: the signal opens a long and over-levers (net ≥ 2), and the
+      broker's margin engine takes over — **not on day one**, after the
+      drawdown. Under daily cash settlement the violent slide depletes the
+      deposit past the call rung, so the engine reports a FORCED breach directly.
     * Forced: a FORCED_LIQUIDATION fires with ``executed=True``, names
       VN30F2210, and the position is closed (not permissively carried).
     * Conservation: the deposit balance never goes impossible (< 0), and the
       mark-to-market equity trough is materially below the start — the drawdown
-      the call responded to is real.
+      the engine responded to is real.
 
 RUN
     .venv/bin/python strategies/test_s1_vn30f_meanrev.py
@@ -187,13 +194,19 @@ def test_s1_vn30f_meanrev():
     # Emergence — the signal built a leveraged long, and the call is not day one.
     assert ledger.strategy.max_long >= 2, \
         f"the strategy never over-levered (max long {ledger.strategy.max_long})"
-    calls = ledger.calls()
-    assert calls, "no margin call emerged from the drawdown"
-    assert calls[0][0] > START, "a call on day one is not emergent"
+    # The broker's margin engine takes over -- and under daily cash settlement
+    # (MUST #4, now built) the violent slide depletes the deposit past the call
+    # rung, so the engine reports a FORCED breach directly rather than a
+    # courtesy call first (deposit.py MarginMonitor: "a jump straight past the
+    # call level reports FORCED without inventing an intermediate call"). What
+    # must emerge is the forced management, and it must not be on day one.
+    forced = ledger.forced()
+    assert forced, "no margin breach emerged from the drawdown"
+    assert forced[0][0] > START, "a breach on day one is not emergent"
 
     # Forced — the broker force-closes, it executes, and the position is flat.
     executed = ledger.executed_forced()
-    assert executed, "a margin call was issued but never force-closed (executed)"
+    assert executed, "a margin breach was reported but never force-closed (executed)"
     assert TICKER in dict(executed[0][1].detail.get("closed") or ()), \
         executed[0][1].detail
 
@@ -211,9 +224,9 @@ if __name__ == "__main__":
     print("S1 — Front-month VN30F mean-reversion (VN30F2210, Aug–Oct 2022)")
     print(f"  {ledger.summary()}")
     print(f"  deepest long reached: {ledger.strategy.max_long} lots")
-    for day, e in ledger.calls():
+    for day, e in ledger.forced():
         util = getattr(e, "detail", {}).get("utilisation")
-        print(f"  margin CALL   {day}  utilisation={util}")
+        print(f"  margin BREACH {day}  utilisation={util}  executed={e.detail.get('executed')}")
     for day, e in ledger.executed_forced():
         print(f"  FORCED CLOSE  {day}  closed={e.detail.get('closed')}")
     try:

@@ -226,12 +226,13 @@ FUNDING_PROVENANCE: Mapping[str, str] = {
     'variation_margin_baseline': (
         'DECLARED CHOICE. settle_daily=False keeps the VM baseline at the '
         'entry price for the whole hold, which is what the legacy walk does '
-        'and is the only way the two are comparable. The real VSDC mechanism '
-        'rebaselines every day and moves the day\'s P&L as cash on T+1; Tier 1 '
-        'models the rebaseline and NOT the cash movement, so settle_daily=True '
-        'loses the cumulative loss entirely. Measured, that understates the '
-        '10-session incidence by 10.2 points. It is offered as a parameter, '
-        'and neither setting is the real thing.'),
+        'and is the only way the two are comparable. settle_daily=True is now '
+        'the real VSDC mechanism: it rebaselines every day AND moves the day\'s '
+        'P&L as cash on T+1 (MUST #4, QD 26 Dieu 20), so the cumulative loss is '
+        'paid out of the deposit rather than lost when the baseline rolls. The '
+        'two settings now give close incidences (both capture the loss); before '
+        'the cash leg was wired, settle_daily=True collapsed the incidence by '
+        '10 points by losing the loss entirely.'),
 }
 
 #: Why the funded-at-the-requirement run is arithmetic rather than evidence,

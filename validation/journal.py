@@ -90,6 +90,7 @@ _REASONS: Tuple[Tuple[str, CashMovement], ...] = (
     ('transfer out to securities', CashMovement.TRANSFER_OUT),
     ('opening deposit', CashMovement.OPENING_BALANCE),
     ('realised close-out', CashMovement.REALISED_PNL),
+    ('daily variation-margin settlement', CashMovement.VARIATION_SETTLEMENT),
     ('final settlement of', CashMovement.EXPIRY_SETTLEMENT),
     ('charges on', CashMovement.CHARGE_DEBITED),
 )

@@ -4010,6 +4010,21 @@ class ExchangeSession:
             return
         self._needs(Component.OVERNIGHT_MARGIN)
 
+        # QD 26 Dieu 20 / VSDC "index futures daily variation margin T+1":
+        # settle the day's position P&L in cash and roll the variation baseline
+        # BEFORE the requirement is read. The intraday requirement's loss-only
+        # VM is the buffer *between* settlements; paying it here and resetting
+        # the baseline is what stops the overnight requirement double-counting a
+        # loss the account has already settled -- and it is what makes the
+        # post-KRX grid honest, since QD 26 removes VM from MR *because* Dieu 20
+        # pays it in cash (OvernightAssumption.VARIATION_MARGIN_UNSETTLED is now
+        # cleared in-session: the view read below carries VM == 0). Skipped when
+        # a held contract has no settlement price this session, so the
+        # requirement reports that INDETERMINATE rather than settling a guess.
+        settlements = self._marks()
+        if positions and all(settlements.get(c) is not None for c in positions):
+            self._derivatives.settle_daily(settlements, ts)
+
         model = self._overnight_model(ts)
         margin_profile = getattr(self._config.broker_profile,
                                  'margin_profile', None)

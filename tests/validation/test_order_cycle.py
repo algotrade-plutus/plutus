@@ -691,28 +691,36 @@ def test_the_futures_expiry_credit_reaches_the_deposit_cash_log(runs):
 # Amendment
 # --------------------------------------------------------------------------
 
-def test_amendment_refuses_upward_and_price_changes_and_admits_a_decrease(
-        runs):
-    """Tier 1's stated boundary, read back out of the log.
+def test_amendment_admits_upward_and_price_changes_losing_priority(runs):
+    """Tier 1's amendment rule, resolved (MUST #2 amend re-run).
 
-    An amend-up must re-run the encumbrance and a price amend needs a
-    release-and-retake that can fail after the release; both are refused. A
-    pure decrease is admitted and keeps time priority (rulebook 2.5).
+    An amendment now re-runs admission and funding in place rather than
+    refusing: the amend-up re-takes a fresh (larger) encumbrance and the price
+    amend does the release-and-retake, and both are admitted when they fund and
+    admit. Priority survives only a pure quantity **reduction** (rulebook 2.5 /
+    HOSE from 2022-03-31); an amend-up and a price change are admitted with
+    ``priority_preserved=False``, a decrease with ``priority_preserved=True``.
     """
     result = runs['amend-tier-boundaries']
     refused = [e for e in result.logs.trades
                if e.action is TradeAction.AMEND_REFUSED]
-    assert len(refused) == 2
-    assert {e.rule for e in refused} == {'session_semantics'}
-    assert refused[0].quantity == 1500
-    assert refused[1].limit_price == Decimal('12.35')
+    assert refused == [], 'amendments are re-run and admitted now, not refused'
 
-    amended = _one(result, TradeAction.AMENDED)
-    assert amended.quantity == 400
-    assert 'priority_preserved=True' in amended.reason
-    # The reservation is deliberately NOT reduced -- it over-reserves, which
-    # is the conservative direction -- and the encumbrance identity still
-    # holds, which is what makes that safe.
+    amended = [e for e in result.logs.trades
+               if e.action is TradeAction.AMENDED]
+    assert len(amended) == 3
+    # amend up to 1500: admitted, priority lost.
+    assert amended[0].quantity == 1500
+    assert 'priority_preserved=False' in amended[0].reason
+    # amend the price to 12.35: admitted, quantity unchanged, priority lost.
+    assert amended[1].quantity == 1000
+    assert 'priority_preserved=False' in amended[1].reason
+    # amend down to 400: admitted, priority preserved.
+    assert amended[2].quantity == 400
+    assert 'priority_preserved=True' in amended[2].reason
+    # The reservation is deliberately NOT reduced on the decrease -- it
+    # over-reserves, which is the conservative direction -- and the encumbrance
+    # identity still holds, which is what makes that safe.
     assert not result.failed_identities
 
 

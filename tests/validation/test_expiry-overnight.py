@@ -128,20 +128,22 @@ def test_the_settlement_cash_flow_is_marked_from_the_variation_reference(
         expiry_run):
     """``quantity x multiplier x (settlement - reference)``, to the dong.
 
-    Both VN30F2210 lots were opened at 1032.5 and no daily settlement ever
-    ran, so the reference is still the entry price: one lot settled at 1058.0
-    pays ``1 x 100,000 x 25.5 = 2,550,000``. The VN30F2211 lot was bought at
-    1037.2 on the roll and settled at 972.5: ``1 x 100,000 x -64.7 =
-    -6,470,000``.
+    **Resolved, W1 daily cash settlement.** The variation reference now rolls
+    every session, so the expiry event pays only the RESIDUAL since the last
+    daily settlement price -- the entry-to-settlement move has already been
+    settled in cash, day by day. Both VN30F2210 lots opened at 1032.5 and
+    settled daily down to a last DSP of 1053.0; the lot settled at 1058.0 pays
+    the residual ``1 x 100,000 x 5.0 = 500,000``. The VN30F2211 lot's last DSP
+    was 957.6 and it settled at 972.5: ``1 x 100,000 x 14.9 = 1,490,000``.
     """
     front = expiry_run.settlement_for('VN30F2210')
     back = expiry_run.settlement_for('VN30F2211')
     assert front.amount == (Decimal('1') * S.VN30F_MULTIPLIER
-                            * (Decimal('1058.0') - Decimal('1032.5')))
-    assert front.amount == Decimal('2550000.0')
+                            * (Decimal('1058.0') - Decimal('1053.0')))
+    assert front.amount == Decimal('500000.0')
     assert back.amount == (Decimal('1') * S.VN30F_MULTIPLIER
-                           * (Decimal('972.5') - Decimal('1037.2')))
-    assert back.amount == Decimal('-6470000.0')
+                           * (Decimal('972.5') - Decimal('957.6')))
+    assert back.amount == Decimal('1490000.0')
 
 
 @requires_corpus
@@ -391,59 +393,82 @@ def test_the_tet_break_is_eight_calendar_days_with_no_mark(tet_run):
 
 @requires_corpus
 def test_the_overnight_gap_arrives_as_one_mark(tet_run):
-    """1130.3 -> 1176.6 in a single step: 46.3 points, 27,780,000 VND on six
-    lots, and the requirement moves the whole way in one advance."""
+    """1130.3 at the last pre-Tet close; the gap arrives in the single
+    2021-02-17 reopen advance -- which is where the forced close finally runs.
+
+    **Resolved, MUST #3 forced-execute.** The requirement no longer steps UP to
+    the far side of the gap: the six lots survived Tet only because the forced
+    close was blocked by the inverted band (2021-02-08/09), and the reopen mark
+    is where that offsetting order is finally admitted. So the one advance that
+    carries the gap takes the requirement to ZERO, not to the new mark. Before
+    the gap the book still holds six lots and the requirement is the intraday
+    ``0.13 x 6 x M x 1130.3``; after it the book is flat.
+    """
     before = tet_run.strategy.at(date(2021, 2, 9), 'close')
     after = tet_run.strategy.at(date(2021, 2, 17), 'open')
+    assert before['positions'] == {'VN30F2102': 6}
     assert before['initial_margin'] == (Decimal('0.13') * Decimal('6')
                                         * S.VN30F_MULTIPLIER
                                         * Decimal('1130.3'))
-    assert after['initial_margin'] == (Decimal('0.13') * Decimal('6')
-                                       * S.VN30F_MULTIPLIER
-                                       * Decimal('1176.6'))
+    assert after['positions'] == {}
+    assert after['initial_margin'] == Decimal('0')
 
 
 @requires_corpus
-def test_the_deposit_never_moves_while_the_account_is_in_breach(tet_run):
-    """FEATURES.md D1/A60, measured on six lots across Tet 2021.
+def test_the_deposit_moves_with_each_daily_settlement_through_the_breach(
+        tet_run):
+    """**Resolved, W1 daily cash settlement.** Six lots across Tet 2021.
 
-    The account reports ``FORCED`` on 2021-02-08 and stays in breach through
-    2021-02-18, and over that whole stretch ``deposit_balance`` is
-    **99,939,344 at every single mark**. Nothing is paid, nothing is
-    collected, and the entire position P&L arrives in one movement at expiry.
+    The account reports ``FORCED`` on 2021-02-08 and is in breach across the
+    Tet break, and over that stretch ``deposit_balance`` now STEPS with each
+    session's variation settlement rather than sitting still: 99,939,344 ->
+    71,199,344 (the 2021-02-08 mark settles ``6 x M x (1092.0 - 1139.9) =
+    -28,740,000``) -> 94,179,344 (the 2021-02-09 mark settles
+    ``6 x M x (1130.3 - 1092.0) = +22,980,000``). That is the Vietnamese broker
+    statement: the balance moves every session by the day's mark.
 
-    That is internally consistent -- ``DerivativesAccount`` declares in its
-    own class docstring that Tier 1 does not model the T+1 leg, and an account
-    that never pays must carry the whole loss in ``MR`` -- but it is not a
-    Vietnamese broker statement, on which the balance moves every session.
+    The position is not carried to expiry either. MUST #3 force-closes it at
+    the 2021-02-17 reopen (the band valid again), so the remainder is realised
+    as cash on the offsetting trade -- there is no ``EXPIRY_SETTLED`` row.
     """
     breach = [m for m in tet_run.strategy.marks
               if m['status'] in (MarginStatus.CALL.value,
                                  MarginStatus.FORCED.value)]
     assert breach, 'the window is sized to breach; it did not'
-    assert {m['deposit_balance'] for m in breach} == {Decimal('99939344')}
+    balances = {m['deposit_balance'] for m in breach}
+    assert balances == {Decimal('99939344'), Decimal('71199344'),
+                        Decimal('94179344')}
 
-    settled = tet_run.settlements
-    assert len(settled) == 1
-    assert settled[0].amount == (Decimal('6') * S.VN30F_MULTIPLIER
-                                 * (Decimal('1187.3') - Decimal('1139.9')))
-    assert settled[0].amount == Decimal('28440000.0')
+    settles = [c for c in tet_run.result.logs.cash.entries
+               if c.movement is CashMovement.VARIATION_SETTLEMENT]
+    assert [c.amount for c in settles] == [
+        (Decimal('6') * S.VN30F_MULTIPLIER
+         * (Decimal('1092.0') - Decimal('1139.9'))),
+        (Decimal('6') * S.VN30F_MULTIPLIER
+         * (Decimal('1130.3') - Decimal('1092.0')))]
+    assert [c.amount for c in settles] == [Decimal('-28740000.0'),
+                                           Decimal('22980000.0')]
+
+    # Force-closed at the reopen, not settled at expiry.
+    assert tet_run.settlements == ()
+    realised = [c for c in tet_run.result.logs.cash.entries
+                if c.movement is CashMovement.REALISED_PNL]
+    assert realised, 'the forced close realises the remainder as cash'
 
 
 @requires_corpus
-def test_the_ladder_is_walked_in_order_and_skips_no_rung_it_reached(tet_run):
-    """Six lots: WARNING at 0.8897 on the entry mark, FORCED at 1.1399 next.
+def test_the_ladder_is_walked_in_order_and_the_forced_close_executes(tet_run):
+    """Six lots: WARNING at 0.8897 on the entry mark, FORCED next.
 
     The ``CALL`` rung is never reported and that is correct -- ``on_mark``
     reports **at most one step** and a jump straight past the call level
     reports ``FORCED`` without inventing an intermediate call that never
-    happened. What follows is the documented Tier 1 behaviour and is pinned
-    here so nobody reads it as an escalation: ``FORCED_LIQUIDATION``
-    *reports* and does not execute (``detail['executed'] is False``), so the
-    account stays in breach and the event repeats at **every** mark --
-    including on 2021-02-17 and 2021-02-18, when utilisation is back down at
-    0.918 and 0.927, below the forced rung. Count distinct sessions, never
-    events.
+    happened. **Resolved, MUST #3 forced-execute:** ``FORCED_LIQUIDATION`` now
+    submits a real offsetting order. Through the two inverted-band sessions
+    (2021-02-08/09, ``ceiling < floor`` in the corpus) that order is REJECTED,
+    so the position survives and the forced repeats; at the 2021-02-17 reopen
+    the band is valid again, the offsetting order is ACCEPTED, and the book
+    goes flat. Count distinct sessions, never events.
     """
     kinds = [(e.ts, e.kind) for e in S.margin_events(tet_run.result)]
     assert kinds[0] == (datetime(2021, 2, 5, 14, 45),
@@ -454,7 +479,13 @@ def test_the_ladder_is_walked_in_order_and_skips_no_rung_it_reached(tet_run):
     assert EventKind.MARGIN_CALL not in {k for _, k in kinds}
 
     forced = S.margin_events(tet_run.result, EventKind.FORCED_LIQUIDATION)
-    assert all(e.detail['executed'] is False for e in forced)
+    # The forced close executes now; it is rejected while the band is inverted
+    # and accepted once it is valid again at the reopen.
+    assert any(e.detail['executed'] is True for e in forced)
+    last = forced[-1]
+    assert last.ts == datetime(2021, 2, 17, 9, 30)
+    assert dict(last.detail['closed']) == {'VN30F2102': 'Accepted'}
+    assert tet_run.result.snapshots[-1].positions == {}
     assert len(forced) > len({e.ts.date() for e in forced})
 
 
@@ -566,26 +597,34 @@ def test_the_overnight_requirement_is_the_intraday_formula(overnight_pair):
 
 
 @requires_corpus
-def test_daily_variation_margin_does_not_settle_in_cash(variation_trail):
-    """One lot, twenty sessions, and one cash movement at the end.
+def test_daily_variation_margin_settles_in_cash(variation_trail):
+    """One lot, twenty sessions, a cash movement (nearly) every session.
 
-    VSDC settles *lai lo vi the* on T+1 (Phu luc 7 section C.I: reported by
-    16h50, cash moves the next day) and every Vietnamese broker statement
-    shows the deposit moving each session. Here it does not move at all
-    between the entry fill and the final settlement -- ``settle_daily`` exists
-    and has no session call site (D1) -- and the largest single day's
-    unsettled mark over the hold is **6,260,000 VND**, on 2022-11-16.
+    **Resolved, W1 daily cash settlement.** VSDC settles *lai lo vi the* on
+    T+1 (Phu luc 7 section C.I: reported by 16h50, cash moves the next day) and
+    every Vietnamese broker statement shows the deposit moving each session.
+    It now does: ``settle_daily`` is wired into the overnight layer, the
+    deposit steps between the entry fill and the final settlement, and the
+    largest single day's mark over the hold is **6,260,000 VND**, on
+    2022-11-16.
 
-    What arrives instead is one movement for the whole position's P&L. The two
-    agree in total, which is why this is not a conservation break; they
-    disagree in *when*, by up to 20 sessions, which is why an account replayed
-    against a real broker statement will not match.
+    The total P&L is conserved -- this was never a conservation break -- but it
+    is now settled *when* a real statement settles it: eighteen daily variation
+    settlements plus the expiry residual sum to the same whole-hold mark trail,
+    ``-1,250,000``, that a single close-out movement used to carry alone.
     """
-    assert variation_trail.deposit_moved_between_entry_and_close_out is False
+    assert variation_trail.deposit_moved_between_entry_and_close_out is True
     assert variation_trail.largest_unsettled_daily_move == Decimal('6260000.0')
-    assert (sum(move for _, _, move in variation_trail.daily)
-            == variation_trail.realised_at_close_out
+
+    settles = [c for c in variation_trail.result.logs.cash.entries
+               if c.movement is CashMovement.VARIATION_SETTLEMENT]
+    assert len(settles) == 18
+    # Daily settlements + the expiry residual reconcile to the mark trail.
+    assert (sum(c.amount for c in settles)
+            + variation_trail.realised_at_close_out
+            == sum(move for _, _, move in variation_trail.daily)
             == Decimal('-1250000.0'))
+    assert variation_trail.realised_at_close_out == Decimal('1490000.0')
     assert variation_trail.result.failed_identities == ()
 
 
@@ -713,8 +752,11 @@ def test_the_session_now_asks_which_margin_model_applies_and_counts_the_answer()
     ``margin_model_overnight`` to ask, so the end-of-day requirement is
     INDETERMINATE and moves the scalar.
 
-    The intraday arithmetic below is unchanged and is asserted unchanged: the
-    repair is about what the run *says*, not about restating the number.
+    The intraday close mark below now reflects W1 daily cash settlement: the
+    day's variation margin is settled to cash at the close and the baseline
+    rolls, so the requirement at the close is ``IM`` alone. The margin-model
+    refusal this test is really about -- the overnight layer going
+    INDETERMINATE -- is orthogonal to that and asserted unchanged.
     """
     result, strategy, model, raised = S.run_post_krx_margin_model()
 
@@ -738,12 +780,12 @@ def test_the_session_now_asks_which_margin_model_applies_and_counts_the_answer()
     assert crash['initial_margin'] == (Decimal('0.17') * Decimal('2')
                                        * S.VN30F_MULTIPLIER
                                        * Decimal('1766.0'))
-    assert crash['variation_margin'] == (Decimal('2') * S.VN30F_MULTIPLIER
-                                         * (Decimal('2015.0')
-                                            - Decimal('1766.0')))
-    assert crash['required'] == (crash['initial_margin']
-                                 + crash['variation_margin'])
-    assert crash['required'] == Decimal('109844000.000')
+    # W1: the day's variation margin has settled to cash at the close and the
+    # baseline has rolled, so the close mark carries VM == 0 and the
+    # requirement is IM alone (the 09:30 mark still showed the unsettled VM).
+    assert crash['variation_margin'] == Decimal('0')
+    assert crash['required'] == crash['initial_margin']
+    assert crash['required'] == Decimal('60044000.000')
 
 
 @pytest.fixture(scope='module')
@@ -780,35 +822,34 @@ def test_the_overnight_layer_names_the_one_input_each_arm_is_missing(
     assert served.gaps == ()
 
 
-def test_the_two_layers_are_different_numbers_and_the_gap_is_the_vm(
-        overnight_layer):
-    """``IM + VM`` 109,844,000d intraday against ``Max(Rm+Sm-OA, MM)``
-    60,044,000d overnight, on the same account at the same close.
+def test_the_two_layers_coincide_because_the_vm_is_settled(overnight_layer):
+    """``IM`` 60,044,000d intraday against ``Max(Rm+Sm-OA, MM)`` 60,044,000d
+    overnight, on the same account at the same close -- the two now agree.
 
-    The difference is **exactly** the variation margin, 49,800,000d, and that
-    is not a coincidence: Phu luc 2 section 6.2 has no ``VM`` term, because
-    QD 26 Dieu 20 settles *lai lo vi the* as a separate daily cash movement
-    on T+1. The two models are each internally consistent.
-
-    **Mixing them is not**, and the run says so rather than leaving it to a
-    reader: ``settle_daily`` has no session call site (FEATURES.md D1), so
-    this simulator never pays the T+1 cash, and a grid number quoted without
-    that payment reports an account owing 49,800,000d less than it does. That
-    is the one *permissive* assumption in the layer and it is counted as
-    ``variation_margin_unsettled``.
+    **Resolved, W1 daily cash settlement.** Phu luc 2 section 6.2 has no ``VM``
+    term because QD 26 Dieu 20 settles *lai lo vi the* as a separate daily cash
+    movement on T+1 -- and this simulator now MAKES that movement:
+    ``settle_daily`` is wired into the overnight layer, so at the close the
+    day's VM has left the deposit as cash and the continuous ``IM + VM`` view
+    carries ``VM == 0``. With the VM settled rather than carried, the grid's
+    VM-free requirement and the (now VM-free) intraday requirement coincide;
+    the difference is zero, not the variation margin. The one *permissive*
+    assumption this layer used to count -- ``variation_margin_unsettled`` -- is
+    gone, because the cash is paid rather than carried.
     """
     _, _, served = overnight_layer
-    assert served.intraday == Decimal('109844000.000')
+    assert served.intraday == Decimal('60044000.000')
     assert served.overnight == Decimal('60044000.00000')
-    assert served.difference == Decimal('-49800000.00000')
+    assert served.difference == Decimal('0')
 
     crash = served.strategy.at(served.close_day, 'close')
+    assert crash['variation_margin'] == Decimal('0')
     assert served.difference == -crash['variation_margin']
 
-    assert 'variation_margin_unsettled' in served.assumptions
+    assert 'variation_margin_unsettled' not in served.assumptions
     assert 'minimum_margin_factor_derived' in served.assumptions
     silent = getattr(served.result.indeterminate, 'silent_ignorance', {})
-    assert silent.get('margin.overnight.assumed.variation_margin_unsettled')
+    assert not silent.get('margin.overnight.assumed.variation_margin_unsettled')
 
 
 def test_an_uncomputable_overnight_layer_is_counted_not_substituted(

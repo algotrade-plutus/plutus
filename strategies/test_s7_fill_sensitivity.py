@@ -34,8 +34,9 @@ EXPECTED — Tier 2
     * The three policies do NOT agree — the same strategy gives a different
       history under each (the spread is real).
     * Under ``soft`` the strategy trades and the margin story unfolds (fills > 0,
-      a call is issued); under ``hard`` its market orders never fill, so nothing
-      happens (fills == 0, no call) — the whole result was the fill assumption.
+      a forced breach is reached — daily cash settlement jumps the call rung on
+      the violent slide, see S1); under ``hard`` its market orders never fill, so
+      nothing happens (fills == 0, no breach) — the result was the fill assumption.
     * ``probabilistic`` is reproducible under a fixed seed.
 
 RUN
@@ -90,14 +91,17 @@ def test_s7_fill_sensitivity():
     outcomes = {name: _outcome(r[name]) for name in ("soft", "hard", "probabilistic")}
     assert len(set(outcomes.values())) > 1, outcomes
 
-    # Under the optimistic policy the strategy trades and the margin story runs...
+    # Under the optimistic policy the strategy trades and the margin story runs.
+    # Daily cash settlement (MUST #4) depletes the deposit past the call rung on
+    # the violent slide, so the breach reported is FORCED rather than an
+    # intermediate call (see S1); the point here is that the margin story runs.
     assert len(soft.fills()) > 0, "soft never traded"
-    assert len(soft.calls()) > 0, "soft never reached a margin call"
+    assert len(soft.forced()) > 0, "soft never reached a margin breach"
 
     # ...under the strict policy its market orders never fill, so nothing at all
     # happens — the entire −76% history was the fill assumption (J10/J20).
     assert len(hard.fills()) == 0, "hard filled a market order (it should not)"
-    assert len(hard.calls()) == 0, "hard produced a margin call with no fills"
+    assert len(hard.forced()) == 0, "hard produced a margin breach with no fills"
 
     # Probabilistic is reproducible under a fixed seed.
     assert _outcome(r["probabilistic"]) == _outcome(r["probabilistic_again"]), \

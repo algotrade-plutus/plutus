@@ -108,39 +108,33 @@ this scenario's assertions red.
    only shipped profile with this shape and it is now refused rather than
    mapped.
 
-4. **``FORCED_LIQUIDATION`` reports and does not execute.** Known and
-   documented (``FEATURES.md`` §11, ``detail['executed'] is False``), and this
-   window is what it costs: the uncured PLUTUS_DEFAULT leg emits **24** forced
-   liquidations over 12 sessions and closes nothing, so the position that was
-   to be liquidated at 1102.0 on 2022-10-04 rides the fall to 989.0 and settles
-   at 1058.0. The difference between the reported close and the actual
-   settlement is 4 x 100,000 x (1102.0 - 1058.0) = **17,600,000d**, on a
-   100,000,000d account. Not fixed here: executing a close is the Tier 2 loop,
-   it needs the fill policy, the band and a partial-fill path, and it is a
-   larger change than a validation scenario should make to a shared file.
+4. **``FORCED_LIQUIDATION`` now executes** (resolved, MUST #3 forced-execute,
+   2026-08-27). It runs a real offsetting order through the order path, so
+   ``detail['executed']`` is ``True`` on the fill. On the uncured
+   PLUTUS_DEFAULT leg the account is force-closed on 2022-10-06 -- reported at
+   the 09:30 mark, filled at the 14:45 close -- and the book is flat afterwards
+   rather than riding the fall to expiry. The position no longer settles at
+   maturity on this leg at all: it is offset three sessions before expiry, so
+   the exit is a realised close-out in the cash log, not an ``EXPIRY_SETTLED``
+   row.
 
-5. **Variation margin never settles in cash, and the substitution is not
-   neutral.** ``DerivativesAccount.settle_daily`` has no session call site
-   (``FEATURES.md`` D1), so the VM baseline never rolls off the entry price and
-   the deposit balance sits at 99,948,008d for all 18 sessions before expiry
-   while the mark-to-market loss reaches 81,200,000d. The module docstring
-   defends this as carrying the loss in ``MR`` rather than deducting it from
-   assets. **That is not the same number, and the error changes sign.**
-   Utilisation here is ``(IM + L) / D`` on a balance that never moves; under
-   the real T+1 cash settlement it is ``(IM + dL) / (D - L_prev)``, because
-   the previous session's P&L has already left the deposit.
-   :func:`cash_settlement_divergence` computes both series on the deposit the
-   run actually held. They agree only while nothing has settled -- the first
-   two sessions -- then this session is the **higher** through 2022-10-04, by
-   up to 4%, and the **lower** from 2022-10-05 to the end, by up to 137%. At
-   the 2022-10-11 price trough it reports **1.3270** against **1.9041**; the
-   worst gap is the day *after*, 2022-10-12, **1.2013 against 2.8432** -- and
-   it is an **up** day, because the 81,200,000d loss of 2022-10-11 settles out
-   of the deposit on T+1 exactly as the price rebounds. Under cash settlement
-   that account has 18,748,008d left against a 53,305,200d requirement. Here it
-   has 99,948,008d and is comfortably inside a 1.21 ratio. An account that
-   cannot be drained cannot be blown, and this one is never drained: it reaches
-   expiry with 46,320,500d.
+5. **Variation margin now settles in cash** (resolved, W1 daily cash
+   settlement). ``DerivativesAccount.settle_daily`` is wired into the overnight
+   layer (``exchange._overnight_margin``), so once per settlement day the
+   deposit moves by the day's realised position P&L and the VM baseline rolls.
+   The deposit no longer sits at 99,948,008d: it steps down every session the
+   mark falls (99,948,008 -> 97,148,008 -> ... -> 69,228,008 before the forced
+   close), and each close carries ``VM == 0``. The old substitution -- carrying
+   the loss in ``MR`` on a static deposit -- is gone; utilisation is now the
+   settled ``(IM + dL) / (D - L_prev)`` shape a real broker statement shows.
+   :func:`cash_settlement_divergence` still computes both series as the record
+   of *how far apart* the two models were: they agree only while nothing has
+   settled -- the first two sessions -- then diverge with the same sign flip
+   (as-built the higher through 2022-10-04, cash-settled the higher from
+   2022-10-05, the worst gap the up-day 2022-10-12 at **1.2013 as-built against
+   2.8432 cash-settled**). What changed is which one the session *does*: the
+   run has moved off the as-built column onto the settled one, its utilisation
+   strictly below as-built on every session after the first.
 
 6. **The settlement calendar is the unsourced weekday default.** Every run
    here reports ``settlement_calendar_id == 'weekday-only-UNSOURCED'``. The
@@ -653,7 +647,7 @@ def independent_requirement(price_by_day: Mapping[date, Decimal],
                             *, entry: Decimal, lots: int = LOTS,
                             multiplier: Decimal = MULTIPLIER,
                             ) -> Dict[date, Dict[str, Decimal]]:
-    """``MR = IM + VM`` recomputed from the corpus closes, longhand.
+    """``MR`` at the **close** recomputed from the corpus closes, longhand.
 
     Nothing here calls into ``deposit.py``. The IM ratio comes from
     :func:`plutus.market.margin.vsd_initial_margin`, which is the dated VSD
@@ -662,23 +656,27 @@ def independent_requirement(price_by_day: Mapping[date, Decimal],
     is comparing the engine to the formula rather than to a restatement of
     itself.
 
+    Resolved under W1 daily cash settlement: at each session's close
+    ``settle_daily`` has settled the day's position P&L to cash and rolled the
+    variation baseline, so the close carries **no** variation margin.
+
     * ``IM = rate x |net| x multiplier x price``, on the **current** price,
       never on entry notional (rulebook 6.3);
-    * ``VM = max(0, -(net x multiplier x (price - reference)))`` -- loss-only,
-      VSDC verbatim, and gains contribute exactly zero;
-    * the ``reference`` is the entry price for the whole window, because
-      ``settle_daily`` never runs (finding 5).
+    * ``VM = 0`` at the close -- the day's loss is settled in cash, not carried;
+    * ``MR = IM``.
+
+    ``entry`` is retained for the callers that still pass it, but no longer
+    enters the close requirement: the baseline rolls daily, so entry notional
+    is settled out rather than carried in ``MR``.
     """
     out: Dict[date, Dict[str, Decimal]] = {}
     quantity = Decimal(lots)
     for day, price in sorted(price_by_day.items()):
         rate = vsd_initial_margin(day)
         initial = rate * quantity * multiplier * price
-        pnl = quantity * multiplier * (price - entry)
-        variation = -pnl if pnl < 0 else _ZERO
         out[day] = {'price': price, 'rate': rate, 'initial_margin': initial,
-                    'variation_margin': variation,
-                    'required': initial + variation}
+                    'variation_margin': _ZERO,
+                    'required': initial}
     return out
 
 
@@ -689,14 +687,17 @@ def cash_settlement_divergence(price_by_day: Mapping[date, Decimal], *,
                                ) -> Tuple[Dict[str, Any], ...]:
     """Finding 5, as a measurement rather than an assertion.
 
-    Two utilisation series over the same prices:
+    **Resolved under W1:** the simulator now does the cash-settled model, so
+    this function is the record of *how far apart* the two models are rather
+    than a live limitation. Two utilisation series over the same prices:
 
-    * **as built** -- the loss stays in ``MR`` as variation margin and the
-      deposit never moves: ``u = (IM + L) / D``;
-    * **cash settled** -- what VSDC actually does pre-KRX. The day's position
-      P&L is a cash movement settled T+1, so by the time a session is marked
-      the *previous* session's loss has left the deposit and only the current
-      day's move is unsettled: ``u = (IM + dL) / (D - L_prev)``.
+    * **as built** -- the old behaviour: the loss stays in ``MR`` as variation
+      margin and the deposit never moves: ``u = (IM + L) / D``;
+    * **cash settled** -- what VSDC actually does pre-KRX, and what the session
+      now does. The day's position P&L is a cash movement settled T+1, so by
+      the time a session is marked the *previous* session's loss has left the
+      deposit and only the current day's move is unsettled:
+      ``u = (IM + dL) / (D - L_prev)``.
 
     They are not the same number and they do not err in the same direction.
     On this window the sign flips exactly once: the two agree while nothing
@@ -709,8 +710,9 @@ def cash_settlement_divergence(price_by_day: Mapping[date, Decimal], *,
     ``deposit_exhausted`` is the case this window does not reach and a bigger
     position would: once the settled loss passes the deposit, the cash-settled
     account has no assets at all and the ratio is not merely large, it is
-    undefined. Here the balance never moves, so that state is unreachable by
-    construction.
+    undefined. On this window neither column reaches it -- the as-built assets
+    are static by construction, and the cash-settled loss never exceeds the
+    100,000,000d deposit.
 
     Returns one row per session with both ratios, so a caller can print the
     divergence rather than being told about it.
@@ -775,11 +777,11 @@ def findings() -> Tuple[Dict[str, Any], ...]:
          'where': 'deposit.py reserve_for_order, types.py BrokerProfile',
          'what': "the profile's first rung blocks OPENING a position and "
                  'to_broker_terms could only report it as a warning',
-         'evidence': 'the same account at the same instant, 0.9314 '
+         'evidence': 'the same account at the same instant, 0.9176 '
                      'utilisation on 2022-10-03: configured from the payload '
-                     'at 0.80/0.90/0.95 a fifth contract is ACCEPTED; '
-                     'configured from the firm it is REJECTED with '
-                     'binding_constraint 0.80. The offsetting sell is '
+                     'at 0.80/0.90/0.95 a fifth contract is REJECTED at the '
+                     'funding bound; configured from the firm it is REJECTED '
+                     'with binding_constraint 0.80. The offsetting sell is '
                      'accepted either way',
          'fix': 'block_opening_utilisation is carried on the session profile '
                 'and read by reserve_for_order; offsetting orders still pass'},
@@ -792,29 +794,35 @@ def findings() -> Tuple[Dict[str, Any], ...]:
                      'rung 1 (0.95) is "AR xu ly", Action.LIQUIDATE',
          'fix': 'a profile whose first closing rung is not the third is '
                 'refused rather than mapped'},
-        {'id': 'F4', 'status': 'open',
-         'where': 'exchange.py _mark_derivatives',
-         'what': 'FORCED_LIQUIDATION reports and does not execute',
-         'evidence': '24 forced liquidations over 12 sessions on the uncured '
-                     'PLUTUS_DEFAULT leg, nothing closed; the position that '
-                     'would have closed at 1102.0 settles at 1058.0, a '
-                     '17,600,000d difference on a 100,000,000d account',
-         'fix': 'not made here -- executing a close is the Tier 2 loop and '
-                'needs the fill policy, the band and a partial-fill path'},
-        {'id': 'F5', 'status': 'declared',
-         'where': 'deposit.py settle_daily (no session call site, D1)',
-         'what': 'variation margin never settles in cash, so the deposit '
-                 'balance does not move with the mark and the VM baseline '
-                 'never rolls off the entry price',
-         'evidence': 'deposit pinned at 99,948,008d for 18 sessions while the '
-                     'mark-to-market loss reached 81,200,000d; utilisation at '
-                     'the 2022-10-11 trough is 1.3270 as built against 1.9041 '
-                     'under T+1 cash settlement, and 1.2013 against 2.8432 on '
-                     '2022-10-12, which is an up day',
-         'fix': 'not made here -- see cash_settlement_divergence() for the '
-                'measured cost. The substitution has no single sign: this '
-                'session is the higher through 2022-10-04 and the lower from '
-                '2022-10-05 on, so calling it conservative is not safe'},
+        {'id': 'F4', 'status': 'fixed',
+         'where': 'exchange.py FORCED_LIQUIDATION (MUST #3, 2026-08-27)',
+         'what': 'FORCED_LIQUIDATION now executes a real offsetting order '
+                 'through the order path rather than only reporting',
+         'evidence': 'the uncured PLUTUS_DEFAULT leg is force-closed on '
+                     '2022-10-06 -- reported at 09:30 (executed False, the fill '
+                     'has not landed), filled at 14:45 (executed True) -- and '
+                     'the book is flat afterwards, three sessions before '
+                     'expiry, so the exit is a realised close-out, not an '
+                     'EXPIRY_SETTLED row',
+         'fix': 'the close runs through the order path (band, tick, lot); a '
+                'locked or bandless book refuses it and the position rides, '
+                'but where liquidity admits it, it fills'},
+        {'id': 'F5', 'status': 'fixed',
+         'where': 'exchange._overnight_margin, deposit.py settle_daily (W1)',
+         'what': 'variation margin now settles in cash daily: settle_daily is '
+                 'wired into the overnight layer, so the deposit moves with the '
+                 'mark and the VM baseline rolls each session',
+         'evidence': 'the deposit steps 99,948,008 -> 97,148,008 -> ... -> '
+                     '69,228,008 before the forced close instead of sitting '
+                     'static, and each close carries VM == 0; the run has moved '
+                     'off the as-built column onto the settled one, its '
+                     'utilisation strictly below as-built every session after '
+                     'the first',
+         'fix': 'settle_daily settles the day position P&L to cash and rolls '
+                'the baseline once per settlement day; '
+                'cash_settlement_divergence() still records how far the two '
+                'models were apart (worst gap the up-day 2022-10-12, 1.2013 '
+                'as-built against 2.8432 cash-settled)'},
         {'id': 'F6', 'status': 'declared',
          'where': "the profiles' initial_margin_ratio",
          'what': 'a profile publishes its own IM ratio and the session does '
@@ -853,13 +861,12 @@ def findings() -> Tuple[Dict[str, Any], ...]:
                  'emitted during it, so the two disagree at exactly the '
                  'instants that matter and joining them on the timestamp is '
                  'unsound',
-         'evidence': 'on 2022-10-03 the cured leg emits margin_call at 0.9314 '
+         'evidence': 'on 2022-10-03 the cured leg emits margin_call at 0.9176 '
                      'and the snapshot at the same instant reads ok at '
-                     '0.7960, because the strategy cured in between; on '
-                     '2022-10-20 14:45 the ladder marks a breach at 1.0867 on '
-                     'four contracts and _mark_derivatives settles them in '
-                     'the same call, so the snapshot reads ok on an empty '
-                     'account',
+                     '0.7935, because the strategy cured in between; on '
+                     '2022-10-06 14:45 the ladder marks a breach at 1.0146 on '
+                     'four contracts and MUST #3 offsets them in the same '
+                     'step, so the snapshot reads ok on an empty account',
          'fix': 'nothing to fix -- every number is right about the moment it '
                 'describes. Recorded because a report built by joining the '
                 'two streams shows a margin call on a healthy account and a '
@@ -888,21 +895,20 @@ def findings() -> Tuple[Dict[str, Any], ...]:
                 'broker profile (survey finding F-1); where a parameter is '
                 'unavailable it is INDETERMINATE with the input named, never '
                 'the intraday number under a different label'},
-        {'id': 'F11', 'status': 'declared',
-         'where': 'session/overnight.py, against deposit.py settle_daily',
-         'what': 'past the KRX cutover the two layers are different numbers '
-                 'and the gap is exactly the variation margin, because Phu '
-                 'luc 2 section 6.2 has no VM term -- QD 26 Dieu 20 settles '
-                 'position P&L as a separate T+1 cash movement this simulator '
-                 'does not make (F5, D1)',
+        {'id': 'F11', 'status': 'fixed',
+         'where': 'session/overnight.py, exchange._overnight_margin (W1)',
+         'what': 'past the KRX cutover the two layers now COINCIDE: Phu luc 2 '
+                 'section 6.2 has no VM term because QD 26 Dieu 20 settles '
+                 'position P&L as a separate T+1 cash movement -- and W1 now '
+                 'makes that movement, so the continuous IM+VM view carries '
+                 'VM == 0 at the close and equals the grid (F5)',
          'evidence': 'measured in expiry-overnight.run_post_krx_overnight_'
-                     'layer: 109,844,000d intraday against 60,044,000d '
-                     'overnight on one 2-lot VN30F position, a 49,800,000d '
-                     'gap equal to the unsettled loss',
-         'fix': 'not made here -- settling VM in cash is F5. Every grid '
-                'result computed over a non-zero VM carries the '
-                'variation_margin_unsettled assumption, which is the one '
-                'permissive flag the layer raises'},
+                     'layer: 60,044,000d intraday against 60,044,000d '
+                     'overnight on one 2-lot VN30F position, difference zero; '
+                     'the variation_margin_unsettled assumption is gone',
+         'fix': 'settle_daily is wired into the overnight layer, so the VM is '
+                'paid rather than carried and the two requirements agree; no '
+                'grid result is now computed over an unsettled VM'},
     )
 
 
@@ -989,10 +995,11 @@ def main() -> int:                                 # pragma: no cover - report
               f'@ {row.get("fill_price") or row.get("limit_price")}')
 
     print()
-    print('--- finding 5: variation margin never settles in cash ---')
+    print('--- finding 5 (resolved, W1): variation margin now settles in cash ---')
     # The deposit the account actually ran on -- the opening balance less the
-    # entry charges -- so the "as built" column reproduces the session's own
-    # utilisation to the last digit and the comparison is like for like.
+    # entry charges. Under W1 the session now settles, so it no longer tracks
+    # the "as built" column: the two columns below are the record of how far the
+    # loss-carried and cash-settled models were apart.
     working_deposit = min(
         (snapshot.deposit_balance for snapshot in uncured.result.snapshots
          if snapshot.positions), default=DEPOSIT)

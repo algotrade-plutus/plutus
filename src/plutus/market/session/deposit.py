@@ -831,11 +831,14 @@ class DerivativesAccount:
     assumption, stated in design section 16, not a sourced fact: intra-day
     transfer timing is not modelled.
 
-    **The deposit does not accumulate mark-to-market.** Daily P&L on a
-    cash-settled future leaves or enters as cash on T+1, which Tier 1 does not
-    model, and the adverse half of it is already carried in ``MR`` as variation
-    margin. Deducting it from the balance as well would double-count it. What
-    *does* move the balance is realising a position: see :meth:`apply_fill`.
+    **The deposit accumulates the daily mark-to-market, in cash.** Daily P&L
+    on a cash-settled future leaves or enters as cash (VSDC "index futures
+    daily variation margin T+1"; post-KRX QD 26 Dieu 20), and
+    :meth:`settle_daily` is what moves it -- once a day, against the day's
+    settlement, with the variation baseline rolled so that the intraday
+    loss-only ``VM`` and the settled cash cover **disjoint** periods and never
+    double-count. A position's own realisation moves the balance too: see
+    :meth:`apply_fill`.
 
     ``posted_margin`` in the resulting :class:`MarginView` is recomputed from
     the current marks, not stored. It is "the requirement attributable to open
@@ -1257,17 +1260,37 @@ class DerivativesAccount:
                 self._mark_ts[code] = ts
 
     def settle_daily(self, settlements: Mapping[str, Decimal],
-                     ts: datetime) -> None:
-        """Roll the variation-margin baseline to the day's settlement prices.
+                     ts: datetime) -> Decimal:
+        """Settle the day's position P&L in **cash** and roll the VM baseline.
+
+        The daily variation-margin settlement. VSDC "Bu tru va Thanh toan"
+        settles index-futures position P&L in cash on **T+1** across the whole
+        window (rulebook: "index futures daily variation margin T+1"), and
+        post-KRX **QD 26 Dieu 20** makes this the *only* place position P&L
+        lands -- variation margin is not a component of ``MR`` after
+        2025-05-04. For each held contract the day's realised move -- the
+        settlement price against the current variation baseline (the previous
+        day's DSP, or the entry price before the first settlement; VSDC
+        S II.3(a)-(b)) -- moves as cash into or out of the deposit, and the
+        baseline rolls to the settlement so the next day's VM is measured from
+        today's DSP rather than from entry.
+
+        Paying the loss here and resetting the baseline is what keeps this from
+        double-counting the intraday requirement's loss-only VM: the two cover
+        **disjoint** periods -- the settled days are cash, VM carries only the
+        unrealised move since the last settlement -- so the class no longer
+        "does not accumulate mark-to-market"; it accumulates it here, once a
+        day, as the cash the real account pays. The net obligation is applied
+        once (VSDC nets to one figure per account, QD 26 Dieu 20.2(b)).
 
         **Strict**: every held contract must have a settlement price. Falling
-        back here would silently re-baseline a position to its own stale mark
-        and make the next day's VM read zero on a day the account actually
-        lost, which is the failure mode the loss-only rule exists to catch.
+        back would silently re-baseline a position to its own stale mark and
+        make the next day's VM read zero on a day the account actually lost,
+        which is the failure mode the loss-only rule exists to catch.
 
-        **No cash moves.** The deposit does not accumulate mark-to-market; see
-        the class docstring. The day's adverse move stays in ``MR`` as VM until
-        the position is realised.
+        Returns:
+            The net signed cash flow applied to the deposit -- negative on a
+            losing day, zero when flat.
 
         Raises:
             KeyError: naming every held contract with no settlement price.
@@ -1279,11 +1302,19 @@ class DerivativesAccount:
                 f'no daily settlement price for {missing}; a margin '
                 f'requirement cannot be evaluated without one and defaulting '
                 f'would understate it')
-        for code in held:
+        total = _ZERO
+        for code, position in held.items():
             price = settlements[code]
+            reference = self.variation_reference(code)
+            total += (Decimal(position.net_quantity) * position.multiplier
+                      * (price - reference))
             self._settlement_reference[code] = price
             self._marks[code] = price
             self._mark_ts[code] = ts
+        if total != 0:
+            self._move(total, ts,
+                       f'daily variation-margin settlement of {sorted(held)}')
+        return total
 
     # -- orders ----------------------------------------------------------
 

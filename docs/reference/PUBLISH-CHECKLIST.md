@@ -4,11 +4,26 @@ What must be true before this ships as something a researcher can point an algor
 and trust. Kept short on purpose: the full inventory is `FEATURES.md`, and this is only
 the subset that blocks a release.
 
-Status as of 2026-08-27. Suite: **2,432 passing, 17 failing** — measured, not quoted. All 17
-failures are in `tests/datahub/test_cli.py` and all are the same environment artefact: the
-CLI tests spawn `python -m plutus.datahub` as a subprocess and the child cannot import
-`plutus` (`ModuleNotFoundError: No module named 'plutus'`). `tests/market` is green. Do not
-write "suite green" unqualified while those 17 stand — write the number.
+Status as of 2026-08-29. Suites collected per-suite under the venv
+(`.venv/bin/python -m pytest`): **`tests/market` 1628 · `scenarios` 38 · `strategies` 11.**
+`scenarios` is fully green, and the 17 `tests/datahub/test_cli.py` CLI tests a *bare* `python -m
+pytest` once reported as failures **pass under the venv** (they spawn `python -m plutus.datahub`
+as a subprocess; outside the venv the child could not import `plutus` — an environment artefact,
+not a logic failure). Collect the three suites separately: a root-level `--collect-only` aborts
+on `fastmcp` (`tests/test_mcp`), and `testpaths` covers `tests/` only.
+
+**MUST #4 has landed (daily variation-margin), and the churn this note used to flag is now green.**
+The `settle_daily` cash leg is wired into the overnight layer (`deposit.py` /
+`exchange.py::_overnight_margin`; see MUST #4 below and RESOLVED). The three items that were
+**red on the in-progress tree** were updated to the landed behaviour and re-run green on
+2026-08-29: strategies **S1** and **S7** (S1 now reaches a forced close directly under daily cash
+settlement; S7's `soft` arm still blows up −76%), and the market test formerly named
+`test_daily_rebaselining_without_the_cash_leg_loses_the_whole_loss`, rewritten as
+`test_margin_incidence_account.py::test_daily_cash_settlement_now_captures_the_loss_the_rebaseline_alone_lost`
+(its 31-test file passes; the settled path now captures the loss, `called` 9 → 44). The prior
+committed `HEAD` (`13cf9c1`) recorded these green before the WIP churn; they are green again now.
+**Still re-measure the full market + strategies suites against a clean HEAD** and write the
+per-suite numbers with their pass/fail state — never "suite green" unqualified.
 
 **The MUST numbers below are frozen.** `SCENARIO-CATALOGUE.md` cites "must-list item 3" and
 "item 4" by number in eight places, so a landed item keeps its row and its number and gains
@@ -25,19 +40,30 @@ and 4 on purpose; the reasoning is stated under the table. Nothing was renumbere
 | # | Item | Why it blocks | State |
 |---|---|---|---|
 | 1 | **Order-book walk** | Without it, fills happen at a single price with no depth. The fidelity audit's verdict on that state: *"an excellent accounting engine attached to an execution model that is not a simulation of a market."* A user would be validating their strategy's accounting, not its executability. | **LANDED 2026-08-27, commit `c6b7ef6`.** Number kept, reasoning moved to RESOLVED. Two residuals, both stated there and neither of them "no depth". |
-| 2 | **Amendment re-runs encumbrance and admission** | `ExchangeSession.amend` exists. **This row's citation was wrong and is corrected here.** QĐ 352 **Điều 21 is the lunch break** (rulebook `:147`, high); **Điều 21.3 is VNX QĐ 22/2025's** article (rulebook `:223`, high), not QĐ 352's. Three dated rules are actually in play. (a) **Auction lock** — no amend, no cancel of LO/ATO/ATC while an auction runs, unchanged 2020-01-01 → current: QĐ 352 Điều 17.1; VNX QĐ 17 Điều 22; QĐ 22/2025 Điều 21 (rulebook `:216`, **high**). Implemented, in `orders.amend_cancel_lock`. (b) **Priority-preserving amendment begins 2022-03-31**, under VNX QĐ 17 Điều 22.3, and only for a pure quantity *decrease* (rulebook `:221`, **high**). Before that date HOSE had **none at all** — amendment *was* cancel-and-re-enter and time priority always restarted (QĐ 352 Điều **17.1–17.3**, read verbatim, rulebook `:220`, **high**). The rulebook further records an unresolved CONFLICT for HOSE 2022-03-31 → 2025-05-04 and adopts *"permitted by QĐ 17, not implemented by the legacy HOSE engine"* (rulebook `:222`, **medium**). (c) **Price XOR quantity from 2025-05-05** — VNX QĐ 22/2025 Điều 21.3 (rulebook `:223`, **high**). | **LANDED 2026-08-27.** `ExchangeSession.amend` now re-runs admission and funding. Against the amended order it re-checks the dated round-lot and size cap, the dated tick, and the band; then it releases the old reservation and takes a fresh one, so an **amend-up grows the reservation** (measured 70M → 105M in `scenarios/test_j27_amend.py`) or is refused `INSUFFICIENT_CASH`, a **price amendment** is re-admitted against the band, and a **decrease onto an odd lot** (1500 → 50 on HOSE after 2021-01-04) is refused `ROUND_LOT`. Any refusal restores the original reservation and leaves the order unchanged. Gap (ii) is closed too: `_priority_preserving_at(ts, venue)` returns `False` for HOSE before 2022-03-31, so priority no longer survives where the rule withholds it. `orders.py::amend` stores the fresh encumbrance. **1,596 market tests pass**; the obsolete Tier-1 test `test_amending_upward_is_refused_as_a_tier_boundary` was rewritten to the new contract. Derivatives amendment re-funding is explicitly refused (cancel-and-resubmit), not silently skipped. |
-| 5 | **The tick path does not implement the stated close-as-ATC approximation** | *Added 2026-08-27, verified in the code this session — not inferred.* The stated model is close-as-ATC: an ATC fills at the day's **published close**, which is our modelling choice — we do not trust the tick data inside the auction window, so we use the published open/close already in the database (see the auction note below). On **any** tick-resolution run that is not what happens: an ATC (or an LO carried into the cross) fills at `state.last`, the last continuous print before 14:30, while `auction_fill_price`'s own docstring promises *"the published open (ATO phase) or close (ATC phase)"*. So the tick path returns a **stale pre-auction print instead of the stated published close**. The fix is design-conformance: make an ATC fill return the published close, or **INDETERMINATE** if the close is absent. This is the only item on the list where a **fill that violates the stated model reaches a user on the tick path**, silently, under a docstring that says otherwise. | **Open, and live.** Mechanism, fix and proof of the fix's shape below the table. |
-| 3 | **Forced liquidation must EXECUTE, not just report** | `FORCED_LIQUIDATION` emits an event and closes nothing — `detail['executed']` is `False` on every one. Measured on the Oct-2022 drawdown: **24 forced liquidations across 12 sessions, position intact through all of them**, riding 1102.0 down to a 1058.0 settlement. Cost **17,600,000đ on a 100,000,000đ account — 17.6%**. A strategy that would have been liquidated in reality survives here, which is the permissive direction. | **LANDED 2026-08-27.** `ExchangeSession._execute_forced_close` submits real offsetting orders through the order path (band, tick, lot, fill policy), priced at the band edge — floor for a sell, ceiling for a buy — so the close fills on a tradeable day and is refused `BAND_LOCK` on a locked one, which is the 17.6% cost reported truthfully rather than hidden. `detail['executed']` now reflects reality. The cure window is honoured (QĐ 26 Điều 13.3): the first mark reporting FORCED only reports; the breach persisting past it (gated on `in_forced_breach` latched before the mark) executes. Verified in `scenarios/test_j3_forced_liquidation.py` (leveraged VN30F → call → forced close, net→0). **1,596 market tests pass**; the three tests pinning Tier-1 non-execution pass unchanged (they end on the first, cure-window, forced mark). |
-| 4 | **Variation margin must settle in cash daily** | `DerivativesAccount.settle_daily` has no session call site (`FEATURES.md` D1). So the VM baseline never rolls off the entry price and the deposit balance sits unchanged at 99,948,008đ for all 18 sessions before expiry. Vietnamese futures settle P&L in cash every day; here they do not, so **realised P&L never reaches the deposit** and the author's essential — "their PnL of the contracts should be calculated correctly" — is not met. | Not started |
+| 2 | **Amendment re-runs encumbrance and admission** | `ExchangeSession.amend` exists. **This row's citation was wrong and is corrected here.** QĐ 352 **Điều 21 is the lunch break** (rulebook `:147`, high); **Điều 21.3 is VNX QĐ 22/2025's** article (rulebook `:223`, high), not QĐ 352's. Three dated rules are actually in play. (a) **Auction lock** — no amend, no cancel of LO/ATO/ATC while an auction runs, unchanged 2020-01-01 → current: QĐ 352 Điều 17.1; VNX QĐ 17 Điều 22; QĐ 22/2025 Điều 21 (rulebook `:216`, **high**). Implemented, in `orders.amend_cancel_lock`. (b) **Priority-preserving amendment begins 2022-03-31**, under VNX QĐ 17 Điều 22.3, and only for a pure quantity *decrease* (rulebook `:221`, **high**). Before that date HOSE had **none at all** — amendment *was* cancel-and-re-enter and time priority always restarted (QĐ 352 Điều **17.1–17.3**, read verbatim, rulebook `:220`, **high**). The rulebook further records an unresolved CONFLICT for HOSE 2022-03-31 → 2025-05-04 and adopts *"permitted by QĐ 17, not implemented by the legacy HOSE engine"* (rulebook `:222`, **medium**). (c) **Price XOR quantity from 2025-05-05** — VNX QĐ 22/2025 Điều 21.3 (rulebook `:223`, **high**). | **LANDED 2026-08-27.** `ExchangeSession.amend` now re-runs admission and funding. Against the amended order it re-checks the dated round-lot and size cap, the dated tick, and the band; then it releases the old reservation and takes a fresh one, so an **amend-up grows the reservation** (measured 70M → 105M in `scenarios/test_j27_amend.py`) or is refused `INSUFFICIENT_CASH`, a **price amendment** is re-admitted against the band, and a **decrease onto an odd lot** (1500 → 50 on HOSE after 2021-01-04) is refused `ROUND_LOT`. Any refusal restores the original reservation and leaves the order unchanged. Gap (ii) is closed too: `_priority_preserving_at(ts, venue)` returns `False` for HOSE before 2022-03-31, so priority no longer survives where the rule withholds it. `orders.py::amend` stores the fresh encumbrance. **1,596 market tests passed at this landing (2026-08-27)** — see the header for the current per-suite status; the obsolete Tier-1 test `test_amending_upward_is_refused_as_a_tier_boundary` was rewritten to the new contract. Derivatives amendment re-funding is explicitly refused (cancel-and-resubmit), not silently skipped. |
+| 5 | **The tick path does not implement the stated close-as-ATC approximation** | *Added 2026-08-27, verified in the code this session — not inferred.* The stated model is close-as-ATC: an ATC fills at the day's **published close**, which is our modelling choice — we do not trust the tick data inside the auction window, so we use the published open/close already in the database (see the auction note below). On **any** tick-resolution run that is not what happens: an ATC (or an LO carried into the cross) fills at `state.last`, the last continuous print before 14:30, while `auction_fill_price`'s own docstring promises *"the published open (ATO phase) or close (ATC phase)"*. So the tick path returns a **stale pre-auction print instead of the stated published close**. The fix is design-conformance: make an ATC fill return the published close, or **INDETERMINATE** if the close is absent. This is the only item on the list where a **fill that violates the stated model reaches a user on the tick path**, silently, under a docstring that says otherwise. | **RESOLVED — LANDED 2026-08-29, commit `74e667a`** (D71). The fix is the one condition the section below predicted: when `exchange._interval_for` **synthesises** an interval whose phase is an auction, it now sets `close = None` and adds `DataField.CLOSE` to `missing` (`exchange.py:2648-2668`), so a tick-path ATC returns the published close where an `IntervalSource` supplies one and **INDETERMINATE** on a bare snapshot — symmetric with the ATO, and never the stale `state.last`. Guarded by `tests/market/session/test_exchange.py::test_d71_tick_atc_does_not_fill_at_the_stale_last`; demonstrated by scenario **J37** (`scenarios/test_j37_tick_atc_published_close.py`). Mechanism and proof of shape kept below the table as the record of the closed defect. |
+| 3 | **Forced liquidation must EXECUTE, not just report** | `FORCED_LIQUIDATION` emits an event and closes nothing — `detail['executed']` is `False` on every one. Measured on the Oct-2022 drawdown: **24 forced liquidations across 12 sessions, position intact through all of them**, riding 1102.0 down to a 1058.0 settlement. Cost **17,600,000đ on a 100,000,000đ account — 17.6%**. A strategy that would have been liquidated in reality survives here, which is the permissive direction. | **LANDED 2026-08-27.** `ExchangeSession._execute_forced_close` submits real offsetting orders through the order path (band, tick, lot, fill policy), priced at the band edge — floor for a sell, ceiling for a buy — so the close fills on a tradeable day and is refused `BAND_LOCK` on a locked one, which is the 17.6% cost reported truthfully rather than hidden. `detail['executed']` now reflects reality. The cure window is honoured (QĐ 26 Điều 13.3): the first mark reporting FORCED only reports; the breach persisting past it (gated on `in_forced_breach` latched before the mark) executes. Verified in `scenarios/test_j3_forced_liquidation.py` (leveraged VN30F → call → forced close, net→0). **1,596 market tests passed at this landing (2026-08-27)** — see the header for the current per-suite status; the three tests pinning Tier-1 non-execution pass unchanged (they end on the first, cure-window, forced mark). |
+| 4 | **Variation margin must settle in cash daily** | `DerivativesAccount.settle_daily` has no session call site (`FEATURES.md` D1). So the VM baseline never rolls off the entry price and the deposit balance sits unchanged at 99,948,008đ for all 18 sessions before expiry. Vietnamese futures settle P&L in cash every day; here they do not, so **realised P&L never reaches the deposit** and the author's essential — "their PnL of the contracts should be calculated correctly" — is not met. | **LANDED 2026-08-29.** `DerivativesAccount.settle_daily` now **settles the day's position P&L in cash and rolls the VM baseline** (`deposit.py::settle_daily`, moving cash via `_move`) — the old "no cash moves" is gone — and it is **wired into `exchange._overnight_margin`** (call at `exchange.py:4026`), once per settlement day after the venue close and **before** the requirement is read, for **both regimes** (the author's decision to cash-settle pre- and post-KRX alike). So the deposit now moves daily by realised P&L: the **frozen-balance defect (99,948,008đ for 18 sessions) is gone**, VM is now the **day's move from the previous DSP** rather than cumulative-since-entry, and the permissive `variation_margin_unsettled` assumption is **cleared in-session** (VM == 0 once the cash is paid), surviving only as a residual for a held contract with no settlement price. A violent move can now deplete the deposit **straight past the call rung to FORCED with no intermediate call** (S1/S7 updated and green). Number kept, reasoning moved to RESOLVED. Sourced: VSDC "index futures daily variation margin T+1" (rulebook `:502-503`, both regimes) + QĐ 26 Điều 20 (rulebook `:670` cash T+1, `:692` VM not in MR, `:634` MR scope). |
 
-**That is the entire must-list.** Five numbered items, of which **#1 has landed**; four
-remain open. Nothing else blocks publication — in particular the **adapter half** of the
+**That is the entire must-list.** Five numbered items, **all five now landed** — **#4**
+(variation margin settling in cash daily) landed 2026-08-29, the last to close. Nothing else
+blocks publication — in particular the **adapter half** of the
 auction seam (no shipped source stamps an auction phase, so the daily path never reaches the
-auction branch at all) stays a SHOULD, and #5 is the **other half of that same seam**: the
-tick path *does* reach the branch, and reaches it with the wrong price. The two are read
-together in the SHOULD entry, which now says so explicitly.
+auction branch at all) stays a SHOULD, and #5 was the **other half of that same seam**: the
+tick path *does* reach the branch, and **once reached it with the wrong price — the D71
+defect, FIXED 2026-08-29 (commit `74e667a`)**. The two are read together in the SHOULD
+entry, which now says so explicitly.
 
 ### MUST #5 — the mechanism, the fix, and why the fix's shape is provable
+
+**LANDED 2026-08-29 (commit `74e667a`) — D71 FIXED.** The fix is exactly the one condition
+this section predicted: when `exchange._interval_for` **synthesises** an interval in an
+auction phase it now drops the close and names `DataField.CLOSE` missing
+(`exchange.py:2648-2668`), so a tick-path ATC returns the published close where an
+`IntervalSource` supplies one and INDETERMINATE on a bare snapshot — symmetric with the ATO.
+Guarded by `test_exchange.py::test_d71_tick_atc_does_not_fill_at_the_stale_last` and scenario
+J37 (`scenarios/test_j37_tick_atc_published_close.py`). The diagnosis below is kept as the
+record of the closed defect and reads in the present tense of the bug it described.
 
 Every line below was read this session, in this repo, at these lines.
 
@@ -124,6 +150,25 @@ was *computed*. Both of these should have been caught by that; check why they we
 ---
 
 ## RESOLVED — items that were on this list and are not any more
+
+**MUST #4 — daily variation-margin cash settlement.** Landed 2026-08-29. Verified from the code,
+not a commit message. `DerivativesAccount.settle_daily` (`deposit.py::settle_daily`, `:1262-1317`)
+now settles the day's position P&L in **cash** — `total = Σ net_qty × multiplier ×
+(settlement − variation reference)`, moved via `_move` — **and** rolls the VM baseline
+(`_settlement_reference[code] = price`); its docstring's old "no cash moves" is gone. It is called
+from `exchange.py::_overnight_margin` (`:4026`), once per settlement day after the venue close and
+**before** the requirement view is read, gated only on every held contract having a settlement
+price — so it runs for **both** regimes, the author's decision to cash-settle pre- and post-KRX
+alike. Three consequences, each checked against the code: the deposit balance moves daily by
+realised P&L, so the frozen-balance defect (99,948,008đ for 18 sessions) is closed and `FEATURES.md`
+D1 / A60 resolve with it; VM becomes the day's move from the previous DSP rather than
+cumulative-since-entry; and the permissive `variation_margin_unsettled` assumption
+(`overnight.py:573-575` appends it only when `VM != 0`) is cleared in-session because the paid cash
+leaves `VM == 0`, surviving only as a residual for a held contract with no settlement price that
+session. S1 and S7 were updated to the resulting mechanic — a violent move now reaches FORCED
+directly, the call rung jumped — and both pass (re-run 2026-08-29). Sourced: VSDC "index futures
+daily variation margin T+1" (rulebook `:502-503`, both regimes) and QĐ 26 Điều 20 (rulebook `:670`
+cash-settlement T+1, `:692` VM not a component of MR, `:634` MR scope).
 
 **MUST #1 — the order-book walk.** Landed 2026-08-27, commit `c6b7ef6` *"Walk the order
 book instead of filling at a single price"*. Verified from `git log` and from the code, not
@@ -265,10 +310,10 @@ opening price at all.* Filling at the published open/close is **our modelling ch
 because auction-window tick data is untrustworthy and the published open/close are already
 stored — not a sourced rule, and not backed by a number. Tag it that way wherever it appears.
 
-**Why this sits next to MUST #5.** #5 is not a dispute about the approximation above; the model
-is a stated approximation and is sound as such. #5 is that on a tick run we do not actually
-*use* it — we use `state.last` from before the auction and call it the published close. The
-approximation is right and the plumbing does not reach it.
+**Why this sits next to MUST #5.** #5 was not a dispute about the approximation above; the model
+is a stated approximation and is sound as such. #5 was that on a tick run we did not actually
+*use* it — we used `state.last` from before the auction and called it the published close. The
+approximation is right, and since 2026-08-29 (D71 fixed) the plumbing reaches it.
 
 ---
 
@@ -316,9 +361,10 @@ approximation is right and the plumbing does not reach it.
   daily-resolution run reports is wrong because of it; a run that never submits an ATO or ATC
   is unaffected; and the remedy is one field on the adapter, not a subsystem. The old
   declarable sentence — *"no auction execution on the shipped adapters"* — is **retired as
-  inaccurate**: the tick path executes auctions, it just prices them wrong. What is honestly
-  declarable now is *"no auction execution on the daily path"*, and the tick path is not
-  declarable at all until MUST #5 lands.
+  inaccurate**: the tick path executes auctions, and formerly priced them wrong (D71). What is
+  honestly declarable now is *"no auction execution on the daily path"*; the tick path,
+  formerly not declarable until MUST #5, now executes the ATC at the published close — or
+  INDETERMINATE where none is supplied — since D71's fix (2026-08-29).
 
   **The one sharp edge, which is not declarable and should be fixed regardless** (daily path;
   on a tick run a cross *is* evaluated, so this one does not arise there). An ATO or
@@ -345,12 +391,13 @@ approximation is right and the plumbing does not reach it.
   **un-restamped** state, so it never sees an auction phase and MUST #5's fix does not touch it
   (and it falls back to `state.last` at `exchange.py:3923-3924` regardless).
 
-  **Current state.** `auction_fill_price` built and tested; **unreachable on the daily path,
-  reachable-but-mispriced on the tick path.** Neither shipped adapter carries a phase of its
-  own. `FEATURES.md` **A40** and the §-table row at `FEATURES.md:648` both record the adapter
-  half and both were corrected on 2026-08-27: their reassurance that *"ATO/ATC/PLO are
-  reachable on a tick run"* is true of **admission** and false of **fills**, and neither
-  document said so before.
+  **Current state.** `auction_fill_price` built and tested; **unreachable on the daily path;
+  reachable on the tick path and, since D71's fix (2026-08-29), correctly priced there** —
+  the ATC returns the published close, or INDETERMINATE where none is supplied. Neither
+  shipped adapter carries a phase of its own. `FEATURES.md` **A40** and the §-table row at
+  `FEATURES.md:648` both record the adapter half and both were corrected on 2026-08-27: their
+  reassurance that *"ATO/ATC/PLO are reachable on a tick run"* is true of **admission** and,
+  since D71's fix, also of **fills**, and neither document said so before.
 
 - **Make the correct settlement calendar the default, or make the wrong one refuse.** Follows
   from the corrected RESOLVED entry above. Today a caller who names nothing silently gets

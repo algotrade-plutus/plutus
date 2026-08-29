@@ -3508,15 +3508,18 @@ def test_a_post_krx_close_with_a_firm_but_no_index_names_the_missing_close():
     assert session.indeterminate_report().by_field[DataField.CLOSE] == 1
 
 
-def test_a_post_krx_close_with_everything_present_runs_the_grid():
-    """The engine with zero call sites, called -- and it is a different number.
+def test_a_post_krx_close_runs_the_grid_and_settles_the_days_pnl_in_cash():
+    """The engine with zero call sites, called -- and the cash is now paid.
 
-    ``IM + VM`` and ``Max(Rm + Sm - OA, MM)`` on the same account at the same
-    close, and the gap between them is exactly the variation margin, because
-    QD 26 Dieu 20 settles position P&L as a separate daily cash movement and
-    section 6.2 has no ``VM`` term. That this simulator does not make that
-    cash movement is the layer's one permissive assumption, and it is counted
-    rather than described.
+    ``Max(Rm + Sm - OA, MM)`` has no ``VM`` term because QD 26 Dieu 20 settles
+    position P&L as a separate daily cash movement. This simulator now MAKES
+    that movement: ``settle_daily`` is wired into the overnight layer, so at the
+    close the day's loss has left the deposit as cash and the variation baseline
+    has rolled. Two consequences the old permissive behaviour did not have: the
+    continuous view carries no unsettled VM, so the grid's VM-free requirement
+    and the (now VM-free) IM coincide; and the one permissive assumption this
+    layer used to count -- ``VARIATION_MARGIN_UNSETTLED`` -- is gone, because the
+    cash is paid rather than carried.
     """
     session = post_krx_session(firm='SSI', serve_index=True)
     row = session.overnight_margin()
@@ -3526,12 +3529,20 @@ def test_a_post_krx_close_with_everything_present_runs_the_grid():
     assert row.gaps == ()
 
     view = session.margin()
-    assert row.amount != view.required
-    assert row.amount == view.required - view.variation_margin
+    # The loss (2-lot long, entry 1900, marked 1833, 100,000d multiplier ->
+    # 13,400,000d) is settled in cash over the close: the deposit fell by the
+    # loss (charges aside), the baseline rolled, so the continuous view carries
+    # no VM and the grid's VM-free requirement coincides with it.
+    assert view.variation_margin == Decimal('0')
+    assert row.amount == view.required
+    assert Decimal('900000000') - view.deposit_balance >= Decimal('13400000')
 
     report = session.indeterminate_report()
     assert report.indeterminate == 0
     assert report.exercised[Component.OVERNIGHT_MARGIN.value] == 1
+    # The permissive assumption is gone: the cash moved, it was not carried.
+    assert 'margin.overnight.assumed.variation_margin_unsettled' \
+        not in report.silent_ignorance
     assert 'margin.overnight.assumed.minimum_margin_factor_derived' in \
         report.silent_ignorance
 

@@ -326,20 +326,49 @@ def test_variation_margin_is_netted_across_the_account_portfolio():
     assert view.initial_margin == Decimal('0.17') * Decimal('950') * VN30F_MULTIPLIER * 2
 
 
-def test_margin_assets_are_the_deposit_balance_with_no_mtm_accumulated():
-    """Assets = deposit_balance. The deposit does NOT accumulate mark-to-market.
+def test_the_daily_loss_is_paid_in_cash_and_graded_on_the_reduced_balance():
+    """Margin assets are the deposit balance, and the deposit now moves daily.
 
-    Derivatives are cash-settled and the daily P&L leaves or enters as cash on
-    T+1, a leg Tier 1 does not model; the adverse half is already carried in
-    MR as VM. Deducting the loss from assets as well would double-count it.
+    Derivatives are cash-settled: the day's P&L leaves as cash (VSDC "index
+    futures daily variation margin T+1"; QD 26 Dieu 20), so a 1-lot long marked
+    down 100 points on a 100,000d multiplier pays 10,000,000d out and is graded
+    the next day on the *reduced* balance. Before this fix the loss sat frozen
+    in the requirement as VM and the deposit never moved -- the permissive
+    frozen-balance defect this closes.
     """
     account, _ = build_account(deposit=Decimal('50000000'))
     account.apply_fill(fill(quantity=1, price=Decimal('1000')), None)
     account.settle_daily({VN30F: Decimal('900')}, TS)
 
-    assert account.deposit_balance == Decimal('50000000')
+    assert account.deposit_balance == Decimal('40000000')      # 50M - 10M paid
     view = account.margin({VN30F: Decimal('900')}, None, BrokerTerms(), NEXT)
-    assert view.deposit_balance == Decimal('50000000')
+    assert view.deposit_balance == Decimal('40000000')
+    assert view.variation_margin == Decimal('0')               # loss is cash, not VM
+
+
+def test_settle_daily_pays_the_days_pnl_in_cash_and_rolls_the_baseline():
+    """QD 26 Dieu 20 / VSDC daily variation margin: the day's realised move is
+    a signed cash flow, and the baseline rolls to the settlement so tomorrow's
+    VM starts from today's DSP, not from entry (VSDC S II.3)."""
+    account, _ = build_account(deposit=Decimal('100000000'))
+    account.apply_fill(fill(quantity=1, price=Decimal('1000')), None)
+
+    flow = account.settle_daily({VN30F: Decimal('900')}, TS)
+
+    assert flow == Decimal('-10000000')                        # 1 * 100000 * (900-1000)
+    assert account.deposit_balance == Decimal('90000000')
+    assert account.variation_reference(VN30F) == Decimal('900')
+
+
+def test_settle_daily_credits_a_winning_day():
+    """The cash movement is signed: a favourable settlement pays in."""
+    account, _ = build_account(deposit=Decimal('100000000'))
+    account.apply_fill(fill(quantity=1, price=Decimal('1000')), None)
+
+    flow = account.settle_daily({VN30F: Decimal('1050')}, TS)
+
+    assert flow == Decimal('5000000')
+    assert account.deposit_balance == Decimal('105000000')
 
 
 # --------------------------------------------------------------------------

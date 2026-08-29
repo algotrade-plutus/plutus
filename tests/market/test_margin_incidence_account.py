@@ -411,27 +411,31 @@ def test_the_best_fit_lands_on_ten_sessions_and_still_misses_twenty(
 
 
 @requires_corpus
-def test_daily_rebaselining_without_the_cash_leg_loses_the_whole_loss(
+def test_daily_cash_settlement_now_captures_the_loss_the_rebaseline_alone_lost(
         corpus_root):
-    """The Tier 1 simplification, priced.
+    """The Tier 1 simplification, now removed (MUST #4).
 
     VSDC rebaselines variation margin to each day's settlement price *and*
-    moves the day's P&L as cash on T+1. Tier 1 models the first and not the
-    second, so with ``settle_daily=True`` a position that has fallen for ten
-    sessions carries only the last session's move in ``MR`` and has paid for
-    none of the rest. Measured, that takes the ten-session incidence from
-    12.60% to 2.36% -- more than ten points of understatement, which is why
-    the comparison above runs with the baseline held at entry.
+    moves the day's P&L as cash on T+1. ``settle_daily`` now does BOTH -- it
+    moves the cash (QD 26 Dieu 20) -- so a position that has fallen for ten
+    sessions has *paid* the loss out of the deposit rather than having it vanish
+    when the baseline rolled. The incidence is therefore close to the
+    baseline-held-at-entry walk (both capture the cumulative loss, one as
+    depleted cash, the other as VM in the requirement), where before the cash
+    leg was wired it collapsed to 9 -- the >10-point understatement this test
+    used to price. (The legacy maintenance-ratio path itself is retired in W4.)
     """
-    rebaselined = measure_account_margin_incidence(
+    settled = measure_account_margin_incidence(
         str(corpus_root), holding_days=10, funding_multiple=BEST_JOINT_FIT,
         settle_daily=True)
     held = measure_account_margin_incidence(
         str(corpus_root), holding_days=10, funding_multiple=BEST_JOINT_FIT)
-    assert rebaselined.settle_daily is True
-    assert rebaselined.called == 9
+    assert settled.settle_daily is True
+    assert settled.called == 44        # was 9 before the cash leg; now captures the loss
     assert held.called == 48
-    assert held.call_rate - rebaselined.call_rate > Decimal('0.10')
+    # Both now capture the loss, so the gap is small -- not the 10+ points the
+    # rebaseline-without-cash artefact produced.
+    assert abs(held.call_rate - settled.call_rate) < Decimal('0.05')
 
 
 @requires_corpus

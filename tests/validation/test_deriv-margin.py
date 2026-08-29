@@ -169,30 +169,40 @@ def test_every_requirement_matches_the_formula_computed_longhand(uncured,
             continue
         row = oracle[snapshot.ts.date()]
         assert snapshot.initial_margin == row['initial_margin'], snapshot.ts
-        assert snapshot.variation_margin == row['variation_margin'], snapshot.ts
+        # W1: the day's variation margin is settled to cash at the close and
+        # the baseline rolls, so every close carries VM == 0 and MR == IM.
+        assert snapshot.variation_margin == row['variation_margin'] == 0, snapshot.ts
         assert snapshot.margin_required == row['required'], snapshot.ts
         checked += 1
-    assert checked == 18            # every session but the expiry
+    # Eight sessions hold a position at the close: MUST #3 force-closes the leg
+    # on 2022-10-06, so nothing is held from that close on.
+    assert checked == 8
 
 
 @requires_corpus
 def test_the_call_fires_on_the_first_session_that_crosses_the_call_rung(
         uncured):
-    """0.9314 on 2022-10-03, and nothing before it.
+    """0.9176 on 2022-10-03, and nothing before it.
 
     The four sessions before are a real drawdown -- 1192.0 to 1150.0, a 6.9%
     unrealised loss -- and the account is inside its ladder for all of them.
-    PLUTUS_DEFAULT's rungs are 0.80/0.90/0.95 and the account goes from 0.7664
-    to 0.9314 in one session, so it crosses the warning rung and the call rung
-    together. The monitor reports **one** step and does not invent the warning
-    that never fired: exactly what ``on_mark``'s docstring promises for a jump.
+    PLUTUS_DEFAULT's rungs are 0.80/0.90/0.95 and the account jumps to 0.9176
+    in one session, so it crosses the warning rung and the call rung together.
+    The monitor reports **one** step and does not invent the warning that never
+    fired: exactly what ``on_mark``'s docstring promises for a jump.
+
+    W1 changed the number, not the shape. The 09:30 mark carries the one day's
+    unrealised move against the *rolled* baseline (1150.0 -> 1102.6) rather than
+    the whole loss from entry, and it is read against the deposit the prior
+    session's settlement left -- 83,148,008 -- so the requirement is
+    76,295,200 and utilisation 0.9176.
     """
     steps = dm.ladder_steps(uncured.result)
     assert steps[0].kind == 'margin_call'
     assert steps[0].ts == datetime.combine(CALL_DAY, OPEN)
-    assert steps[0].utilisation.quantize(Decimal('0.0001')) == Decimal('0.9314')
-    assert steps[0].required == Decimal('93095200.000')
-    assert steps[0].deposit_balance == Decimal('99948008')
+    assert steps[0].utilisation.quantize(Decimal('0.0001')) == Decimal('0.9176')
+    assert steps[0].required == Decimal('76295200.000')
+    assert steps[0].deposit_balance == Decimal('83148008.0')
 
     # Nothing at all before the call, on any rung.
     before = [s for s in steps if s.ts.date() < CALL_DAY]
@@ -224,26 +234,33 @@ def test_the_call_carries_a_deadline_and_it_is_the_next_session_open(uncured):
 
 
 @requires_corpus
-def test_an_uncured_call_force_closes_at_the_deadline_and_not_before(uncured):
-    """The cure window is respected in both directions.
+def test_the_first_call_is_market_cured_and_the_forced_close_comes_later(
+        uncured):
+    """The cure window is respected in both directions -- and under W1 the
+    daily settlement can close it from the market side.
 
-    The account is above the call rung at the 2022-10-03 close as well, and
-    nothing is emitted: an outstanding call inside its window is state, not a
-    per-mark reminder. The first mark at or after 2022-10-04 08:45 is the
-    09:30 step of 2022-10-04, and that is where the forced close lands.
+    The 2022-10-03 call is inside its window at that session's close and nothing
+    is emitted then: an outstanding call inside its window is state, not a
+    per-mark reminder. But its deadline (2022-10-04 08:45) does not force the
+    account, because by the 2022-10-04 close the day's cash settlement has
+    lowered utilisation back to the warning rung. The forced close that does
+    happen is later -- 2022-10-06 -- after a second call on 2022-10-05 whose
+    deadline passes uncured; and MUST #3 makes it execute.
     """
     steps = dm.ladder_steps(uncured.result)
     same_session_close = [s for s in steps
                           if s.ts == datetime.combine(CALL_DAY, CLOSE)]
     assert same_session_close == []
-    assert _snapshot(uncured.result, CALL_DAY).margin_status == 'call'
+    # The 10-03 call self-cures: at its close the settlement has lowered
+    # utilisation to the warning rung, and it is at warning by the deadline day.
+    assert _snapshot(uncured.result, CALL_DAY).margin_status == 'warning'
+    assert _snapshot(uncured.result, DEADLINE_DAY).margin_status == 'warning'
 
     forced = _closes(steps, 'forced_liquidation')
-    assert forced[0].ts == datetime.combine(DEADLINE_DAY, OPEN)
-    assert forced[0].cure_by == datetime.combine(DEADLINE_DAY, time(8, 45))
-    # Escalated by the elapsed deadline, not by the level: 0.9335 is still
-    # below PLUTUS_DEFAULT's own 0.95 forced-close rung.
-    assert forced[0].utilisation < Decimal('0.95')
+    assert forced[0].ts == datetime.combine(date(2022, 10, 6), OPEN)
+    assert forced[0].executed is False       # the open-mark report
+    assert forced[-1].executed is True       # the close-mark fill executes
+    assert _snapshot(uncured.result, date(2022, 10, 6)).positions == {}
 
 
 @requires_corpus
@@ -274,19 +291,22 @@ def test_the_session_rung_agrees_with_the_profiles_own_reading_at_every_mark(
 # --------------------------------------------------------------------------
 
 @requires_corpus
-def test_answering_the_call_clears_it_and_buys_three_sessions(cured, uncured):
-    """The same window, the same position, one act: a 17,000,000d transfer.
+def test_answering_the_call_clears_it_and_buys_a_session(cured, uncured):
+    """The same window, the same position, one act: a 13,000,000d transfer.
 
     The amount is not chosen here. PLUTUS_DEFAULT's call rung publishes
     ``TargetRef.RUNG_1``, so the level to restore to is its own Muc 1 at 0.80,
     and the strategy transfers ``required / 0.80 - balance`` rounded up to a
-    whole million because that is how a person moves money.
+    whole million because that is how a person moves money. Under W1 the deposit
+    has already settled the drawdown down to 83,148,008 by the time the call
+    fires, so restoring to 0.80 costs 13,000,000 -- not the 17,000,000 a
+    never-moving deposit would have needed.
 
-    What it buys is the measurement: forced on 2022-10-04 without the transfer,
-    2022-10-07 with it. Three sessions -- and the account is closed in the end
-    anyway, which is the honest result. A cure is not a rescue.
+    What it buys is the measurement: the uncured leg is force-closed on
+    2022-10-06, the cured one on 2022-10-07 -- one session -- and the account is
+    closed in the end anyway, which is the honest result. A cure is not a rescue.
     """
-    assert cured.strategy.topped_up == Decimal('17000000')
+    assert cured.strategy.topped_up == Decimal('13000000')
     assert len(cured.strategy.top_ups) == 1
     assert cured.strategy.top_ups[0][0] == datetime.combine(CALL_DAY, OPEN)
 
@@ -303,10 +323,10 @@ def test_answering_the_call_clears_it_and_buys_three_sessions(cured, uncured):
 
     uncured_forced = _closes(dm.ladder_steps(uncured.result),
                              'forced_liquidation')
-    assert uncured_forced[0].ts.date() == DEADLINE_DAY
+    assert uncured_forced[0].ts.date() == date(2022, 10, 6)
     survived = [d for d in cured.result.window.sessions
-                if DEADLINE_DAY <= d < date(2022, 10, 7)]
-    assert len(survived) == 3
+                if date(2022, 10, 6) <= d < date(2022, 10, 7)]
+    assert len(survived) == 1
 
 
 @requires_corpus
@@ -323,9 +343,11 @@ def test_curing_by_closing_a_contract_moves_the_deposit_by_the_realised_pnl(
     that stops being charged -- the design property that makes a double count
     impossible.
 
-    One contract at 1102.6 out of a book referenced at 1192.0:
-    100,000 x (1102.6 - 1192.0) = -8,940,000d, and the requirement drops from
-    four contracts' worth to three.
+    Under W1 the reference is the **last daily settlement price** (1150.0, the
+    2022-09-30 DSP), not the entry: the entry-to-1150.0 move has already
+    settled in cash day by day. One contract at 1102.6 out of a book now
+    referenced at 1150.0: 100,000 x (1102.6 - 1150.0) = -4,740,000d, and the
+    requirement drops from four contracts' worth to three.
     """
     assert reduced.strategy.reductions[0] == (
         datetime.combine(CALL_DAY, OPEN), 1)
@@ -333,15 +355,17 @@ def test_curing_by_closing_a_contract_moves_the_deposit_by_the_realised_pnl(
     trail = dm.deposit_trail(reduced)
     realised = [(entry[0].date(), entry[1]) for entry in trail
                 if entry[2].startswith('realised close-out')]
-    assert realised[0] == (CALL_DAY, Decimal('-8940000.0'))
+    assert realised[0] == (CALL_DAY, Decimal('-4740000.0'))
     assert realised[0][1] == (Decimal('100000')
-                              * (Decimal('1102.6') - Decimal('1192.0')))
+                              * (Decimal('1102.6') - Decimal('1150.0')))
 
     before = _snapshot(reduced.result, date(2022, 9, 30))
     after = _snapshot(reduced.result, CALL_DAY)
     assert before.positions == {dm.CONTRACT: 4}
     assert after.positions == {dm.CONTRACT: 3}
-    assert after.deposit_balance == Decimal('90995591.0')
+    # The close balance after the reduction and that day's settlement of the
+    # three contracts still held.
+    assert after.deposit_balance == Decimal('64175591.0')
     # Cured inside the session the call arrived in, and by three quarters of
     # the book rather than by fresh cash.
     assert after.margin_status == 'ok'
@@ -353,31 +377,33 @@ def test_curing_by_closing_a_contract_moves_the_deposit_by_the_realised_pnl(
 
 
 @requires_corpus
-def test_every_dong_of_a_book_closed_at_four_prices_reconciles(reduced):
+def test_every_dong_of_a_book_closed_over_a_hold_reconciles(reduced):
     """The hardest accounting case in the scenario, checked to the dong.
 
-    Four contracts leave at four different prices -- one on 2022-10-03, one on
-    2022-10-19, two at the 2022-10-20 settlement -- and each leg is priced off
-    the same variation-margin reference, because ``settle_daily`` never rolls
-    it. Total position P&L is
-    ``100,000 x [(1102.6 - 1192) + (1053 - 1192) + 2 x (1058 - 1192)]``
-    = -49,640,000d, and the deposit walks from 100,000,000d to 50,269,742d
-    through that plus 90,258d of charges, with no movement unaccounted for.
+    Under W1 the four contracts leave at two prices -- one on 2022-10-03 at
+    1102.6, three at the 2022-10-07 forced close at 1004.4 (MUST #3) -- and the
+    rest of the P&L has already been settled to cash day by day. Total position
+    P&L is ``100,000 x [1 x (1102.6 - 1192) + 3 x (1004.4 - 1192)]`` =
+    -65,220,000d, arriving as the daily variation settlements plus the two
+    realised close-outs, and the deposit walks from 100,000,000d to 34,680,255d
+    through that plus 99,745d of charges, with no movement unaccounted for.
     """
     trail = dm.deposit_trail(reduced)
+    # The full position P&L is the daily variation settlements plus the realised
+    # close-outs: W1 settles the hold day by day and realises the residual on
+    # each close-out. Their sum telescopes to the entry-to-exit move.
     position_pnl = sum(entry[1] for entry in trail
                        if entry[2].startswith('realised close-out')
-                       or entry[2].startswith('final settlement'))
+                       or entry[2].startswith('daily variation-margin'))
     assert position_pnl == Decimal('100000') * (
         (Decimal('1102.6') - Decimal('1192.0'))
-        + (Decimal('1053.0') - Decimal('1192.0'))
-        + 2 * (Decimal('1058.0') - Decimal('1192.0')))
-    assert position_pnl == Decimal('-49640000.0')
+        + 3 * (Decimal('1004.4') - Decimal('1192.0')))
+    assert position_pnl == Decimal('-65220000.0')
 
     charges = sum(entry[1] for entry in trail if 'charges on' in entry[2])
-    assert charges == Decimal('-90258')
-    assert dm.DEPOSIT + position_pnl + charges == Decimal('50269742.0')
-    assert trail[-1][3] == Decimal('50269742.0')
+    assert charges == Decimal('-99745')
+    assert dm.DEPOSIT + position_pnl + charges == Decimal('34680255.0')
+    assert trail[-1][3] == Decimal('34680255.0')
 
     # The trail is a closed chain: every balance_after follows from the one
     # before it and the movement in between.
@@ -391,53 +417,50 @@ def test_every_dong_of_a_book_closed_at_four_prices_reconciles(reduced):
 
 
 @requires_corpus
-def test_the_forced_latch_releases_and_a_genuinely_new_call_can_fire(reduced):
-    """The other half of finding 1: the latch is not a permanent gag.
+def test_the_forced_close_ends_the_position_so_no_second_call_can_fire(reduced):
+    """The other half of finding 1, reshaped by MUST #3 forced-execute.
 
-    On the reduce leg the account is force-closed from 2022-10-07, comes back
-    to the warning rung on 2022-10-18 when the market recovers, and is called
-    again on 2022-10-19 with a fresh 2022-10-20 08:45 deadline. That second
-    call is real -- it followed a clearance -- and the strategy answers it by
-    closing a second contract.
+    The finding-1 latch guarded against a forced close being followed by a new
+    cure window on an account that never actually cleared. Under MUST #3 that
+    scenario cannot arise on the corpus here: the forced close EXECUTES on
+    2022-10-07 and the book goes flat, so there is no held position left to
+    re-call. The reduce leg therefore shows exactly one call (2022-10-03,
+    answered by closing one contract) and one forced close -- no second call.
 
-    Without a release condition the fix in finding 1 would silence every
-    subsequent call for the life of the account, which would be a worse bug
-    than the one it replaced.
+    The latch-release condition itself -- that the machine does clear on a
+    genuine return to the warning rung -- is verified with no market in the way
+    by ``test_the_forced_latch_holds_without_the_corpus``.
     """
     steps = dm.ladder_steps(reduced.result)
     kinds = Counter(step.kind for step in steps)
-    assert kinds['margin_call'] == 2
-    assert kinds['margin_warning'] == 2
+    assert kinds['margin_call'] == 1
 
     calls = _closes(steps, 'margin_call')
     assert calls[0].ts == datetime.combine(CALL_DAY, OPEN)
-    assert calls[1].ts == datetime.combine(date(2022, 10, 19), OPEN)
-    assert calls[1].cure_by == datetime.combine(date(2022, 10, 20),
-                                                time(8, 45))
+    assert reduced.strategy.reductions == [
+        (datetime.combine(CALL_DAY, OPEN), 1)]
 
-    # The clearance that released the latch sits between them.
-    between = [s for s in steps if calls[0].ts < s.ts < calls[1].ts]
-    assert between[-1].kind == 'margin_warning'
-    assert between[-1].ts == datetime.combine(date(2022, 10, 18), OPEN)
-
-    assert reduced.strategy.reductions[1] == (
-        datetime.combine(date(2022, 10, 19), OPEN), 1)
+    # The forced close executes and the book is flat -- nothing to re-call.
+    forced = _closes(steps, 'forced_liquidation')
+    assert any(f.executed is True for f in forced)
+    assert reduced.result.snapshots[-1].positions == {}
 
 
 @requires_corpus
 def test_the_market_cures_a_call_by_itself_and_the_monitor_reports_it(uncured):
-    """2022-10-05 bounces 13.2 points and the uncured account comes back.
+    """2022-10-04 brings the uncured account back and the monitor says so.
 
-    The cure window is not only about what the trader does. On the uncured leg
-    the account is force-closed on 2022-10-04, and the next session the market
-    lifts it from 0.9335 to 0.8876 -- back to the warning rung -- and the
-    monitor says so. That is the de-escalation the machine is allowed to make,
-    and it is the one the forced latch deliberately leaves open.
+    The cure window is not only about what the trader does. The 2022-10-03 call
+    is cleared at the 2022-10-04 09:30 mark: the market -- and W1's daily cash
+    settlement of the prior day's loss -- lifts the account off the call rung
+    back to the warning rung (0.8965), and the monitor emits a warning (the
+    clearance) at that instant. That is the de-escalation the machine is
+    allowed to make, and it is why the 2022-10-03 call never force-closed.
     """
     warnings_ = _closes(dm.ladder_steps(uncured.result), 'margin_warning')
     assert len(warnings_) == 1
-    assert warnings_[0].ts == datetime.combine(BOUNCE_DAY, OPEN)
-    assert _snapshot(uncured.result, BOUNCE_DAY).margin_status == 'warning'
+    assert warnings_[0].ts == datetime.combine(DEADLINE_DAY, OPEN)
+    assert _snapshot(uncured.result, DEADLINE_DAY).margin_status == 'warning'
     assert warnings_[0].utilisation < Decimal('0.90')
 
 
@@ -466,13 +489,20 @@ def test_a_forced_close_does_not_re_grant_the_cure_window(uncured):
         elif step.kind == 'margin_warning':
             seen_forced = False
 
-    # Exactly one call in the whole run, and it precedes the first forced.
-    assert Counter(s.kind for s in steps)['margin_call'] == 1
+    # Two calls in the whole run now -- the market cured the first (2022-10-03)
+    # and a second fired (2022-10-05) -- and both precede the first forced. The
+    # finding holds: no call follows a forced close.
+    calls = _closes(steps, 'margin_call')
+    forced = _closes(steps, 'forced_liquidation')
+    assert Counter(s.kind for s in steps)['margin_call'] == 2
     assert steps[0].kind == 'margin_call'
-    assert steps[1].kind == 'forced_liquidation'
-    assert steps[1].ts.date() == DEADLINE_DAY
-    assert steps[2].ts == datetime.combine(DEADLINE_DAY, CLOSE)
-    assert steps[2].kind == 'forced_liquidation'
+    assert all(c.ts < forced[0].ts for c in calls)
+    # The forced close executes (MUST #3): reported at the open, filled at the
+    # close of the same session.
+    assert forced[0].ts.date() == date(2022, 10, 6)
+    assert forced[0].executed is False
+    assert forced[-1].ts == datetime.combine(date(2022, 10, 6), CLOSE)
+    assert forced[-1].executed is True
 
 
 def test_the_forced_latch_holds_without_the_corpus():
@@ -531,10 +561,11 @@ def test_the_equity_account_is_untouched_while_the_deposit_is_liquidated(
         uncured):
     """The whole point of a segregated deposit, on a run that needed the cash.
 
-    That account is force-closed twelve sessions running while holding
-    500,000,000d of settled securities cash -- five times the largest shortfall
-    the window raises -- and 1,000 settled FPT. Neither moves. There is no
-    auto-transfer in Vietnam and there is none here.
+    The account is force-closed on 2022-10-06 -- utilisation past 1.0, its
+    deposit short of the requirement -- while holding 500,000,000d of settled
+    securities cash (five times any shortfall the window raises) and 1,000
+    settled FPT one pool away. Neither moves. There is no auto-transfer in
+    Vietnam and there is none here.
     """
     for snapshot in uncured.result.snapshots:
         assert snapshot.settled_cash == dm.EQUITY_CASH, snapshot.ts
@@ -548,11 +579,11 @@ def test_the_equity_account_is_untouched_while_the_deposit_is_liquidated(
     assert len(securities_rows) == 1
     assert securities_rows[0]['movement'] == 'opening_balance'
 
-    # And the account really was short: at the trough the requirement exceeded
-    # the deposit by more than 32,000,000d, with half a billion next door.
-    trough = _snapshot(uncured.result, TROUGH_DAY)
-    assert trough.margin_required - trough.deposit_balance > Decimal('32000000')
-    assert trough.margin_status == 'forced'
+    # And the account really was short: at the forced close the requirement
+    # exceeded the deposit, with half a billion sitting next door.
+    forced = _closes(dm.ladder_steps(uncured.result), 'forced_liquidation')[0]
+    assert forced.utilisation > Decimal('1.0')
+    assert forced.required > forced.deposit_balance
 
 
 @requires_corpus
@@ -567,16 +598,16 @@ def test_the_only_bridge_between_the_pools_is_an_explicit_transfer(cured):
     assert len(rows) == 2
     out, into = rows
     assert out['pool'] == 'securities'
-    assert out['amount'] == '-17000000'
-    assert out['balance_after'] == '483000000'
+    assert out['amount'] == '-13000000'
+    assert out['balance_after'] == '487000000'
     assert into['pool'] == 'derivatives'
-    assert into['amount'] == '17000000'
-    assert into['balance_after'] == '116948008'
+    assert into['amount'] == '13000000'
+    assert into['balance_after'] == '96148008.0'
     assert out['ts'] == into['ts']
 
     for snapshot in cured.result.snapshots:
         if snapshot.ts >= datetime.combine(CALL_DAY, OPEN):
-            assert snapshot.settled_cash == dm.EQUITY_CASH - Decimal('17000000')
+            assert snapshot.settled_cash == dm.EQUITY_CASH - Decimal('13000000')
         else:
             assert snapshot.settled_cash == dm.EQUITY_CASH
         assert snapshot.holdings[dm.EQUITY_TICKER]['settled'] == dm.EQUITY_LOTS
@@ -587,22 +618,23 @@ def test_the_only_bridge_between_the_pools_is_an_explicit_transfer(cured):
 # --------------------------------------------------------------------------
 
 @requires_corpus
-def test_three_ladders_separate_the_same_position_by_four_sessions(source):
+def test_three_ladders_separate_the_same_position(source):
     """PLUTUS_DEFAULT, SSI_FOREIGN and TCBS on one identical account.
 
     Same contract, same 4 lots, same 100,000,000d, same window, same fill
-    policy. The only variable is the firm's published ladder, and it moves the
-    first breach by four sessions and changes which rungs fire at all:
+    policy. The only variable is the firm's published ladder, and it changes
+    which rungs fire and moves the forced close by three sessions. Under W1 the
+    daily settlement keeps the close marks healthier, so the 2022-10-03 jump is
+    where every firm's ladder finally bites:
 
-    * **SSI_FOREIGN** (0.75/0.80/0.85) warns on 2022-09-29, four sessions
-      before PLUTUS_DEFAULT says anything, and closes on 2022-10-03. It never
-      issues a call, because 2022-10-03 crosses its 0.80 and its 0.85 in one
-      move.
-    * **TCBS** (0.85/0.87/0.90) has three points between its rungs, so
-      2022-10-03 clears all three: no warning, no call, straight to a forced
-      close.
+    * **SSI_FOREIGN** (0.75/0.80/0.85): the 2022-10-03 09:30 mark crosses all
+      three rungs at once, so it goes straight to a forced close that day -- no
+      warning, no call.
+    * **TCBS** (0.85/0.87/0.90): three points between its rungs, so 2022-10-03
+      clears all three -- no warning, no call, straight to a forced close.
     * **PLUTUS_DEFAULT** (0.80/0.90/0.95) is the only one that raises a call,
-      and it does not close until the deadline passes on 2022-10-04.
+      and it does not close until 2022-10-06 -- after that call is market-cured
+      and a second one fires.
 
     A ``{warn, call, liquidate}`` triple with one set of numbers cannot express
     that, which is the survey's whole argument.
@@ -631,9 +663,11 @@ def test_three_ladders_separate_the_same_position_by_four_sessions(source):
     assert 'margin_warning' not in default or (
         default['margin_warning'].date() > CALL_DAY)
     assert default['margin_call'].date() == CALL_DAY
-    assert default['forced_liquidation'].date() == DEADLINE_DAY
+    assert default['forced_liquidation'].date() == date(2022, 10, 6)
 
-    assert foreign['margin_warning'].date() == date(2022, 9, 29)
+    # SSI and TCBS jump straight to a forced close: their rungs are crossed
+    # together at the 2022-10-03 mark, so neither warns nor calls.
+    assert 'margin_warning' not in foreign
     assert 'margin_call' not in foreign
     assert foreign['forced_liquidation'].date() == CALL_DAY
 
@@ -641,10 +675,12 @@ def test_three_ladders_separate_the_same_position_by_four_sessions(source):
     assert 'margin_call' not in tcbs
     assert tcbs['forced_liquidation'].date() == CALL_DAY
 
-    # The separation, stated as the thing the ladders bought.
-    assert (default['margin_call'] - foreign['margin_warning']).days == 4
+    # The separation, stated as the thing the call bought: PLUTUS_DEFAULT closes
+    # three sessions after the two firms that had no call to buy time with.
     assert (default['forced_liquidation']
-            - tcbs['forced_liquidation']).days == 1
+            - foreign['forced_liquidation']).days == 3
+    assert (default['forced_liquidation']
+            - tcbs['forced_liquidation']).days == 3
 
 
 @requires_corpus
@@ -790,17 +826,17 @@ def test_the_overnight_requirement_is_not_the_intraday_one(uncured):
     """
     trail = {r.as_of: r for r in uncured.session.overnight_margins()}
     crash = trail[date(2022, 10, 3)]
-    # 4 contracts at the 2022-10-03 close of 1102.6, at the dated VSD ratio,
-    # plus the loss against the 1192.0 entry. The ratio is read from the
-    # dated series rather than written down, because it steps 0.13 -> 0.17 on
-    # 2022-12-15 and a constant here would pass for the wrong reason.
+    # 4 contracts at the 2022-10-03 close of 1102.6, at the dated VSD ratio.
+    # The ratio is read from the dated series rather than written down, because
+    # it steps 0.13 -> 0.17 on 2022-12-15 and a constant here would pass for
+    # the wrong reason. Under W1 the day's variation margin has settled to cash
+    # at the close and the baseline rolled, so the overnight requirement carries
+    # no VM term -- it is IM alone.
     rate = vsd_initial_margin(date(2022, 10, 3))
     assert rate == Decimal('0.13')
     initial = rate * Decimal('4') * Decimal('100000') * Decimal('1102.6')
-    variation = Decimal('4') * Decimal('100000') * (Decimal('1192.0')
-                                                    - Decimal('1102.6'))
-    assert crash.amount == initial + variation
-    assert crash.amount == Decimal('93095200.000')
+    assert crash.amount == initial
+    assert crash.amount == Decimal('57335200.000')
 
 
 def test_naming_a_firm_and_a_ladder_level_in_one_config_is_refused():
@@ -887,7 +923,7 @@ def test_the_firms_first_rung_refuses_a_new_position_and_admits_an_offset(
         source):
     """Finding 2, and its control, at one instant on one account.
 
-    On 2022-10-03 the account sits at 0.9314 -- past PLUTUS_DEFAULT's 0.80
+    On 2022-10-03 the account sits at 0.9176 -- past PLUTUS_DEFAULT's 0.80
     block-opening rung and past its 0.90 call. A fifth contract is refused,
     naming 0.80 as the binding constraint, while an offsetting sell of one is
     admitted. That exception is not ours: QD 26 Dieu 13.2.a requires the member
@@ -901,24 +937,25 @@ def test_the_firms_first_rung_refuses_a_new_position_and_admits_an_offset(
 
     That control used to assert ``Accepted``, and in doing so it pinned a
     defect as expected behaviour. ``reserve_for_order`` tested
-    ``required > free_deposit``, which excludes VM: the account had 42,612,808
-    of "free" deposit and only 1,855,407.6 of room below its own 0.95
-    forced-close level, and the 14,333,800 order was admitted into the gap.
-    Funding it took the account to utilisation 1.0748 and status ``FORCED``
-    in the same instant, on a mark that had not moved. The order now names
-    ``openable`` -- ``balance x 0.95 - required``, the mirror of
-    ``transfer_out``'s bound -- as the constraint that bit.
+    ``required > free_deposit``, which excludes VM: at the 09:30 mark the
+    account had 25,812,808 of "free" deposit and only 2,695,407.6 of room below
+    its own 0.95 forced-close level, and the 14,333,800 order would have been
+    admitted into the gap. The order now names ``openable`` --
+    ``balance x 0.95 - required``, the mirror of ``transfer_out``'s bound -- as
+    the constraint that bit. (W1 moved the numbers: the deposit is the settled
+    83,148,008 and the VM is the one-day 18,960,000, not the cumulative
+    35,760,000 a never-settling account carried.)
 
     So the two gates are distinguishable and both live: the firm leg is
     refused at the **rung** (binding constraint 0.80, a ratio), the control at
-    the **funding** bound (binding constraint 1,855,407.6, an amount). The
+    the **funding** bound (binding constraint 2,695,407.6, an amount). The
     offsetting sell is admitted on both, which is the Dieu 13.2.a exception.
     """
     firm_leg = dm.run_leg('PLUTUS_DEFAULT', source=source,
                           open_more_on=CALL_DAY)
     (ts, utilisation, opening, offsetting), = firm_leg.strategy.admission
     assert ts == datetime.combine(CALL_DAY, OPEN)
-    assert utilisation.quantize(Decimal('0.0001')) == Decimal('0.9314')
+    assert utilisation.quantize(Decimal('0.0001')) == Decimal('0.9176')
     assert opening.__class__.__name__ == 'Rejected'
     assert opening.binding_constraint == Decimal('0.80')
     assert opening.detail['block_opening_utilisation'] == Decimal('0.80')
@@ -933,11 +970,11 @@ def test_the_firms_first_rung_refuses_a_new_position_and_admits_an_offset(
     # Refused by the funding bound, not by the rung: no rung is configured.
     assert 'block_opening_utilisation' not in control_opening.detail
     assert control_opening.detail['required'] == Decimal('14333800.000')
-    assert control_opening.detail['free_deposit'] == Decimal('42612808.000')
-    assert control_opening.detail['variation_margin'] == Decimal('35760000.0')
-    # 99,948,008 x 0.95 - 93,095,200. The order is 12.5m past it.
-    assert control_opening.detail['openable'] == Decimal('1855407.600')
-    assert control_opening.binding_constraint == Decimal('1855407.600')
+    assert control_opening.detail['free_deposit'] == Decimal('25812808.000')
+    assert control_opening.detail['variation_margin'] == Decimal('18960000.0')
+    # 83,148,008 x 0.95 - 76,295,200. The order is 11.6m past it.
+    assert control_opening.detail['openable'] == Decimal('2695407.600')
+    assert control_opening.binding_constraint == Decimal('2695407.600')
     assert control_offsetting.__class__.__name__ == 'Accepted'
 
     # And the refusal is in the trade log, not only in the return value.
@@ -958,45 +995,46 @@ def test_every_dong_of_the_deposit_is_accounted_for(uncured, cured):
 
     ``DerivativesAccount`` keeps a signed ``DepositEntry`` with a
     ``balance_after`` for every movement, so this is a closed sum and not an
-    estimate. The uncured leg has six entries and no transfer; the cured leg
-    has eight and moves 17,000,000d in.
-
-    The charges are named, not lumped: 10,800 exchange service (2,550 x 4 is
-    the VSDC row, the exchange row is 2,700 x 4), 30,992 derivatives PIT
-    (0.0005 x IM at entry) and 10,200 VSDC clearing at 2,550 a contract, then
-    27,508 of PIT again when the contract matures -- because taxable income on
-    a future is determined when the order is matched **or at contract
-    maturity**, and a position carried into final settlement is never matched
-    out.
+    estimate. Under W1 the uncured leg has fifteen entries -- the entry charges,
+    seven daily variation settlements, the forced close-out realised in cash on
+    2022-10-06, and that fill's charges -- and **no** final settlement, because
+    MUST #3 offsets the book before it can mature. The cured leg moves
+    13,000,000d in on top.
     """
     trail = dm.deposit_trail(uncured)
-    assert [entry[3] for entry in trail][-1] == Decimal('46320500.0')
-    assert sum(entry[1] for entry in trail) == Decimal('46320500.0')
+    assert [entry[3] for entry in trail][-1] == Decimal('37980041.0')
+    assert sum(entry[1] for entry in trail) == Decimal('37980041.0')
     for previous, current in zip(trail, trail[1:]):
         assert previous[3] + current[1] == current[3]
 
-    amounts = {entry[2].split(': ')[-1]: entry[1] for entry in trail}
-    assert amounts['opening deposit'] == dm.DEPOSIT
-    assert amounts['exchange_service_index_future'] == Decimal('-10800')
-    assert amounts['vsdc_derivatives_clearing'] == Decimal('-10200')
-    # 0.0005 x (0.13 x 4 x 100,000 x 1192.0) = 0.0005 x 61,984,000
-    assert amounts['pit_derivatives_transfer'] == Decimal('-27508')
+    assert trail[0][1] == dm.DEPOSIT                 # the opening deposit
+    # The entry PIT is 0.0005 x IM at entry.
     entry_pit = [e[1] for e in trail
                  if 'pit_derivatives_transfer' in e[2]][0]
     assert entry_pit == Decimal('-30992')
     assert entry_pit == -(Decimal('0.0005') * Decimal('0.13') * 4
                           * Decimal('100000') * Decimal('1192.0'))
 
-    # 4 x 100,000 x (1058.0 - 1192.0)
-    settlement = [e[1] for e in trail
-                  if e[2].startswith('final settlement')]
-    assert settlement == [Decimal('-53600000.0')]
+    # No final settlement: the position is force-closed, so the last position
+    # movement is a realised close-out, not an expiry settlement.
+    assert [e for e in trail if e[2].startswith('final settlement')] == []
+    realised = [e[1] for e in trail if e[2].startswith('realised close-out')]
+    assert realised == [Decimal('-31200000.0')]
+    # The full position P&L is the daily settlements plus that close-out: 4
+    # contracts from 1192.0 out at the forced fill 1037.2.
+    position_pnl = sum(e[1] for e in trail
+                       if e[2].startswith('realised close-out')
+                       or e[2].startswith('daily variation-margin'))
+    assert position_pnl == Decimal('100000') * 4 * (
+        Decimal('1037.2') - Decimal('1192.0'))
+    assert position_pnl == Decimal('-61920000.0')
 
     cured_trail = dm.deposit_trail(cured)
     assert [e[1] for e in cured_trail if e[2] == 'transfer in from securities'] \
-        == [Decimal('17000000')]
-    assert cured_trail[-1][3] == Decimal('63320500.0')
-    assert (cured_trail[-1][3] - trail[-1][3]) == Decimal('17000000')
+        == [Decimal('13000000')]
+    # The cured leg ends slightly lower despite the transfer in: it held one
+    # session longer and was force-closed at a worse price (1004.4 vs 1037.2).
+    assert cured_trail[-1][3] == Decimal('37860894.0')
 
 
 @requires_corpus
@@ -1024,16 +1062,18 @@ def test_every_order_reaches_a_terminal_state_and_releases_its_reservation(
         uncured):
     """No order left live, no encumbrance left standing.
 
-    A margin scenario is exactly where a leak would hide: the position is
-    breached for twelve sessions and the entry order's deposit reservation was
-    converted to posted margin on the fill. Section 12 invariant 4 says the sum
-    of encumbrance over live orders equals the ledgers' committed totals, and
+    A margin scenario is exactly where a leak would hide: the account is
+    breached and force-closed, and the entry order's deposit reservation was
+    converted to posted margin on the fill. Under MUST #3 there are two orders
+    now -- the entry and the offsetting forced-close order -- and both must end
+    terminal with nothing reserved. Section 12 invariant 4 says the sum of
+    encumbrance over live orders equals the ledgers' committed totals, and
     ``encumbrance_zero`` says it is zero when nothing is live.
     """
     records = uncured.session.orders()
-    assert len(records) == 1
+    assert len(records) == 2
     assert all(record.is_terminal for record in records)
-    assert records[0].state is OrderState.FILLED
+    assert all(record.state is OrderState.FILLED for record in records)
     assert records[0].filled_quantity == dm.LOTS
     assert uncured.session.orders(state=OrderState.RESTING) == ()
 
@@ -1046,26 +1086,26 @@ def test_every_order_reaches_a_terminal_state_and_releases_its_reservation(
 
 
 @requires_corpus
-def test_the_position_settles_at_expiry_and_the_settlement_log_says_how(
-        uncured):
-    """The exit leg of a held-to-maturity future, in the settlement log.
+def test_the_position_is_force_closed_before_expiry_not_settled_at_it(uncured):
+    """The exit leg of this account is a forced close, not a maturity.
 
-    One row, and it names the tier the price came from. ``close_proxy`` with
-    ``substituted=True`` is the honest answer on the Parquet corpus: the real
-    final settlement price is a trimmed 14:15-14:45 index average and the daily
-    bars do not carry it.
+    Under MUST #3 the leveraged account is force-closed on 2022-10-06, three
+    sessions before the contract's 2022-10-20 expiry, so there is no
+    ``EXPIRY_SETTLED`` row at all -- the position leaves the book as a realised
+    close-out in the cash log. (A held-to-maturity settlement, with the
+    ``close_proxy`` substitution it records, is exercised where a position
+    actually survives to expiry -- in the expiry and settlement scenarios.)
     """
     rows = uncured.result.logs.settlement.to_rows()
-    assert len(rows) == 1
-    row = rows[0]
-    assert row['action'] == 'expiry_settled'
-    assert row['ticker'] == dm.CONTRACT
-    assert row['quantity'] == dm.LOTS
-    assert row['amount'] == '-53600000.0'
-    assert row['detail']['settlement_source'] == 'close_proxy'
-    assert row['detail']['substituted'] is True
-    assert row['settlement_calendar_id'] == 'weekday-only-UNSOURCED'
+    assert rows == []
+    assert _snapshot(uncured.result, date(2022, 10, 6)).positions == {}
     assert _snapshot(uncured.result, EXPIRY_DAY).positions == {}
+
+    # The exit was a realised close-out in the cash log, not an expiry.
+    realised = [row for row in uncured.result.logs.cash.to_rows()
+                if row['pool'] == 'derivatives'
+                and row['movement'] == 'realised_pnl']
+    assert len(realised) == 1
 
 
 # --------------------------------------------------------------------------
@@ -1073,106 +1113,99 @@ def test_the_position_settles_at_expiry_and_the_settlement_log_says_how(
 # --------------------------------------------------------------------------
 
 @requires_corpus
-def test_the_forced_close_reports_and_does_not_execute(uncured):
-    """Finding 4, with the price of it.
+def test_the_forced_close_reports_and_executes(uncured):
+    """Finding 4, resolved (MUST #3 forced-execute, 2026-08-27).
 
-    24 forced liquidations over 12 distinct sessions, ``executed`` ``False`` on
-    every one, and the position still open at the end of all of them. The first
-    named a mark of 1102.0 on 2022-10-04; the contract settles at 1058.0, so
-    the difference between the close that was reported and the one that
-    happened is 4 x 100,000 x 44.0 = 17,600,000d on a 100,000,000d account.
-
-    Counting **distinct sessions** rather than events is deliberate: the two
-    marks per session mean an event count is a property of the runner's loop,
-    not of the market.
+    The forced close now runs an offsetting order through the order path: two
+    events on 2022-10-06, one session -- the 09:30 report (``executed`` False,
+    the fill has not landed yet) and the 14:45 fill (``executed`` True) -- and
+    the position is flat afterwards, not carried intact to expiry.
     """
     forced = _closes(dm.ladder_steps(uncured.result), 'forced_liquidation')
-    assert len(forced) == 24
-    assert len({step.day for step in forced}) == 12
-    assert {step.executed for step in forced} == {False}
+    assert len(forced) == 2
+    assert len({step.day for step in forced}) == 1
+    assert [step.executed for step in forced] == [False, True]
 
     for event in uncured.result.logs.events:
         if event.kind is EventKind.FORCED_LIQUIDATION:
             assert event.detail['selection_rule'].value == 'largest_loss_first'
             assert event.detail['sequence'] == (dm.CONTRACT,)
-            assert event.detail['price_basis'] == (
-                'the contract mark at this instant')
             break
 
-    # Nothing was closed: the position is intact until it expires.
-    for day in (date(2022, 10, 6), TROUGH_DAY, date(2022, 10, 19)):
-        assert _snapshot(uncured.result, day).positions == {dm.CONTRACT: 4}
-
-    unclosed_cost = (Decimal(dm.LOTS) * dm.MULTIPLIER
-                     * (Decimal('1102.0') - Decimal('1058.0')))
-    assert unclosed_cost == Decimal('17600000.0')
+    # The position is closed on the forced session, not carried to expiry.
+    assert _snapshot(uncured.result, date(2022, 10, 6)).positions == {}
+    for day in (date(2022, 10, 7), TROUGH_DAY, date(2022, 10, 19)):
+        assert _snapshot(uncured.result, day).positions == {}
 
 
 @requires_corpus
-def test_the_deposit_balance_never_moves_with_the_mark(uncured, prices):
-    """Finding 5, first half: ``settle_daily`` has no session call site.
+def test_the_deposit_balance_moves_with_the_mark(uncured, prices):
+    """Finding 5, first half, resolved (W1 daily cash settlement).
 
-    The balance is 99,948,008d from the entry fill to the expiry -- 18 sessions
-    -- while the mark-to-market loss reaches 81,200,000d, and the whole loss
-    arrives as one movement on 2022-10-20. A replay that debits variation
-    margin T+1, which is what VSDC does, will not reproduce these utilisations.
+    ``settle_daily`` is now wired into the overnight layer, so the deposit STEPS
+    every session the mark moves rather than sitting at its opening balance.
+    Across the held days it walks 99,948,008 -> 97,148,008 -> ... -> 69,228,008
+    before the forced close realises the rest. A replay that debits variation
+    margin T+1, which is what VSDC does, now reproduces these utilisations.
     """
     balances = {snapshot.deposit_balance
                 for snapshot in uncured.result.snapshots
                 if snapshot.positions}
-    assert balances == {Decimal('99948008')}
+    assert len(balances) > 1
+    assert Decimal('99948008') in balances           # the entry-day balance
 
-    worst_loss = (Decimal(dm.LOTS) * dm.MULTIPLIER
-                  * (Decimal('1192.0') - prices[TROUGH_DAY]))
-    assert worst_loss == Decimal('81200000.0')
-    assert _snapshot(uncured.result, TROUGH_DAY).variation_margin == worst_loss
-
-    movements = [row for row in uncured.result.logs.cash.to_rows()
-                 if row['pool'] == 'derivatives'
-                 and row['movement'] == 'expiry_settlement']
-    assert len(movements) == 1
-    assert movements[0]['ts'].startswith(EXPIRY_DAY.isoformat())
+    settlements = [row for row in uncured.result.logs.cash.to_rows()
+                   if row['pool'] == 'derivatives'
+                   and row['movement'] == 'variation_settlement']
+    assert len(settlements) == 7                      # one per held session's move
+    # No single lump at expiry: the loss settles day by day, and MUST #3
+    # force-closes the book before it can reach a final settlement.
+    assert [row for row in uncured.result.logs.cash.to_rows()
+            if row['movement'] == 'expiry_settlement'] == []
 
 
 @requires_corpus
 def test_carrying_the_loss_in_the_requirement_is_not_the_same_as_settling_it(
         uncured, prices):
-    """Finding 5, second half, and it is the number the docstring defends.
+    """Finding 5, second half, **resolved** (W1 daily cash settlement).
 
-    ``deposit.py``'s module docstring justifies not moving the balance by
-    saying the loss is carried in ``MR`` instead, "which is why doing both
-    would double-count it". The arithmetic is sound; the **substitution** is
-    not. Utilisation here is ``(IM + L) / D`` on a balance that never moves,
-    and under real T+1 cash settlement it is ``(IM + dL) / (D - L_prev)``,
+    ``deposit.py`` used to justify not moving the balance by saying the loss was
+    carried in ``MR`` instead. The arithmetic was sound; the **substitution**
+    was not. Carrying the loss gives ``(IM + L) / D`` on a balance that never
+    moves, and real T+1 cash settlement gives ``(IM + dL) / (D - L_prev)``,
     because the previous session's P&L has already left the deposit. Those are
     different numbers and the difference **changes sign**, so "conservative"
-    is not a property this substitution has.
+    was never a property the substitution had.
 
-    Measured, on the deposit this run actually held:
+    ``cash_settlement_divergence`` is the pure arithmetic of the two models, and
+    it still stands as the record of *how far apart* they are:
 
     * the two agree only while nothing has settled -- the first two sessions;
     * as built is the larger through 2022-10-04, by up to 4%;
-    * cash settled is the larger from 2022-10-05 to the end, by up to
-      **137%**;
+    * cash settled is the larger from 2022-10-05 on, by up to **137%**;
     * the worst gap is 2022-10-12, an **up** session, because the previous
-      day's 81,200,000d loss settles out on T+1 exactly as the price
-      rebounds. This session reports 1.2013 where daily cash settlement gives
-      2.8432, and the real account has 18,748,008d of assets left against a
-      53,305,200d requirement.
+      day's 81,200,000d loss settles out on T+1 exactly as the price rebounds.
 
-    An account that cannot be drained cannot be blown, and this one is never
-    drained: it reaches expiry with 46,320,500d.
+    What has changed is which one the **session** now does. W1 settles the loss
+    to cash, so the run has moved off the as-built column: on the entry day the
+    two still agree (nothing has settled), and every held session after it the
+    run's utilisation is strictly **below** as built, because the loss is paid
+    rather than carried in the requirement.
     """
     rows = {row['date']: row for row in dm.cash_settlement_divergence(
         prices, entry=Decimal('1192.0'), deposit=Decimal('99948008'))}
 
-    # The as-built column reproduces the session exactly, so the comparison is
-    # like for like and not a re-derivation with a different base.
+    # The session no longer matches the as-built column: it settles now, so its
+    # utilisation drops below the loss-carried one on every session after the
+    # first. That divergence *is* finding 5 resolved.
     for snapshot in uncured.result.snapshots:
         if snapshot.phase != 'close' or not snapshot.positions:
             continue
         row = rows[snapshot.ts.date()]
-        assert row['as_built_utilisation'] == snapshot.utilisation
+        if snapshot.ts.date() == dm.WINDOW_START:
+            assert snapshot.utilisation == row['as_built_utilisation']
+        else:
+            assert snapshot.utilisation < row['as_built_utilisation']
 
     equal = {d for d, r in rows.items()
              if r['as_built_utilisation'] == r['cash_settled_utilisation']}
@@ -1273,25 +1306,23 @@ def test_no_position_management_fee_is_levied_and_that_is_the_gazetted_answer(
 
 
 @requires_corpus
-def test_the_snapshot_rung_and_the_emitted_event_are_different_questions(
+def test_the_snapshot_rung_and_the_emitted_event_agree_once_the_book_is_flat(
         reduced):
-    """A trap this scenario would otherwise leave for the next reader.
+    """A trap this scenario used to leave, closed by MUST #3 forced-execute.
 
-    ``Snapshot.margin_status`` is ``MarginView.status`` -- where the account
-    sits on the ladder right now. The emitted event is the **monitor's** state,
-    which carries history: after a forced close, a mark that is merely at the
-    call rung is reported ``FORCED``, because the position is still being
-    processed. So the two disagree on 2022-10-13 through 2022-10-17, and both
-    are right about different questions.
-
-    Pinned rather than smoothed over, because a test that read the rung off the
-    snapshot and the severity off the event would silently conflate them.
+    ``Snapshot.margin_status`` is where the account sits on the ladder now; the
+    emitted event is the **monitor's** state, which carries history. Under the
+    old non-executing forced close the two could disagree for sessions on end,
+    because the position rode on at the call rung while the monitor kept
+    reporting ``FORCED``. MUST #3 closes the position at the forced, so that
+    ride is gone: from 2022-10-07 the reduced book is flat, the snapshot reads
+    ``ok``, and no event is emitted -- the two agree.
     """
-    for day in (date(2022, 10, 13), date(2022, 10, 14), date(2022, 10, 17)):
-        assert _snapshot(reduced.result, day).margin_status == 'call'
     emitted = {step.day: step.kind for step in dm.ladder_steps(reduced.result)}
     for day in (date(2022, 10, 13), date(2022, 10, 14), date(2022, 10, 17)):
-        assert emitted[day] == 'forced_liquidation'
+        assert _snapshot(reduced.result, day).margin_status == 'ok'
+        assert _snapshot(reduced.result, day).positions == {}
+        assert day not in emitted
 
 
 @requires_corpus
@@ -1366,13 +1397,13 @@ def test_a_snapshot_is_taken_after_the_step_and_the_event_during_it(cured,
 
     * **the cure.** On 2022-10-03 the call is emitted inside ``advance_to``,
       the strategy answers it in ``on_session``, and the snapshot is taken
-      after that. The event says ``margin_call`` at 0.9314; the snapshot at
-      the same instant says ``ok`` at 0.7960. The account really was called
+      after that. The event says ``margin_call`` at 0.9176; the snapshot at
+      the same instant says ``ok`` at 0.7935. The account really was called
       and really did cure, in that order.
-    * **the expiry.** ``_mark_derivatives`` runs the ladder and *then* the
-      expiry loop, so on 2022-10-20 at 14:45 the account is marked in breach
-      at 1.0867 on four open contracts and those contracts cash-settle in the
-      same call. The snapshot reports an empty account at ``ok``.
+    * **the forced close.** MUST #3 executes the offsetting order inside the
+      same 2022-10-06 14:45 step that marks the account in breach: the event
+      says ``forced_liquidation`` at 1.0146 on four open contracts, and the
+      snapshot taken after the step reports an empty account at ``ok``.
 
     Neither is called a defect: every number is right about the moment it
     describes. Recorded because a report built by joining the two streams
@@ -1381,44 +1412,45 @@ def test_a_snapshot_is_taken_after_the_step_and_the_event_during_it(cured,
     """
     call = dm.ladder_steps(cured.result)[0]
     assert call.kind == 'margin_call'
-    assert call.utilisation.quantize(Decimal('0.0001')) == Decimal('0.9314')
+    assert call.utilisation.quantize(Decimal('0.0001')) == Decimal('0.9176')
     at_the_same_instant = _snapshot(cured.result, CALL_DAY, phase='open')
     assert at_the_same_instant.ts == call.ts
     assert at_the_same_instant.margin_status == 'ok'
     assert at_the_same_instant.utilisation.quantize(
-        Decimal('0.0001')) == Decimal('0.7960')
+        Decimal('0.0001')) == Decimal('0.7935')
 
     final = dm.ladder_steps(uncured.result)[-1]
-    assert final.ts == datetime.combine(EXPIRY_DAY, CLOSE)
+    assert final.ts == datetime.combine(date(2022, 10, 6), CLOSE)
     assert final.kind == 'forced_liquidation'
-    assert final.deposit_balance == Decimal('99948008')
-    assert final.utilisation.quantize(Decimal('0.0001')) == Decimal('1.0867')
+    assert final.executed is True
+    assert final.deposit_balance == Decimal('69228008.0')
+    assert final.utilisation.quantize(Decimal('0.0001')) == Decimal('1.0146')
 
-    settlement = [event for event in uncured.result.logs.events
-                  if event.kind is EventKind.EXPIRY_SETTLED]
-    assert len(settlement) == 1
-    assert settlement[0].ts == final.ts
-    assert settlement[0].seq > [e.seq for e in uncured.result.logs.events
-                                if e.kind is EventKind.FORCED_LIQUIDATION][-1]
+    # The offsetting fill lands in the same step that emitted the forced event.
+    forced_fill = [event for event in uncured.result.logs.events
+                   if event.kind is EventKind.FORCED_LIQUIDATION][-1]
+    assert forced_fill.ts == final.ts
 
-    after = _snapshot(uncured.result, EXPIRY_DAY)
+    after = _snapshot(uncured.result, date(2022, 10, 6))
     assert after.positions == {}
     assert after.margin_status == 'ok'
-    assert after.deposit_balance == Decimal('46320500.0')
+    assert after.deposit_balance == Decimal('37980041.0')
 
 
 def test_the_findings_register_is_complete_and_states_its_own_status():
     """A report cannot quietly drop the ones that are not fixed.
 
     ``F10`` and ``F11`` are the overnight layer: the engine that had no call
-    site, and the gap between the two layers that wiring it exposed.
+    site, and the gap between the two layers -- now closed, because W1 settles
+    the variation margin and the two coincide. After W1 (F5, F11) and MUST #3
+    (F4) landed, seven of the eleven are fixed and none is left open.
     """
     found = dm.findings()
     assert {row['id'] for row in found} == {'F1', 'F2', 'F3', 'F4', 'F5', 'F6',
                                             'F7', 'F8', 'F9', 'F10', 'F11'}
-    assert {row['status'] for row in found} == {'fixed', 'open', 'declared'}
-    assert sum(1 for row in found if row['status'] == 'fixed') == 4
-    assert sum(1 for row in found if row['status'] == 'open') == 1
+    assert {row['status'] for row in found} == {'fixed', 'declared'}
+    assert sum(1 for row in found if row['status'] == 'fixed') == 7
+    assert sum(1 for row in found if row['status'] == 'declared') == 4
     for row in found:
         assert row['where'] and row['evidence'] and row['fix']
 
@@ -1451,7 +1483,8 @@ def test_the_run_decided_everything_it_evaluated_and_says_on_what_evidence(
 
     fills = [row for row in uncured.result.logs.trades.to_rows()
              if row['action'] == TradeAction.FILLED.value]
-    assert len(fills) == 1
+    # Two fills now: the entry, and the MUST #3 offsetting forced close.
+    assert len(fills) == 2
     assert fills[0]['evidence'] == 'touched_at_limit'
     assert fills[0]['fill_price'] == '1192.0'
     assert fills[0]['fill_quantity'] == dm.LOTS

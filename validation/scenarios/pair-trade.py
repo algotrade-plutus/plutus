@@ -106,41 +106,43 @@ notion of a pair and says so; the caller was told enough to act, which is the
 whole point of the annotation.
 
 **A margin call at the right rung on the right day.** The second leg walks the
-ladder and every rung reproduces from ``IM = 0.13 x |net| x 100,000 x price``
-and ``VM = max(0, -P&L from entry)`` against a 61,935,267d deposit:
+ladder. Under W1 the deposit settles each session and the close carries no VM,
+so ``IM = 0.13 x |net| x 100,000 x price`` is the whole close requirement and
+the deposit moves under it:
 
-==========  =======  ===========  ===========  ======  ==========
-session     mark     IM           VM           util    reported
-==========  =======  ===========  ===========  ======  ==========
-2022-11-10   912.8   47,465,600            0   0.7664  ok
-2022-11-11   938.0   48,776,000   10,080,000   0.9503  **CALL**,
-                                                       cure by
-                                                       11-14 08:45
-2022-11-14   932.0   48,464,000    7,680,000   0.9065  **FORCED**
-                                                       (uncured)
-2022-11-15   895.0   46,540,000            0   0.7514  ok, cleared
-2022-11-16   957.6   49,795,200   17,920,000   1.0933  **FORCED**
-2022-11-17   972.5   50,570,000   23,880,000   1.2021  FORCED,
-                                                       then expiry
-==========  =======  ===========  ===========  ======  ==========
+==========  =======  ===========  ==========  ======  ==========
+session     mark     IM (= MR)    deposit     util    reported
+==========  =======  ===========  ==========  ======  ==========
+2022-11-10   912.8   47,465,600   61,935,267  0.7664  ok
+2022-11-11   938.0   48,776,000   51,855,267  0.9406  **CALL**,
+                                                      cure by
+                                                      11-14 08:45
+2022-11-14    --          --      25,548,173    --    **FORCED**,
+                                                      executed,
+                                                      book flat
+==========  =======  ===========  ==========  ======  ==========
 
-The 2022-11-14 row is the one worth reading: utilisation is 0.9065, on the
-*call* rung, and the event is a forced close because the 2022-11-11 call went
-unanswered past its deadline. The 2022-11-15 row clears it, and 2022-11-16
-fires again on the rung itself. Both escalation paths, in one window.
+The 2022-11-14 forced close is the 2022-11-11 call gone past its deadline
+unanswered -- utilisation 0.9346 at the 09:30 mark, on the *call* rung, not the
+forced one. MUST #3 executes it: an offsetting order fills at the 14:45 close
+and the book goes flat, so there is no 2022-11-16/17 breach and no expiry
+settlement -- the leg is offset three sessions before it could mature.
 
 **Every dong accounted for.** Opening 600,000,000d against closing
-137,765,732d of securities cash, 38,029,982d of deposit and a basket marked at
-393,885,000d is a change of **-30,319,286d**, and it decomposes exactly:
-+3,375,000 on the first basket, -16,000,000 realised on the first futures leg,
-+8,970,000 on the second basket, -23,880,000 at final settlement, -2,784,286 of
-charges. Nothing is left over. :func:`reconciliation` computes it.
+137,765,732d of securities cash, 25,548,173d of deposit and a basket marked at
+393,885,000d is a change of **-42,801,095d**, and it decomposes exactly: the
+equity round-trips net against the marked basket, the two futures close-outs
+realise -49,240,000d, the W1 daily variation settlements move -3,080,000d, and
+charges take 2,560,008d on the equity side and 266,087d on the deposit. Nothing
+is left over. :func:`reconciliation` computes it, now including the
+variation-settlement leg.
 
 WHAT THIS SCENARIO FOUND
 ------------------------
 
-Two fixed, nine open. :func:`findings` returns all eleven as data so a report
-cannot quietly drop them. The last two are the answer to "is anything silently
+Four fixed, seven open. :func:`findings` returns all eleven as data so a report
+cannot quietly drop them (PT-7 and PT-8 joined PT-1/PT-2 as fixed when MUST #3
+and W1 landed). The last two are the answer to "is anything silently
 zero, skipped or defaulted": a ledger identity that passes because it found
 nothing to check, and a charge schedule row that is never levied.
 
@@ -229,39 +231,39 @@ nothing to check, and a charge schedule row that is never levied.
 6. **OPEN -- the 09:30 margin mark uses the same session's close.** On a daily
    run the whole day's bar is the interval, which ``_interval_for`` declares,
    so the mark taken at the 09:30 step is the 14:45 price. The 2022-10-27
-   ``margin_warning`` at 0.8670 is computed from that session's 1025.0 close,
+   ``margin_warning`` at 0.8777 is computed from that session's 1025.0 close,
    which at 09:30 nobody had seen. Not a defect in the margin model -- a
    declared consequence of the resolution -- but a margin event timestamped
    09:30 is not an intraday event and a report must not present it as one.
 
-7. **OPEN -- ``FORCED_LIQUIDATION`` reports and does not execute.** Every one
-   of the six forced events in this run carries ``detail['executed'] = False``,
-   so nothing is closed, the breach persists and the event repeats at each
-   mark. The account is still short 4 contracts at expiry and settles them in
-   cash. A scenario counting forced closes must count *distinct sessions*, not
-   events.
+7. **RESOLVED (MUST #3 forced-execute) -- ``FORCED_LIQUIDATION`` now
+   executes.** The forced close runs a real offsetting order through the order
+   path: two events on 2022-11-14, the 09:30 report (``executed`` False, the
+   fill has not landed yet) and the 14:45 fill (``executed`` True, VN30F2211
+   closed). The book is flat afterwards -- not still short 4 contracts -- and
+   there is no expiry settlement, because the leg is offset before it can
+   mature.
 
-8. **OPEN -- variation margin never settles in cash and the VM baseline never
-   rolls.** ``DerivativesAccount.settle_daily`` exists and has no session call
-   site, so the deposit balance is flat between fills -- 61,935,267d on every
-   one of the six sessions of the second leg -- and ``VM`` is measured from the
-   **entry** price, not from yesterday's settlement. The whole 23,880,000d loss
-   arrives in one movement at expiry. Any replay that debits VM T+1 will not
-   match this simulator, and the utilisations in the table above are only right
-   under the no-cash-VM convention.
+8. **RESOLVED (W1 daily cash settlement) -- variation margin settles in cash
+   and the VM baseline rolls.** ``DerivativesAccount.settle_daily`` is now wired
+   into the overnight layer, so the deposit moves each session the mark moves --
+   the second leg walks 61,935,267 -> 51,855,267 -> 25,548,173 -- and ``VM`` is
+   measured from yesterday's settlement, not from entry. The loss arrives day by
+   day as ``VARIATION_SETTLEMENT`` movements plus the realised close-out, not in
+   one lump. A replay that debits VM T+1 now matches this simulator.
 
 9. **OPEN -- the published final settlement price is in the corpus and the
-   session did not use it.** The expiry event reports
-   ``settlement_source='close_proxy'``, ``substituted=True``, and settles at
-   the futures close **972.5**. ``quote_settlementprice.parquet`` carries
-   ``VN30INDEX`` for 2022-08-17 to 2022-12-15, 180 ticks running 14:15:01 to
-   14:45:12 on 2022-11-17, and its last tick -- the published VSD final
-   settlement price -- is **972.78**. On this short position that is
-   0.28 x 4 x 100,000 = **112,000d of settlement loss the run did not book**.
-   The tier is declared rather than hidden, and ``price_basis`` even quantifies
-   the proxy error over 46 expiries, so this is a data-plumbing gap
-   (``DataHubSource`` has no settlement-price reader) and not a lie -- but the
-   oracle was on disk.
+   session cannot read it.** On a run that survives to expiry the exit reports
+   ``settlement_source='close_proxy'``, ``substituted=True``, and settles at the
+   futures close rather than the published VSD price.
+   ``quote_settlementprice.parquet`` carries ``VN30INDEX`` for 2022-08-17 to
+   2022-12-15, and on 2022-11-17 its last tick -- the published final settlement
+   price -- is **972.78** against the 972.5 close, ``0.28 x 4 x 100,000 =
+   112,000d`` on this short. On *this* run the gap is not even incurred: MUST #3
+   force-closes the leg on 2022-11-14, three sessions before expiry, so the
+   proxy is never struck. It is a data-plumbing gap (``DataHubSource`` has no
+   settlement-price reader) that a held-to-maturity run would hit -- the oracle
+   is on disk.
 
 10. **OPEN -- one of the nine ledger identities passes on this run because it
     found nothing to check.** ``deposit_segregation`` joins ``session.charges``
@@ -936,10 +938,13 @@ def reconciliation(result: ScenarioResult, scenario: Scenario,
                    closing_marks: Mapping[str, Decimal]) -> Dict[str, Decimal]:
     """Every dong, twice: the balance change and its decomposition.
 
-    ``residual`` is the whole point. It is the balance change less the four
-    things that could have caused one -- equity consideration, realised
-    derivatives P&L, final settlement, and charges -- and it must be exactly
-    zero. Anything else means a movement happened that no log row explains.
+    ``residual`` is the whole point. It is the balance change less the things
+    that could have caused one -- equity consideration, realised derivatives
+    P&L, the W1 daily variation settlement, final settlement, and charges -- and
+    it must be exactly zero. Anything else means a movement happened that no log
+    row explains. The ``VARIATION_SETTLEMENT`` term is the one W1 added: the
+    deposit now moves each session by the day's mark, and leaving it out is a
+    residual of exactly the net daily settlement.
 
     ``closing_marks`` is supplied by the caller because the *session* does not
     mark equity: ``Holding`` carries quantity, never value, and Plutus computes
@@ -973,13 +978,15 @@ def reconciliation(result: ScenarioResult, scenario: Scenario,
     proceeds_gross = proceeds_net + withheld
     equity_charges = withheld + debited
     realised = _movement(cash, 'derivatives', CashMovement.REALISED_PNL)
+    variation = _movement(cash, 'derivatives',
+                          CashMovement.VARIATION_SETTLEMENT)
     expiry = _movement(cash, 'derivatives', CashMovement.EXPIRY_SETTLEMENT)
     deposit_charges = -_movement(cash, 'derivatives',
                                  CashMovement.CHARGE_DEBITED)
 
     change = closing_cash + closing_deposit + holdings_value - opening
-    explained = (proceeds_gross - buys + holdings_value + realised + expiry
-                 - equity_charges - deposit_charges)
+    explained = (proceeds_gross - buys + holdings_value + realised + variation
+                 + expiry - equity_charges - deposit_charges)
     return {
         'opening': opening,
         'closing_cash': closing_cash,
@@ -993,6 +1000,7 @@ def reconciliation(result: ScenarioResult, scenario: Scenario,
         'equity_charges_debited': debited,
         'equity_charges': equity_charges,
         'derivatives_realised': realised,
+        'derivatives_variation': variation,
         'derivatives_expiry': expiry,
         'derivatives_charges': deposit_charges,
         'explained': explained,
@@ -1038,22 +1046,31 @@ def independent_requirement(marks: Sequence[Tuple[date, Decimal]], *,
                             call: Decimal = _D('0.90'),
                             forced: Decimal = _D('1.00'),
                             ) -> Tuple[Dict[str, Any], ...]:
-    """The ladder recomputed from the rulebook, without touching ``deposit.py``.
+    """The close-step ladder recomputed from the rulebook, without touching
+    ``deposit.py`` -- now with W1 daily cash settlement modelled here too.
 
-    ``IM = rate x |net| x multiplier x price``; ``VM = max(0, -P&L)`` measured
-    **from the entry price**, because the variation-margin baseline is only
-    moved by ``settle_daily`` and that has no session call site (finding 8);
-    ``MR = IM + VM``; ``utilisation = MR / deposit``. A test that asserted the
-    session's numbers against the session's own function would prove nothing.
+    ``IM = rate x |net| x multiplier x price``. Under W1 ``settle_daily`` is
+    wired into the overnight layer, so at each session's close the day's P&L
+    (the mark against the *rolling* variation reference) has been paid in cash
+    and the reference has rolled to the mark: the close therefore carries
+    ``VM == 0`` and ``MR == IM``. The deposit moves by the settled P&L each
+    session, and ``utilisation = MR / deposit``. This rolls the reference and
+    the balance by hand, so a test that asserted the session's numbers against
+    the session's own function proves nothing.
     """
     out: List[Dict[str, Any]] = []
     quantity = Decimal(abs(net_contracts))
+    reference = entry_price
+    balance = deposit
     for day, price in marks:
+        # The close-step settlement: pay the day's move in cash, roll the
+        # reference, and the carried VM is zero.
+        balance += Decimal(net_contracts) * multiplier * (price - reference)
+        reference = price
         initial = rate * quantity * multiplier * price
-        pnl = Decimal(net_contracts) * multiplier * (price - entry_price)
-        variation = -pnl if pnl < _ZERO else _ZERO
+        variation = _ZERO
         required = initial + variation
-        utilisation = required / deposit if deposit > _ZERO else None
+        utilisation = required / balance if balance > _ZERO else None
         if utilisation is None:
             status = 'ok'
         elif utilisation >= forced:
@@ -1066,6 +1083,7 @@ def independent_requirement(marks: Sequence[Tuple[date, Decimal]], *,
             status = 'ok'
         out.append({'day': day, 'mark': price, 'initial_margin': initial,
                     'variation_margin': variation, 'required': required,
+                    'deposit_balance': balance,
                     'utilisation': utilisation, 'status': status})
     return tuple(out)
 
@@ -1164,39 +1182,44 @@ def findings() -> Tuple[Dict[str, Any], ...]:
                      '1025.0, which is that session\'s close',
          'fix': None,
          'regression': 'ladder'},
-        {'id': 'PT-7', 'status': 'open', 'severity': 'high',
-         'where': 'src/plutus/market/session/exchange.py _mark_derivatives',
-         'what': 'FORCED_LIQUIDATION reports and does not execute, so the '
-                 'breach persists and the event repeats at every mark',
-         'evidence': "six forced_liquidation events in the main run, every "
-                     "one detail['executed'] is False; the account is still "
-                     'short 4 contracts at the 2022-11-17 expiry and settles '
-                     'them in cash',
-         'fix': None,
+        {'id': 'PT-7', 'status': 'fixed', 'severity': 'high',
+         'where': 'src/plutus/market/session/exchange.py FORCED_LIQUIDATION '
+                  '(MUST #3, 2026-08-27)',
+         'what': 'FORCED_LIQUIDATION now executes a real offsetting order '
+                 'through the order path rather than only reporting',
+         'evidence': "two forced_liquidation events on 2022-11-14 in the main "
+                     "run -- 09:30 detail['executed'] False (the fill has not "
+                     "landed), 14:45 True with VN30F2211 closed Accepted -- and "
+                     'the book is flat afterwards, so there is no expiry '
+                     'settlement',
+         'fix': 'the close runs an offsetting order through band, tick and lot; '
+                'a locked book refuses it and the position rides, but here it '
+                'fills',
          'regression': 'ladder'},
-        {'id': 'PT-8', 'status': 'open', 'severity': 'high',
-         'where': 'src/plutus/market/session/deposit.py settle_daily, no call '
-                  'site',
-         'what': 'variation margin never settles in cash and the VM baseline '
-                 'never rolls, so the deposit is flat between fills and VM '
-                 'accrues from the entry price rather than from yesterday\'s '
-                 'settlement',
-         'evidence': 'deposit 61,935,267d on all six sessions of the second '
-                     'leg while utilisation went 0.7664 -> 1.2021; the whole '
-                     '23,880,000d loss arrives as one movement at expiry',
-         'fix': None,
+        {'id': 'PT-8', 'status': 'fixed', 'severity': 'high',
+         'where': 'src/plutus/market/session/exchange._overnight_margin, '
+                  'deposit.py settle_daily (W1)',
+         'what': 'variation margin settles in cash daily and the VM baseline '
+                 'rolls, so the deposit moves with the mark and VM accrues from '
+                 "yesterday's settlement rather than from entry",
+         'evidence': 'the second leg deposit walks 61,935,267 -> 51,855,267 -> '
+                     '25,548,173 as the mark settles and the forced close '
+                     'realises the residual; the loss arrives day by day, not '
+                     'as one movement at expiry',
+         'fix': 'settle_daily is wired into the overnight layer and settles the '
+                "day's position P&L to cash once per settlement day",
          'regression': 'ladder'},
         {'id': 'PT-9', 'status': 'open', 'severity': 'medium',
          'where': 'src/plutus/market/adapters/datahub.py, no settlement-price '
                   'reader',
          'what': 'the published final settlement price is in this corpus and '
-                 'the session settled on the close proxy instead',
+                 'the session cannot read it, settling on the close proxy '
+                 'instead where a run survives to expiry',
          'evidence': 'quote_settlementprice.parquet carries VN30INDEX for '
-                     '2022-08-17..2022-12-15; 180 ticks on 2022-11-17 running '
-                     '14:15:01..14:45:12 and the last is 972.78. The run '
-                     'settled at the futures close 972.5, reported as '
-                     'settlement_source=close_proxy with substituted=True: '
-                     '0.28 x 4 x 100,000 = 112,000d of loss not booked',
+                     '2022-08-17..2022-12-15; the last 2022-11-17 tick is '
+                     '972.78 against the 972.5 close, 0.28 x 4 x 100,000 = '
+                     '112,000d. On this run the gap is not even incurred: '
+                     'MUST #3 force-closes the leg on 2022-11-14, before expiry',
          'fix': None,
          'regression': 'PUBLISHED_FINAL_SETTLEMENT'},
         {'id': 'PT-10', 'status': 'open', 'severity': 'medium',

@@ -221,6 +221,7 @@ class CashMovement(str, Enum):
     ADVANCE_REPAID = 'advance_repaid'
     ADVANCE_INTEREST_ACCRUED = 'advance_interest_accrued'
     REALISED_PNL = 'realised_pnl'
+    VARIATION_SETTLEMENT = 'variation_settlement'
     EXPIRY_SETTLEMENT = 'expiry_settlement'
     OTHER_CREDIT = 'other_credit'
     OTHER_DEBIT = 'other_debit'

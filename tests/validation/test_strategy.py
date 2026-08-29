@@ -81,8 +81,11 @@ class Refuser(BaseStrategy):
         if ctx.today != D1:
             return
         ack = ctx.buy('FPT', 1000, limit_price=Decimal('90.0'))
-        # An amend that raises the quantity is refused by design.
-        self.amend_refusal = ctx.amend(ack.order_id, quantity=2000)
+        # MUST #2 amend re-runs admission, so raising the quantity is no longer
+        # refused by design -- it is admitted when it funds. A refusal now comes
+        # from a rule the re-admission newly violates: reducing to 50 lands on
+        # an odd lot (ROUND_LOT). That refusal still never reaches the cursor.
+        self.amend_refusal = ctx.amend(ack.order_id, quantity=50)
         # The deposit is empty, so a transfer out of it is refused.
         self.transfer_refusal = ctx.transfer(
             Pool.DERIVATIVES, Pool.SECURITIES, Decimal('1'))
@@ -93,7 +96,10 @@ def test_refusals_that_never_reach_the_cursor_are_still_logged():
 
     The context captures them from the return value, which is the only place
     they exist. A trade log built from the event stream alone would show an
-    order that was never amended and no reason why.
+    order that was never amended and no reason why. Under MUST #2 the amend
+    path re-runs admission, so the refusal here is a re-admission refusal
+    (ROUND_LOT) rather than the old blanket amend-up refusal -- still off the
+    cursor, still captured off the return value.
     """
     strategy = Refuser()
     result = run_scenario(stub_scenario(strategy, days=DAYS[:2]))

@@ -39,14 +39,17 @@ about most, and it is where this simulator's declared boundaries bite:
   On this pre-KRX window that model is the continuous ``MR = IM + VM`` on the
   held book, because the regime has no separate end-of-day model to select --
   :func:`run_flat_versus_overnight` measures that. Past the cutover it is QD
-  26 Phu luc 2's 21-scenario grid, and
-  :func:`run_post_krx_overnight_layer` measures a **49,800,000d** gap between
-  the two layers on one 2-lot position;
-* the *cash* the requirement stands for never moves. ``settle_daily`` has no
-  session call site (FEATURES.md D1), so ``VM`` is the cumulative
-  since-entry loss rather than the day's, and the whole of it arrives in one
-  movement at the close-out. :func:`run_variation_settlement_trail` measures
-  the gap in dong per day;
+  26 Phu luc 2's 21-scenario grid, and (resolved, W1)
+  :func:`run_post_krx_overnight_layer` shows the two layers now **coincide** on
+  one 2-lot position: settling the VM in cash makes the continuous ``IM + VM``
+  view carry ``VM == 0`` at the close, so it equals the grid and the old
+  49,800,000d gap is settled rather than carried;
+* the *cash* the requirement stands for now moves (resolved, W1).
+  ``settle_daily`` is wired into the overnight layer, so ``VM`` is settled to
+  cash each session and the baseline rolls -- the deposit steps with the mark
+  rather than carrying the whole loss to the close-out.
+  :func:`run_variation_settlement_trail` measures the daily settlements (18,
+  plus the expiry residual);
 * the *deadline* to answer a call is the **next session's open**, resolved
   through a trading calendar that this repository ships no data for. Over
   Tet 2022 the shipped weekday-only default puts it on 2022-01-31, a day the
@@ -549,9 +552,10 @@ def margin_events(result: ScenarioResult,
                   kind: Optional[EventKind] = None) -> Tuple[Any, ...]:
     """The margin events, optionally of one kind.
 
-    ``FORCED_LIQUIDATION`` reports and does not execute
-    (``detail['executed'] is False``), so a breached account stays breached
-    and the event repeats at **every** mark. Count distinct sessions, not
+    Resolved (MUST #3): ``FORCED_LIQUIDATION`` now executes an offsetting order,
+    so the fill carries ``detail['executed'] is True`` and the position closes
+    where liquidity admits it. It can still repeat while the offsetting order is
+    refused (a locked or inverted-band book), so count distinct sessions, not
     events.
     """
     kinds = {EventKind.MARGIN_WARNING, EventKind.MARGIN_CALL,
@@ -776,9 +780,12 @@ def run_overnight_across_tet(*, source: Any = None, lots: int = 6,
     * the front month gaps 1130.3 -> 1176.6 across it, **+46.3 points**, which
       at 100,000 VND a point is 4,630,000 VND a contract arriving in a single
       mark;
-    * six lots at this size go to ``FORCED`` on 2021-02-08 and stay in breach
-      for the rest of the window, and **the deposit balance does not move by
-      one dong** while they do.
+    * six lots at this size go to ``FORCED`` on 2021-02-08, and (resolved, W1)
+      **the deposit now steps with each session's variation settlement** rather
+      than sitting still: 99,939,344 -> 71,199,344 -> 94,179,344 through the
+      breach. MUST #3 tries to close them each session; the inverted band
+      (below) refuses the offsetting order until the 2021-02-17 reopen, where it
+      finally fills and the book goes flat -- so they never reach expiry.
 
     A second, unlooked-for finding is recorded rather than worked around: the
     corpus publishes ``ceiling < floor`` for VN30F2102 on **2021-02-08** and
@@ -861,22 +868,23 @@ def run_variation_settlement_trail(*, source: Any = None, lots: int = 1,
     close-to-close move on 2022-11-16 alone of **+62.6 points = 6,260,000
     VND**. What ``deposit_balance`` does over those 20 sessions is the answer.
 
-    The two designs this distinguishes:
+    The two designs this distinguishes -- and which one the simulator does is
+    now settled (W1):
 
     * **T+1 cash settlement**, which is what VSDC does (Phu luc 7 section C.I:
-      report by 16h50, cash on T+1) and what every Vietnamese broker's
-      statement shows -- the balance moves every session by the day's mark;
-    * **carry the loss in the requirement**, which is what
-      ``DerivativesAccount`` declares in its own class docstring ("the deposit
-      does not accumulate mark-to-market ... Tier 1 does not model" the T+1
-      leg) and what ``settle_daily`` having no session call site produces
-      (FEATURES.md D1, A60).
+      report by 16h50, cash on T+1), what every Vietnamese broker's statement
+      shows, and **what this simulator now does**: the balance moves every
+      session by the day's mark, via ``settle_daily`` wired into the overnight
+      layer;
+    * **carry the loss in the requirement**, the *old* behaviour --
+      ``settle_daily`` having no session call site left ``VM`` as the cumulative
+      since-entry loss on a deposit that never moved.
 
-    Under the second, ``VM`` is the **cumulative since-entry** loss rather
-    than the day's, because ``variation_reference`` never advances past
-    ``average_entry``. The two are internally consistent -- an account that
-    never pays must carry the whole loss in ``MR`` -- but they are not the
-    same account statement, and the difference is this scenario's output.
+    Resolved: ``VM`` is now the **day's** move, because ``variation_reference``
+    rolls to each session's settlement price, and the deposit steps in cash. The
+    two total to the same P&L -- this was never a conservation break -- but they
+    settle it at different times, and the scenario now measures the eighteen
+    daily settlements plus the expiry residual reconciling to the mark trail.
     """
     src = source if source is not None else datahub_source()
     window = replace(EXPIRY_2022, name='variation-trail-2022',

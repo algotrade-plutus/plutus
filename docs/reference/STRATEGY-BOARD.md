@@ -18,7 +18,7 @@ fix the simulator, never the strategy.**
 
 | # | Strategy | Emergent stress | Folds in | T1 | T2 | Library pressure |
 |---|---|---|---|:--:|:--:|---|
-| **S1** | VN30F front-month mean-reversion | over-levers into a trend → call → forced liquidation | J3 J13* J18 J24 J26 · J6 next | ✅ | ✅ | passed on the existing library |
+| **S1** | VN30F front-month mean-reversion | over-levers into a trend → daily cash settlement depletes the deposit past the call rung → forced liquidation (no intermediate call) | J3 J13* J18 J24 J26 · J6 next | ✅ | ✅ | passed on the existing library |
 | **S2** | Leveraged equity momentum | stop can't clear a limit-down lock → mmr breach → forced sale | J5 J11 J24 · J1 J16 impl · J2 next | ✅ | ✅ | passed on the existing library |
 | **S3** | VN30 basket vs future (index-arb) | carried across a constituent ex-date; two pools at once | J4 J8 J23 · J9 J17 J22 next | ✅ | ✅ | **BUILT** `apply_corporate_action` |
 | **S4** | Auction market-on-close rebalancer | ATO@open, ATC@close, through the session; 0 continuous fills | J7 J14 · J12 next | ✅ | ✅ | **BUILT** `AuctionAwareDataHubSource` |
@@ -30,7 +30,7 @@ Every one of the 27 scenarios is folded into ≥1 strategy (matrix in the design
 
 ## Build order (by importance to users)
 1. **Harness** (`_harness.py`) — Strategy protocol + `run()` day-loop + `RunLedger`/conservation.
-2. **S1** — the crown jewel; the full derivatives margin lifecycle, emergent. Also the MUST #4 forcing function.
+2. **S1** — the crown jewel; the full derivatives margin lifecycle, emergent. It was the MUST #4 forcing function, and **that build has landed** (2026-08-29): under daily cash settlement S1 now reaches a forced close directly, the call rung jumped.
 3. **S2** · 4. **S5** · 5. **S3** · 6. **S7** · 7. **S4** (expects the auction build) · 8. **S6**.
 
 ## Status log
@@ -48,8 +48,13 @@ Every one of the 27 scenarios is folded into ≥1 strategy (matrix in the design
   the fidelity lesson S1 exists to teach, not a library defect.
   * `J13*` — the market-order *take* is exercised; the multi-level book *sweep* is S7's job (no book
     depth on daily bars). `J6` (the front-month roll) is S1's next movement, not yet built.
-  * Deeper conservation (VM settling in cash daily, MUST #4) remains a refinement; S1's Tier-2
-    conservation check (deposit never impossible, drawdown real) holds.
+  * Deeper conservation — VM settling in cash daily, **MUST #4** — was a refinement then and
+    **has since landed (2026-08-29)**: `settle_daily` is wired into `exchange._overnight_margin`,
+    so the deposit now moves by realised P&L every settlement day. Under it, S1 no longer takes
+    the Oct-7 second call shown above — the daily cash depletion carries utilisation **straight
+    past the call rung to a forced close** (deposit.py's MarginMonitor: "a jump straight past the
+    call level reports FORCED without inventing an intermediate call"). S1 stays GREEN. S1's
+    Tier-2 conservation check (deposit never impossible, drawdown real) holds.
 - **2026-08-28** — **S2 Tier 2 GREEN**, again **on the existing library**. A leveraged (1.8:1)
   momentum strategy on DIG (HSX) using the real `EquityMarginAccount`: the breakout signal drew a
   loan, DIG's −71% slide eroded the maintenance ratio, **10 margin calls** issued, and the broker

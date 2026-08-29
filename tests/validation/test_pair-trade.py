@@ -148,8 +148,10 @@ def test_each_leg_routes_to_its_own_venue_and_its_own_pool(result):
 
     futures = by_venue['HNXDS']
     assert futures['pools'] == ('derivatives',)
-    assert futures['fills'] == 3                  # open, close, re-open
-    assert futures['quantity'] == 3 * pair.CONTRACTS
+    # open, close, re-open, and the MUST #3 forced close that now executes an
+    # offsetting order through the order path.
+    assert futures['fills'] == 4
+    assert futures['quantity'] == 4 * pair.CONTRACTS
     assert futures['tickers'] == (pair.FUTURE,)
 
 
@@ -283,13 +285,15 @@ def test_the_two_venues_are_charged_on_different_bases(scenario):
     assert abs(total - _D('0.0015') * turnover) <= _D('15')
 
     # -- HNXDS: two flat per-contract fees and one notional tax -------------
-    novated = 3 * pair.CONTRACTS                  # 12 matched contracts
+    # Four fills now, not three: MUST #3's forced close executes an offsetting
+    # fill (2022-11-14 @ 1003.6) where the position used to mature.
+    novated = 4 * pair.CONTRACTS                  # 16 matched contracts
     assert got[('exchange_service_index_future', 'HNXDS', 'derivatives',
-                'per_contract')] == (3, _D('2700') * novated)
+                'per_contract')] == (4, _D('2700') * novated)
     assert got[('vsdc_derivatives_clearing', 'HNXDS', 'derivatives',
-                'per_contract')] == (3, _D('2550') * novated)
+                'per_contract')] == (4, _D('2550') * novated)
     assert got[('broker.commission.hnxds', 'HNXDS', 'derivatives',
-                'per_contract')] == (3, _D('5000') * novated)
+                'per_contract')] == (4, _D('5000') * novated)
 
     # The derivatives PIT is 0.0005 x the VSD initial margin ratio of the
     # notional, and the ratio is 0.13 until 2022-12-15 -- so 0.000065 here,
@@ -298,12 +302,13 @@ def test_the_two_venues_are_charged_on_different_bases(scenario):
     assert rate == _D('0.000065')
     count, total = got[('pit_derivatives_transfer', 'HNXDS', 'derivatives',
                         'trade_value')]
-    assert count == 4                             # 3 fills plus the maturity
+    assert count == 4                             # the four fills
+    # The fourth price is the forced-close fill, not the close-proxy maturity:
+    # the position is offset before it can mature (MUST #3).
     expected = sum(
         (rate * _D(pair.CONTRACTS) * pair.MULTIPLIER * price).quantize(_D('1'))
-        for price in (_D('985.0'), _D('1025.0'), _D('912.8'),
-                      pair.CLOSE_PROXY_SETTLEMENT))
-    assert total == expected == _D('101278')
+        for price in (_D('985.0'), _D('1025.0'), _D('912.8'), _D('1003.6')))
+    assert total == expected == _D('102087')
 
     # No charge in the Vietnamese schedule carried here bills VAT to the
     # investor, so amount and total agree everywhere.
@@ -337,9 +342,11 @@ def test_the_derivatives_pool_now_has_an_itemised_fee_statement(result):
     """
     statement = pair.derivatives_fee_statement(result)
     kinds = [kind for _, kind, _ in statement]
-    assert kinds.count('exchange_service_index_future') == 3
-    assert kinds.count('vsdc_derivatives_clearing') == 3
-    assert kinds.count('broker.commission.hnxds') == 3
+    # Four fills now (MUST #3 forced close), so each per-contract fee is levied
+    # four times where it used to be three.
+    assert kinds.count('exchange_service_index_future') == 4
+    assert kinds.count('vsdc_derivatives_clearing') == 4
+    assert kinds.count('broker.commission.hnxds') == 4
     assert kinds.count('pit_derivatives_transfer') == 4
     assert '' not in kinds                        # every row names its levy
 
@@ -421,8 +428,10 @@ def test_the_deposit_only_ever_moved_through_explicit_transfers(result,
     Every dong that reached it is a ``TRANSFER_IN`` row with a matching
     ``TRANSFER_OUT`` on the securities side at the same instant, and the only
     other things that moved it are this account's own fills, charges and
-    settlement. There is no path from securities cash to the deposit that is
-    not ``ExchangeSession.transfer``.
+    settlement -- which under W1 now includes a ``VARIATION_SETTLEMENT`` every
+    session the mark moves, where the deposit used to move only at close-out
+    and expiry. There is still no path from securities cash to the deposit that
+    is not ``ExchangeSession.transfer``.
     """
     cash = result.logs.cash
     assert cash.by_movement('derivatives')[CashMovement.OPENING_BALANCE] == 0
@@ -440,24 +449,27 @@ def test_the_deposit_only_ever_moved_through_explicit_transfers(result,
         assert partner[0].amount == -entry.amount
 
     moved = {m for m in cash.by_movement('derivatives')}
+    # W1 adds VARIATION_SETTLEMENT; MUST #3 force-closes before expiry, so the
+    # deposit no longer carries an EXPIRY_SETTLEMENT on this run.
     assert moved == {CashMovement.OPENING_BALANCE, CashMovement.TRANSFER_IN,
                      CashMovement.TRANSFER_OUT, CashMovement.CHARGE_DEBITED,
                      CashMovement.REALISED_PNL,
-                     CashMovement.EXPIRY_SETTLEMENT}
+                     CashMovement.VARIATION_SETTLEMENT}
 
 
 def test_a_futures_margin_call_never_touches_equity_cash(result):
-    """The forced sessions and the securities balance, side by side.
+    """The forced session and the securities balance, side by side.
 
-    On 2022-11-16 the deposit is in breach at 1.0933 utilisation while
+    On 2022-11-14 the deposit is in breach at 0.9346 utilisation while
     137,765,732d of settled securities cash and 27,000 shares sit one pool
-    away. Neither moves, and no cash-log row on any breach date touches the
-    securities pool.
+    away. MUST #3 force-closes the futures leg out of the *deposit* alone; the
+    securities pool does not move, and no cash-log row on the breach date
+    touches it. (There is only one breach day now: the forced close executes
+    and takes the book flat, so no further sessions breach.)
     """
     breached = [step for step in pair.ladder(result)
                 if 'forced_liquidation' in step.events]
-    assert [step.day for step in breached] == [
-        date(2022, 11, 14), date(2022, 11, 16), date(2022, 11, 17)]
+    assert [step.day for step in breached] == [date(2022, 11, 14)]
     assert {step.securities_cash for step in breached} == {_D('137765732.00')}
 
     days = {step.day for step in breached}
@@ -495,57 +507,48 @@ def test_the_deposit_can_be_swept_back_but_only_within_the_withdrawal_bound(
 # --------------------------------------------------------------------------
 
 def test_the_ladder_reproduces_from_the_rulebook_not_from_deposit_py(result):
-    """Finding PT-8 is baked in here, deliberately.
+    """Finding PT-8, resolved (W1 daily cash settlement).
 
-    ``VM`` is recomputed **from the entry price**, because
-    ``DerivativesAccount.settle_daily`` has no session call site and the
-    variation-margin baseline therefore never rolls. If a future change wires
-    daily settlement in, this test fails -- which is the correct outcome, not
-    a nuisance: the ladder below is only right under the no-cash-VM
-    convention.
+    The independent reproduction now rolls the variation baseline and settles
+    the day's P&L to cash exactly as the session does, because W1 wired
+    ``settle_daily`` into the overnight layer. At each close ``VM`` has settled
+    to zero, ``MR == IM``, and the deposit has stepped by the day's mark. Only
+    the two live-position sessions have a close-step ladder to reproduce --
+    MUST #3 force-closes the leg on 2022-11-14 -- and the forced event is
+    reproduced from its own 09:30 mark.
     """
     marks = [(date(2022, 11, 10), _D('912.8')),
-             (date(2022, 11, 11), _D('938.0')),
-             (date(2022, 11, 14), _D('932.0')),
-             (date(2022, 11, 15), _D('895.0')),
-             (date(2022, 11, 16), _D('957.6')),
-             (date(2022, 11, 17), _D('972.5'))]
-    deposit = _D('61935267.0')
+             (date(2022, 11, 11), _D('938.0'))]
+    deposit = _D('61935267.0')                    # the 2022-11-10 close balance
     expected = pair.independent_requirement(
         marks, net_contracts=-pair.CONTRACTS, entry_price=_D('912.8'),
         deposit=deposit)
 
     by_day = {step.day: step for step in pair.ladder(result)}
     for row in expected:
-        if row['day'] == pair.WINDOW_END:
-            # The close step of the expiry session is *after* the cash
-            # settlement, so the contract ledger is empty and the deposit has
-            # already been debited. The last mark that has a position behind
-            # it is the 09:30 one, and it is the forced event that carries it.
-            continue
         step = by_day[row['day']]
-        assert step.deposit_balance == deposit, row['day']
+        assert step.deposit_balance == row['deposit_balance'], row['day']
         assert step.initial_margin == row['initial_margin'], row['day']
-        assert step.variation_margin == row['variation_margin'], row['day']
+        assert step.variation_margin == row['variation_margin'] == 0, row['day']
         assert step.required == row['required'], row['day']
 
-    expiry_mark = [e for e in result.logs.events
-                   if e.kind.value == 'forced_liquidation'
-                   and e.ts == datetime(2022, 11, 17, 9, 30)][0]
-    final = expected[-1]
-    assert expiry_mark.detail['initial_margin'] == final['initial_margin']
-    assert expiry_mark.detail['variation_margin'] == final['variation_margin']
-    assert expiry_mark.detail['utilisation'] == final['utilisation']
+    # The forced event carries its own 09:30 mark (932.0), reproduced from the
+    # rulebook: IM alone (VM settled), against the 2022-11-11 close balance.
+    forced = [e for e in result.logs.events
+              if e.kind.value == 'forced_liquidation'
+              and e.ts == datetime(2022, 11, 14, 9, 30)][0]
+    im_forced = pair.IM_RATE * pair.CONTRACTS * pair.MULTIPLIER * _D('932.0')
+    assert forced.detail['initial_margin'] == im_forced == _D('48464000.000')
+    assert forced.detail['variation_margin'] == 0
+    assert forced.detail['utilisation'] == im_forced / _D('51855267.0')
 
     # And the rungs the run actually reported, spelled out.
     assert [(row['day'], row['status']) for row in expected] == [
         (date(2022, 11, 10), 'ok'),
         (date(2022, 11, 11), 'call'),
-        (date(2022, 11, 14), 'call'),
-        (date(2022, 11, 15), 'ok'),
-        (date(2022, 11, 16), 'forced'),
-        (date(2022, 11, 17), 'forced'),
     ]
+    assert by_day[date(2022, 11, 14)].events == (
+        'forced_liquidation', 'forced_liquidation')
 
 
 def test_the_call_fires_on_the_day_the_rung_is_crossed_and_names_a_deadline(
@@ -567,45 +570,50 @@ def test_the_call_fires_on_the_day_the_rung_is_crossed_and_names_a_deadline(
 
 
 def test_an_unanswered_call_escalates_on_the_deadline_not_on_the_rung(result):
-    """2022-11-14 is a forced close at 0.9065 -- on the *call* rung.
+    """2022-11-14 is a forced close at 0.9346 -- on the *call* rung, not the
+    forced one.
 
-    Both escalation paths appear in this one window: the 2022-11-14 event is
-    the 2022-11-11 call going past its deadline unanswered, and the
-    2022-11-16 event is utilisation reaching the forced rung outright.
+    The 2022-11-11 call went past its cure deadline (2022-11-14 08:45)
+    unanswered, so the first mark of 2022-11-14 escalates to FORCED even though
+    utilisation is only 0.9346, below the 1.00 forced rung. MUST #3 then
+    executes the close, so this is the *only* forced session: the 'utilisation
+    reaches the forced rung outright' path no longer appears in this window,
+    because the book is flat before a mark could reach it.
     """
     forced = [e for e in result.logs.events
               if e.kind.value == 'forced_liquidation']
     days = sorted({e.ts.date() for e in forced})
-    assert days == [date(2022, 11, 14), date(2022, 11, 16),
-                    date(2022, 11, 17)]
+    assert days == [date(2022, 11, 14)]
 
-    deadline = [e for e in forced if e.ts.date() == date(2022, 11, 14)][0]
-    assert deadline.ts == datetime(2022, 11, 14, 9, 30)
+    deadline = [e for e in forced if e.ts == datetime(2022, 11, 14, 9, 30)][0]
     assert deadline.detail['cure_by'] == datetime(2022, 11, 14, 8, 45)
-    assert deadline.detail['utilisation'] < _D('0.91')       # the call rung
-
-    rung = [e for e in forced if e.ts.date() == date(2022, 11, 16)][0]
-    assert rung.detail['utilisation'] > _D('1.00')
-    assert rung.detail['cure_by'] is None
+    # On the call rung, escalated by the elapsed deadline -- not by the mark
+    # reaching the forced rung.
+    assert _D('0.90') <= deadline.detail['utilisation'] < _D('1.00')
 
 
-def test_the_forced_close_reports_and_does_not_execute(result, scenario):
-    """Finding PT-7, pinned.
+def test_the_forced_close_reports_and_executes(result, scenario):
+    """Finding PT-7, resolved (MUST #3 forced-execute, 2026-08-27).
 
-    Six events, none of them executed, and the position is still short four
-    contracts when the contract expires. A report counting forced closes must
-    count distinct sessions, not events.
+    The forced close now runs an offsetting order through the order path. Two
+    events on 2022-11-14, one session: the 09:30 report (``executed`` False --
+    the offsetting fill has not landed yet) and the 14:45 fill (``executed``
+    True, VN30F2211 closed ``Accepted``). The book is flat afterwards rather
+    than still short four contracts, and there is no expiry settlement because
+    the leg is offset before it can mature.
     """
     forced = [e for e in result.logs.events
               if e.kind.value == 'forced_liquidation']
-    assert len(forced) == 6
-    assert len({e.ts.date() for e in forced}) == 3
-    assert all(e.detail['executed'] is False for e in forced)
+    assert len(forced) == 2
+    assert len({e.ts.date() for e in forced}) == 1
+    assert any(e.detail['executed'] is True for e in forced)
+    executed = [e for e in forced if e.detail['executed'] is True]
+    assert dict(executed[0].detail['closed']) == {'VN30F2211': 'Accepted'}
+    assert result.snapshots[-1].positions == {}
 
     settled = [row for row in result.logs.settlement.of(
         SettlementAction.EXPIRY_SETTLED)]
-    assert len(settled) == 1
-    assert settled[0].quantity == -pair.CONTRACTS
+    assert settled == []
 
 
 def test_a_margin_event_stamped_0930_was_computed_from_that_day_s_close(
@@ -635,21 +643,25 @@ def test_a_margin_event_stamped_0930_was_computed_from_that_day_s_close(
     assert warning.detail['initial_margin'] != from_previous
 
 
-def test_the_deposit_does_not_move_with_the_daily_mark(result):
-    """Finding PT-8: no cash variation margin, at all.
+def test_the_deposit_moves_with_the_daily_mark(result):
+    """Finding PT-8, resolved (W1 daily cash settlement).
 
-    Six sessions, utilisation 0.7664 to 1.2021, and one deposit balance. The
-    whole loss arrives as a single movement at the expiry.
+    The second leg's deposit no longer sits at one balance: the 2022-11-11 mark
+    settles a variation loss to cash and the 2022-11-14 forced close realises
+    the remainder, so the balance walks 61,935,267 -> 51,855,267 -> 25,548,173
+    across the five sessions.
     """
     second_leg = [step for step in pair.ladder(result)
                   if pair.ENTER_B <= step.day < pair.WINDOW_END]
     assert len(second_leg) == 5
-    assert {step.deposit_balance for step in second_leg} == {_D('61935267.0')}
+    assert {step.deposit_balance for step in second_leg} == {
+        _D('61935267.0'), _D('51855267.0'), _D('25548173.0')}
 
-    movements = [e for e in result.logs.cash
-                 if e.pool == 'derivatives'
-                 and pair.ENTER_B < e.ts.date() < pair.WINDOW_END]
-    assert movements == []
+    settlements = [e for e in result.logs.cash
+                   if e.pool == 'derivatives'
+                   and pair.ENTER_B < e.ts.date() < pair.WINDOW_END
+                   and e.movement is CashMovement.VARIATION_SETTLEMENT]
+    assert [e.amount for e in settlements] == [_D('-10080000.0')]
 
 
 # --------------------------------------------------------------------------
@@ -662,7 +674,10 @@ def test_the_equity_leg_settles_t_plus_two_and_the_futures_leg_does_not(
 
     Thirty tranches created on 2022-10-21 all settle at 13:00 on 2022-10-25 --
     T+2 in settlement business days under Decision 109 -- while the futures
-    leg has no tranche at all and resolves once, in cash, at the expiry.
+    leg has no tranche at all: it is not DVP-settled. On this run it does not
+    even reach a final cash settlement, because MUST #3 force-closes it on
+    2022-11-14; the leg resolves by a forced offsetting trade, realised in cash
+    on trade date, not by a T+2 tranche and not by an expiry row.
     """
     created = result.logs.settlement.of(SettlementAction.TRANCHE_CREATED)
     settled = result.logs.settlement.of(SettlementAction.TRANCHE_SETTLED)
@@ -675,11 +690,13 @@ def test_the_equity_leg_settles_t_plus_two_and_the_futures_leg_does_not(
         datetime(2022, 10, 25, 13, 0)}
     assert {row.settlement_rule for row in entry} == {'T+2 at 13:00:00'}
 
-    expiry = result.logs.settlement.of(SettlementAction.EXPIRY_SETTLED)
-    assert len(expiry) == 1
-    assert expiry[0].pool == 'derivatives'
-    assert expiry[0].ticker == pair.FUTURE
-    assert expiry[0].settles_at is None           # cash settlement, not DVP
+    # No futures tranche and no expiry settlement: the leg is offset before it
+    # can mature, so it lands in the cash log as realised P&L, not here.
+    assert result.logs.settlement.of(SettlementAction.EXPIRY_SETTLED) == ()
+    realised = [e for e in result.logs.cash
+                if e.pool == 'derivatives'
+                and e.movement is CashMovement.REALISED_PNL]
+    assert realised
 
 
 def test_both_dvp_legs_are_tranched_not_only_the_share_leg(result):
@@ -730,30 +747,35 @@ def test_the_run_reports_that_its_settlement_calendar_is_unsourced(result):
                for row in result.logs.settlement)
 
 
-def test_the_final_settlement_used_a_proxy_when_the_oracle_was_on_disk(
+def test_the_final_settlement_is_never_struck_because_the_leg_is_force_closed(
         result, source):
-    """Finding PT-9.
+    """Finding PT-9, now moot on this run (MUST #3 forced-execute).
 
-    ``quote_settlementprice.parquet`` carries the VN30INDEX closing average
-    the exchange strikes the final settlement price from. Its last tick on
-    2022-11-17 is 972.78; the session settled at the futures close 972.5 and
-    said so. On four short contracts that is 112,000d of loss not booked.
+    ``quote_settlementprice.parquet`` carries the VN30INDEX closing average the
+    exchange strikes the final settlement price from. Its last tick on
+    2022-11-17 is 972.78 against the futures close 972.5 the session would
+    substitute -- a 112,000d gap on four short contracts, which is still a real
+    property of the corpus. But this run never strikes it: MUST #3 force-closes
+    the leg on 2022-11-14, three sessions before expiry, so the close-out is a
+    forced market fill (realised at 1003.6), not the settlement proxy.
     """
-    expiry = [e for e in result.logs.events
-              if e.kind.value == 'expiry_settled'][0]
-    assert expiry.price == pair.CLOSE_PROXY_SETTLEMENT == _D('972.5')
-    assert expiry.detail['settlement_source'] == 'close_proxy'
-    assert expiry.detail['substituted'] is True
-    assert expiry.detail['price_basis']            # the tier states itself
+    assert [e for e in result.logs.events
+            if e.kind.value == 'expiry_settled'] == []
 
+    # The corpus gap the proxy WOULD have cost, still measurable from the data.
     understated = ((pair.PUBLISHED_FINAL_SETTLEMENT
                     - pair.CLOSE_PROXY_SETTLEMENT)
                    * _D(pair.CONTRACTS) * pair.MULTIPLIER)
     assert understated == _D('112000.0')
 
-    # The realised cash flow, from the entry price, at the proxy.
-    assert expiry.amount == (_D('912.8') - pair.CLOSE_PROXY_SETTLEMENT) * _D(
-        pair.CONTRACTS) * pair.MULTIPLIER == _D('-23880000.0')
+    # The close-out that actually happened: a forced offsetting fill, realised
+    # from the last daily settlement price (938.0), not the settlement proxy.
+    realised = [e for e in result.logs.cash
+                if e.pool == 'derivatives'
+                and e.movement is CashMovement.REALISED_PNL][-1]
+    assert realised.ts == datetime(2022, 11, 14, 14, 45)
+    assert realised.amount == (_D('938.0') - _D('1003.6')) * _D(
+        pair.CONTRACTS) * pair.MULTIPLIER == _D('-26240000.0')
 
 
 def test_the_published_settlement_price_really_is_in_this_corpus():
@@ -903,9 +925,11 @@ def test_the_soft_arm_says_what_it_assumed(result):
     assert result.provenance.fill_policy_kind == 'soft(max_participation=uncapped)'
     assert result.indeterminate.indeterminate == 0
     fills = result.logs.trades.of(TradeAction.FILLED)
-    assert len(fills) == 93
+    assert len(fills) == 94                        # includes the MUST #3 forced close
+    # The forced offsetting close is a marketable order that trades through, so
+    # a second evidence value now appears alongside the resting-limit touches.
     assert {row.detail['evidence'].value for row in fills} == {
-        'touched_at_limit'}
+        'touched_at_limit', 'traded_through'}
 
 
 # --------------------------------------------------------------------------
@@ -930,8 +954,8 @@ def test_every_order_reached_a_terminal_state(result, scenario):
     counts the terminal rows against the accepted ones.
     """
     accepted = result.logs.trades.of(TradeAction.ACCEPTED)
-    assert len(accepted) == 93
-    assert len({row.order_id for row in accepted}) == 93
+    assert len(accepted) == 94                    # includes the MUST #3 forced close
+    assert len({row.order_id for row in accepted}) == 94
 
     filled = {row.order_id for row in result.logs.trades.of(
         TradeAction.FILLED, TradeAction.PARTIALLY_FILLED)}
@@ -950,30 +974,36 @@ def test_every_dong_is_accounted_for(result, scenario, closing_marks):
     """The residual is zero, and that is the whole assertion.
 
     Opening balances against closing cash, closing deposit and the basket
-    marked on the caller's own feed, less the four things that can cause a
-    change: equity consideration, realised derivatives P&L, final settlement
-    and charges. Anything left over is a movement no log row explains.
+    marked on the caller's own feed, less the five things that can cause a
+    change: equity consideration, realised derivatives P&L, the W1 daily
+    variation settlement, final settlement and charges. Anything left over is a
+    movement no log row explains -- and leaving the variation term out is a
+    residual of exactly the net daily settlement (-3,080,000).
     """
     book = pair.reconciliation(result, scenario, closing_marks)
     assert book['residual'] == 0
 
     assert book['opening'] == pair.INITIAL_CASH == _D('600000000')
     assert book['closing_cash'] == _D('137765732.00')
-    assert book['closing_deposit'] == _D('38029982.0')
+    assert book['closing_deposit'] == _D('25548173.0')
     assert book['closing_holdings_value'] == _D('393885000.00')
-    assert book['change'] == _D('-30319286.00')
+    assert book['change'] == _D('-42801095.00')
 
     assert book['equity_bought'] == _D('796665000.00')
     assert book['equity_sold_gross'] == _D('415125000.00')
     assert book['equity_charges'] == _D('2560008')
-    assert book['derivatives_realised'] == _D('-16000000.0')
-    assert book['derivatives_expiry'] == _D('-23880000.0')
-    assert book['derivatives_charges'] == _D('224278')
+    assert book['derivatives_realised'] == _D('-49240000.0')
+    assert book['derivatives_variation'] == _D('-3080000.0')
+    assert book['derivatives_expiry'] == _D('0')
+    assert book['derivatives_charges'] == _D('266087')
 
-    # The hedge cost, stated as such: short 4 at 985.0, bought back at 1025.0
-    # when the basis closed from -25.57 to -3.50.
-    assert book['derivatives_realised'] == (
-        _D('985.0') - _D('1025.0')) * _D(pair.CONTRACTS) * pair.MULTIPLIER
+    # The hedge cost, stated as such. Under W1 it is split between the daily
+    # variation settlements and the realised close-outs; together they are the
+    # two legs' P&L -- short 4 at 985.0 out at 1025.0, and short 4 at 912.8 out
+    # at the forced-close fill 1003.6.
+    assert book['derivatives_realised'] + book['derivatives_variation'] == (
+        (_D('985.0') - _D('1025.0')) + (_D('912.8') - _D('1003.6'))
+        ) * _D(pair.CONTRACTS) * pair.MULTIPLIER == _D('-52320000.0')
 
 
 def test_the_cash_log_reconciles_against_both_reported_balances(result,
@@ -1004,7 +1034,7 @@ def test_holdings_are_conserved_across_two_ledgers_at_once(result, scenario):
 
     30 equity names on the securities holdings ledger, one contract code on
     the derivatives contract ledger, and the derivatives leg is zero at the
-    end because the contract expired -- which is a real reduction and not a
+    end because MUST #3 force-closed it -- which is a real reduction and not a
     breach.
     """
     conservation = [row for row in result.identities
@@ -1045,14 +1075,16 @@ def test_the_segregation_identity_now_checks_both_pools(result, scenario):
         bucket[0] += 1
         bucket[1] += 1 if rows else 0
     assert joined['HSX'] == [210, 210]
-    assert joined['HNXDS'] == [13, 13]     # was [13, 0]
+    # 16 now, not 13: MUST #3's fourth (forced-close) fill adds one row per
+    # levy, where the run used to carry three fills plus one maturity charge.
+    assert joined['HNXDS'] == [16, 16]     # was [13, 0], then [13, 13]
 
     # Both the typed fields and the prose are now present, so the fee
     # statement and the identity read the same row.
     derivatives = [e for e in result.logs.cash
                    if e.pool == 'derivatives'
                    and e.movement is CashMovement.CHARGE_DEBITED]
-    assert len(derivatives) == 13
+    assert len(derivatives) == 16
     assert all(e.charge_kind is not None for e in derivatives)
     assert all(e.detail.get('pool') == 'derivatives' for e in derivatives)
     assert all(': ' in (e.cause or '') for e in derivatives)
@@ -1101,7 +1133,9 @@ def test_the_findings_are_reported_as_data_not_only_as_prose():
     assert {row['id'] for row in rows} == {f'PT-{i}' for i in range(1, 12)}
     assert {row['status'] for row in rows} == {'fixed', 'open'}
     fixed = [row for row in rows if row['status'] == 'fixed']
-    assert {row['id'] for row in fixed} == {'PT-1', 'PT-2'}
+    # PT-7 (MUST #3 forced-execute) and PT-8 (W1 daily settlement) joined the
+    # fixed set alongside PT-1 and PT-2.
+    assert {row['id'] for row in fixed} == {'PT-1', 'PT-2', 'PT-7', 'PT-8'}
     for row in rows:
         assert row['where'] and row['what'] and row['evidence']
         assert row['severity'] in ('high', 'medium', 'low')

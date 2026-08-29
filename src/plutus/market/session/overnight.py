@@ -98,21 +98,22 @@ Three places, all recorded on the result as
     on any book carrying risk.
 
 ``variation_margin_unsettled``
-    **Read this one before quoting a scenario-grid number.** Phu luc 2
-    section 6.2 has no ``VM`` term at all: QD 26 Dieu 20 settles *lai lo vi
-    the* as a separate daily cash movement on T+1, so the post-KRX
+    Phu luc 2 section 6.2 has no ``VM`` term at all: QD 26 Dieu 20 settles
+    *lai lo vi the* as a separate daily cash movement on T+1, so the post-KRX
     requirement is smaller than the pre-KRX ``IM + VM`` by exactly the
     account's variation margin -- measured at **49,800,000d** on a 2-lot
     VN30F position through a limit-down session, against a 109,844,000d
     intraday requirement. That is only the right answer if the loss is
-    actually **paid in cash** the next morning, and this simulator does not
-    pay it: ``DerivativesAccount.settle_daily`` has no session call site
-    (FEATURES.md D1), so the loss is carried in the requirement instead. The
-    two mechanisms are each internally consistent and mixing them is not: a
-    run that quotes the grid's number while never settling the cash reports
-    an account owing less than it does. The flag is raised on every grid
-    result computed while the intraday view carries a non-zero ``VM``, and it
-    is the one assumption here whose direction of error is **permissive**.
+    actually **paid in cash**, and this simulator now pays it:
+    ``DerivativesAccount.settle_daily`` is wired into the overnight layer
+    (``exchange._overnight_margin``), which settles the day's position P&L in
+    cash and rolls the variation baseline **before** the requirement is read,
+    so the view it reads carries ``VM == 0`` and this flag does not fire on an
+    ordinary run. It remains -- and stays **permissive** in direction -- only
+    for the residual the settlement cannot cover: a held contract with no
+    settlement price this session, where the cash cannot be moved and the loss
+    is left in the intraday view. The flag is raised on any grid result still
+    computed while that view carries a non-zero ``VM``.
 
 ``parameter_mirror_undated``
     A :class:`~plutus.market.session.broker_profile.VsdcParameterSet` whose

@@ -215,23 +215,22 @@ def test_the_margin_ladder_walks_from_ok_to_forced_as_the_mark_falls():
     assert not result.failed_identities
 
 
-def test_the_deposit_balance_does_not_move_with_the_daily_mark():
-    """**A finding, pinned.** Variation margin never settles in cash.
+def test_the_deposit_balance_moves_with_the_daily_mark():
+    """**A finding, resolved (W1 daily cash settlement).** Variation margin
+    settles in cash, once a day.
 
-    ``rulebook.py``'s futures ``SETTLEMENT`` row is T+1 and its own note says
-    it models *daily variation margin settling T+1*. ``deposit.settle_daily``
-    implements that rebaseline and **no session path calls it** (FEATURES.md
-    D1), so across a whole drawdown the deposit balance moves only for
-    charges, transfers, realised close-outs and final settlement -- never for
-    the mark.
+    ``rulebook.py``'s futures ``SETTLEMENT`` row is T+1 and its own note models
+    *daily variation margin settling T+1*. ``deposit.settle_daily`` implements
+    that rebaseline **and is now wired into the overnight layer**
+    (``exchange._overnight_margin``), so once per settlement day the deposit
+    balance moves by the day's realised position P&L. Across a drawdown the
+    deposit no longer shows its opening balance the whole way down; it steps
+    down every session the mark falls.
 
-    The consequence for a scenario author: an account that the ladder calls
-    and forces still shows its opening balance, and the entire loss arrives as
-    one cash movement at the close-out or the expiry. Any replay that debits
-    variation margin day by day will not match this simulator.
-
-    This test asserts what the simulator does today. If ``settle_daily`` is
-    ever wired in, it fails -- which is the point.
+    The consequence for a scenario author: the loss arrives day by day as
+    ``VARIATION_SETTLEMENT`` cash movements, not as one lump at the close-out
+    or expiry. A replay that debits variation margin day by day now matches
+    this simulator.
     """
     source = _falling_futures(
         ['1250', '1200', '1180', '1160', '1140', '1120', '1100', '1080'])
@@ -240,23 +239,32 @@ def test_the_deposit_balance_does_not_move_with_the_daily_mark():
         venues=('HNXDS',), initial_cash='0', initial_deposit='30000000'))
 
     balances = {s.deposit_balance for s in result.snapshots}
-    assert len(balances) <= 2, (
-        f'the deposit balance moved more than once: {sorted(balances)}')
+    assert len(balances) > 2, (
+        f'the deposit balance should step down each settlement day: '
+        f'{sorted(balances)}')
     causes = {e.movement for e in result.logs.cash
               if e.pool == 'derivatives'}
-    assert causes <= {CashMovement.OPENING_BALANCE,
-                      CashMovement.CHARGE_DEBITED}
-    assert any(s.variation_margin > 0 for s in result.snapshots), (
-        'the run must actually have accrued variation margin, or the '
-        'assertion above is vacuous')
+    assert CashMovement.VARIATION_SETTLEMENT in causes, (
+        'the daily mark must settle in cash as a variation settlement')
+    settlements = [e for e in result.logs.cash
+                   if e.movement is CashMovement.VARIATION_SETTLEMENT]
+    assert len(settlements) > 1, (
+        'a falling mark should settle on more than one day')
+    assert all(e.amount < 0 for e in settlements), (
+        'a falling mark settles cash out of the deposit')
+    assert not result.failed_identities
 
 
-def test_a_forced_liquidation_reports_and_does_not_execute():
-    """**A finding, pinned.** ``detail['executed']`` is ``False``.
+def test_a_forced_liquidation_reports_and_executes():
+    """**A finding, resolved (MUST #3 forced-execute, 2026-08-27).** The
+    forced close now runs real offsetting orders and the position goes flat.
 
-    Nothing is closed, so an account in breach stays in breach and the event
-    repeats at every subsequent mark. A scenario counting margin events must
-    count *distinct sessions*, not events.
+    ``FORCED_LIQUIDATION`` used to only report; it now submits an offsetting
+    order through the order path. The report and the fill can land on separate
+    marks: the open-mark event reports the breach with ``executed`` still
+    ``False`` because the offsetting order has not filled yet, and the
+    close-mark event carries ``executed`` ``True`` with the closed contract
+    named. By the end of the run the account is flat, not still in breach.
     """
     source = _falling_futures(
         ['1250', '1200', '1180', '1160', '1140', '1120', '1100', '1080'])
@@ -267,21 +275,39 @@ def test_a_forced_liquidation_reports_and_does_not_execute():
     forced = [e for e in result.logs.events
               if e.kind is EventKind.FORCED_LIQUIDATION]
     assert forced
-    assert all(e.detail['executed'] is False for e in forced)
+    assert any(e.detail['executed'] is True for e in forced)
+    executed = [e for e in forced if e.detail['executed'] is True]
+    assert all('VN30F2406' in dict(e.detail['closed']) for e in executed)
     assert all(e.detail['selection_rule'] for e in forced)
     assert all(e.detail['sequence'] is not None for e in forced)
-    assert result.snapshots[-1].positions == {'VN30F2406': 1}
+    assert result.snapshots[-1].positions == {}
+    assert not result.failed_identities
 
 
 def test_a_held_contract_settles_at_expiry_and_the_cash_log_says_so():
-    """Expiry closes the position and moves deposit cash in one event."""
-    prices = ['1250'] * 8
-    source = _falling_futures(prices)
+    """Expiry closes the position; the P&L is settled daily, the residual at
+    expiry.
+
+    Under W1 daily cash settlement the loss no longer arrives as one event at
+    expiry: each session's move settles as a ``VARIATION_SETTLEMENT`` and the
+    variation baseline rolls, so the final ``EXPIRY_SETTLEMENT`` moves only the
+    residual since the last daily settlement price. This price path settles the
+    entry-to-first-mark move and one intermediate move as daily variation
+    settlements, then leaves a genuine residual for the expiry event to strike.
+    """
     # The stub's FUTURE expiry is 2024-06-20; run through it.
     days = DAYS + (date(2024, 6, 19), date(2024, 6, 20), date(2024, 6, 21))
     rows = dict(EQUITY_ROWS)
     for day in days:
-        rows[('VN30F2406', day)] = market('VN30F2406', day, Decimal('1200'))
+        # Flat at 1200 (entry is 1250, so day one settles -5,000,000), then a
+        # step down on 2024-06-19 and again on the 2024-06-20 expiry so the
+        # expiry event strikes a non-zero residual rather than a settled zero.
+        price = '1200'
+        if day == date(2024, 6, 19):
+            price = '1180'
+        elif day == date(2024, 6, 20):
+            price = '1150'
+        rows[('VN30F2406', day)] = market('VN30F2406', day, Decimal(price))
         rows.setdefault(('FPT', day), market('FPT', day, Decimal('95.5')))
     source = StubSource(rows, KINDS)
 
@@ -294,6 +320,9 @@ def test_a_held_contract_settles_at_expiry_and_the_cash_log_says_so():
     assert settled[0].ticker == 'VN30F2406'
     assert 'substituted=True' in settled[0].reason
     assert result.snapshots[-1].positions == {}
+    # The P&L arrives daily now, with the expiry event carrying the residual.
+    assert any(e.movement is CashMovement.VARIATION_SETTLEMENT
+               for e in result.logs.cash)
     assert any(e.movement is CashMovement.EXPIRY_SETTLEMENT
                for e in result.logs.cash)
     assert not result.failed_identities
