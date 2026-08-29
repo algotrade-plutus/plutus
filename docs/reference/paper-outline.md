@@ -475,7 +475,7 @@ series currently arrives through the same pipeline we maintain.
 | T2c | **EvoMarket vs Plutus**, rule-surface differences only (from §2.6 of this outline) | §2.6 |
 | T3 | Dated rule editions in force across the simulated window, with effective dates and confidence | §3 |
 | F1 | The order state machine, with INDETERMINATE shown as an event on the resting arc, not a leaf | §4 |
-| F2 | Indeterminate rate by data resolution and by binding rule | §5 |
+| F2 | Indeterminate rate by data resolution and by cause (resolution-limit vs data-ceiling): the bar floor is intrinsic, the tick remainder is a data ceiling | §5 |
 | F3 | Cross-policy divergence for one strategy, plotted against the indeterminate rate | §7 |
 | T4 | Measured results table, each row carrying its fill policy, resolution and assumption set | §7 |
 | T5 | Tradeoff register: simplification, what it buys, fidelity given up, measured cost, revisit trigger | §8 |
