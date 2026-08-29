@@ -1932,6 +1932,35 @@ def test_a_swept_order_pays_its_per_order_minimum_once_not_per_tranche():
     assert charged >= Decimal('2000000'), charged
 
 
+# --------------------------------------------------------------------------
+# D71: a tick-path ATC returns the published close, never the stale last
+# --------------------------------------------------------------------------
+
+def test_d71_tick_atc_does_not_fill_at_the_stale_last():
+    """The closing auction crosses at the **published close** (design A75); on a
+    tick run the interval is synthesised from a snapshot, which has no published
+    close, so the ATC is INDETERMINATE naming CLOSE -- exactly as the ATO is
+    already INDETERMINATE naming OPEN. It must **not** fill at ``state.last``, a
+    pre-auction print wearing the auction's label (defect D71).
+
+    ``StubSource`` is not an ``IntervalSource``, so the session synthesises the
+    interval; advancing straight to 14:35 evaluates the order once, in HOSE's
+    14:30-14:45 closing auction.
+    """
+    session = build(resolution='tick')
+    session.advance_to(datetime(2024, 6, 3, 9, 30))
+    ack = session.submit(buy())                       # a plain limit, carried in
+    assert isinstance(ack, Accepted)
+
+    events = session.advance_to(datetime(2024, 6, 3, 14, 35))   # closing auction
+    fills = [e for e in events if e.kind in (EventKind.FILLED,
+                                             EventKind.PARTIALLY_FILLED)]
+    assert not fills, f'D71: filled at the stale last, {[e.price for e in fills]}'
+
+    # The order is undecided for want of a published close, and the run names it.
+    assert DataField.CLOSE in session.indeterminate_report().by_field
+
+
 def test_the_negative_net_settles_against_the_balance_at_t_plus_2():
     """The shortfall is collected on the settlement leg, like any other net.
 

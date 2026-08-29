@@ -2645,6 +2645,27 @@ class ExchangeSession:
         if close is None:
             missing.add(DataField.LAST)
             missing.add(DataField.CLOSE)
+        # D71: a synthesised interval carries no published open OR close to hand
+        # a call auction. OPEN is always absent (interval.open is never set), so
+        # an ATO is already INDETERMINATE; without the same for CLOSE an ATC
+        # would cross at ``state.last`` -- a pre-auction print -- under the
+        # published close's name (fills.auction_fill_price returns interval.close
+        # directly). In an auction phase drop the close and name it missing, so
+        # the ATC returns the published close where an IntervalSource supplies
+        # one (handled above) and INDETERMINATE on a bare snapshot, exactly as
+        # the ATO does.
+        #
+        # Expiry settlement is unaffected, though NOT because it skips
+        # interval.close -- ``_final_settlement`` reads interval.close first and
+        # falls back to state.last. It is safe because the settlement interval
+        # is built from the raw observed state, not this fill path's rulebook
+        # re-stamp, and both shipped adapters stamp CONTINUOUS, so this auction
+        # branch never fires there; and were it to, the close it drops was only
+        # ever state.last -- the exact value the fallback then supplies.
+        if state.session in (SessionPhase.OPENING_AUCTION,
+                             SessionPhase.CLOSING_AUCTION):
+            close = None
+            missing.add(DataField.CLOSE)
         return MarketInterval(
             ticker=ticker, start=ts, end=ts + span,
             resolution=self._config.resolution, state=state,
