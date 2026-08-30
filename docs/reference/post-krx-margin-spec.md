@@ -11,7 +11,7 @@ re-derives it later; **it is not for building.**
 **We do not measure things.** Nothing below proposes a measurement. §10 states what data
 exists and what it would support; that is a capability statement, not a result.
 
-Companion documents: `docs/reference/vn-exchange-rulebook-2020-2026.md` (the exchange
+Companion documents: `docs/reference/citable/vn-exchange-rulebook-2020-2026.md` (the exchange
 rulebook — this document does **not** modify it, but §12 records what it now contradicts),
 `docs/reference/equity-margin-spec.md` (a **different product** — SSC-regulated broker
 lending against shares; the only thing it shares with this one is the phrase *ký quỹ*).
@@ -312,7 +312,7 @@ Four independent checks, all of which the literal text fails and this reading pa
    ratio from its name.
 4. **It reproduces the pre-KRX formula as a special case.** The rulebook records the
    pre-KRX initial margin as `IM = ratio × contracts × price × multiplier`
-   (`vn-exchange-rulebook-2020-2026.md`, "Initial margin (IM) — definition and formula").
+   (`docs/reference/citable/vn-exchange-rulebook-2020-2026.md`, "Initial margin (IM) — definition and formula").
    Under this reading `Rm` for a one-sided book is *numerically identical* to that. A
    scenario grid that reproduces the superseded closed form for the simple case, and
    generalises it for spreads and groups, is the expected shape of such a reform.
@@ -1265,7 +1265,7 @@ Concretely: `src/plutus/market/broker.py` (`BrokerTerms.margin_call_utilisation`
 `forced_close_utilisation`, `warning_utilisation`),
 `src/plutus/market/session/deposit.py` (`margin_status`, and the `account_margin_requirement`
 docstring), `src/plutus/market/margin.py` (`PROVENANCE`), and
-`docs/reference/vn-exchange-rulebook-2020-2026.md` (the "Warning thresholds" row).
+`docs/reference/citable/vn-exchange-rulebook-2020-2026.md` (the "Warning thresholds" row).
 
 ### 13.1 The 80/90/100 margin ladder is misattributed for the post-KRX regime
 
@@ -1383,5 +1383,5 @@ standing instruction and the retracted margin-incidence precedent. §10 states w
 would support; it computes nothing about the market.
 
 **Not modified:** `broker.py`, `deposit.py`, `margin.py`,
-`vn-exchange-rulebook-2020-2026.md`. §13 records what they now need, with citations, for
+`docs/reference/citable/vn-exchange-rulebook-2020-2026.md`. §13 records what they now need, with citations, for
 whoever owns them.

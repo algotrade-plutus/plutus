@@ -1193,7 +1193,7 @@ Format: `key` — what it is · read as · locator.
 | `th-band` | Thailand SET band level post-COVID | **[U]** — verify at set.or.th |
 | `abm-mizuta` | Mizuta & Yagi, arXiv:2309.10220 | [V] |
 | `abm-magnet` | "The Magnet Effect of Price Limits: An Agent-Based Approach," *EMFT* 61(7), DOI 10.1080/1540496X.2024.2434042 | [R] |
-| `rb` | `docs/reference/vn-exchange-rulebook-2020-2026.md` §6.3 (VSD margin-utilisation tiers — the "Art. 13" chain is **withdrawn**, corrected 2026-08-26: pre-KRX `low`/UNVERIFIED, and post-KRX the only 80/90/100 in QĐ 26 is Điều 29 = position limits, not margin) | [V] this repo |
+| `rb` | `docs/reference/citable/vn-exchange-rulebook-2020-2026.md` §6.3 (VSD margin-utilisation tiers — the "Art. 13" chain is **withdrawn**, corrected 2026-08-26: pre-KRX `low`/UNVERIFIED, and post-KRX the only 80/90/100 in QĐ 26 is Điều 29 = position limits, not margin) | [V] this repo |
 
 ---
 

@@ -6,7 +6,7 @@ two dates, gives two answers.** A test that only checks today's value would
 pass against a config-at-load singleton, which is the build this module exists
 to forbid.
 
-Numbers are taken from ``docs/reference/vn-exchange-rulebook-2020-2026.md``
+Numbers are taken from ``docs/reference/citable/vn-exchange-rulebook-2020-2026.md``
 with their citations; nothing is pinned here that does not appear there.
 """
 

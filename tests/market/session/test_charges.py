@@ -1,7 +1,7 @@
 """The charge table -- fees and taxes, per venue, dated, itemised.
 
 Every test names the rule it pins, and every number comes from
-``docs/reference/vn-exchange-rulebook-2020-2026.md`` with its citation.
+``docs/reference/citable/vn-exchange-rulebook-2020-2026.md`` with its citation.
 Nothing is pinned here that does not appear there.
 
 Three claims run through the file:

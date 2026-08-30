@@ -530,7 +530,7 @@ refuted claims**; each needs its owner:
 | `src/plutus/market/margin.py` — module and `MarginConfig` docstrings | "the account model calls 100% … the best fit, 1.42, still misses the 20-session count by 7" | The 100% is an identity (§4); the miss is the 2022-12-15 ratio step (§6.2), and 1.42 is a grid artefact |
 | `src/plutus/market/exchanges/derivatives.py` — `sustains` docstring | "it does not [reproduce them], at any funding level, and the disagreement is structural" | Same refutation. The three real reasons to keep the method are in §8 |
 | `docs/HANDOFF-2026-08-26.md` § "Results worth not re-deriving" | "The two margin paths disagree … no funding multiple reproduces all three counts jointly" | Same. Retirement is still pending, but for the reasons in §8, not this one |
-| `docs/reference/vn-exchange-rulebook-2020-2026.md` line 587 | 80/90/100 at confidence `high` | Article text unread; two secondary reproductions against one conflicting one. §2 |
+| `docs/reference/citable/vn-exchange-rulebook-2020-2026.md` line 587 | 80/90/100 at confidence `high` | Article text unread; two secondary reproductions against one conflicting one. §2 |
 
 Until those are corrected, a reader who reaches them first will draw the superseded
 conclusion.

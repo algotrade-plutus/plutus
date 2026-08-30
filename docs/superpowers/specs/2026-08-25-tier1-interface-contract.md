@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-25 · **Status:** binding for Tier 1 implementation
 **Implements:** [`2026-08-25-exchange-simulator-design.md`](2026-08-25-exchange-simulator-design.md) §5–§12, Tier 1 items 1–7
-**Rule source:** [`docs/reference/vn-exchange-rulebook-2020-2026.md`](../../reference/vn-exchange-rulebook-2020-2026.md)
+**Rule source:** [`docs/reference/citable/vn-exchange-rulebook-2020-2026.md`](../../reference/vn-exchange-rulebook-2020-2026.md)
 **Shared types:** [`src/plutus/market/session/types.py`](../../../src/plutus/market/session/types.py)
 
 ---

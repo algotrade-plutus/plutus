@@ -534,12 +534,12 @@ missing `n`, the scenario/collateral tables, the DSP series).
 | `docs/reference/tables/{t3,t5}*` | dated rule editions; tradeoff register |
 | `docs/reference/fill-evidence-levels.md` | FEL reference (§5 spine) |
 | `docs/reference/FEATURES.md` | the feature + defect (D-series) inventory |
-| **`docs/reference/SCENARIO-REFERENCE.md`** | **citable Jx index (J1–J37)** — cite scenarios from here |
+| **`docs/reference/citable/SCENARIO-REFERENCE.md`** | **citable Jx index (J1–J37)** — cite scenarios from here |
 | `docs/reference/SCENARIO-CATALOGUE.md` · `SCENARIO-BOARD.md` | the Jx detail + dev worksheet |
-| **`docs/reference/STRATEGY-REFERENCE.md`** | **citable Sx index (S1–S9)** — cite strategies from here |
+| **`docs/reference/citable/STRATEGY-REFERENCE.md`** | **citable Sx index (S1–S9)** — cite strategies from here |
 | `docs/reference/STRATEGY-BOARD.md` | the Sx dev worksheet + history |
-| **`docs/reference/BROKER-POLICY-SURVEY.md`** | **citable broker/margin policy survey (14 firms, 244 data points)** |
-| `docs/reference/vn-exchange-rulebook-2020-2026.md` | the sourced rulebook (the oracle) |
+| **`docs/reference/citable/BROKER-POLICY-SURVEY.md`** | **citable broker/margin policy survey (14 firms, 244 data points)** |
+| `docs/reference/citable/vn-exchange-rulebook-2020-2026.md` | the sourced rulebook (the oracle) |
 | `docs/reference/{equity-margin-spec,krx-margin-research,post-krx-margin-spec,margin-model-adjudication}.md` | the margin research arc |
 | `docs/reference/literature-review.md` | prior art / positioning |
 | `docs/superpowers/specs/2026-08-*` | the seven design specs (the arc) |

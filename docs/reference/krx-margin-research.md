@@ -9,7 +9,7 @@ nothing in it may be guessed. §3 is what no public source closes. §4 is a desi
 the broker config object. §5 is an ordered build list.
 
 **Written 2026-08-26.** Supersedes nothing; it *corrects* named claims in
-`docs/reference/post-krx-margin-spec.md` and `docs/reference/vn-exchange-rulebook-2020-2026.md`,
+`docs/reference/post-krx-margin-spec.md` and `docs/reference/citable/vn-exchange-rulebook-2020-2026.md`,
 each correction named explicitly below.
 
 ---
@@ -222,7 +222,7 @@ and **0 times** in `Phụ lục 2`. It occurs in QĐ 96 as a named component.
 | Price basis | initial-margin ratio on futures value | scenario grid on the **underlying's close** |
 
 **What changes.**
-- `docs/reference/vn-exchange-rulebook-2020-2026.md` — the pre-KRX rows for the margin
+- `docs/reference/citable/vn-exchange-rulebook-2020-2026.md` — the pre-KRX rows for the margin
   formula can be **raised to `high`** on the strength of three signed instruments.
 - Any dated-rules table must switch **all three** attributes at the cutover, not just the
   formula. Switching composition while leaving the CCP test intraday is the single most
@@ -290,7 +290,7 @@ tài sản ký quỹ"*.
   parameter at all.
 - The pre-KRX regime keeps the ladder object, but its rungs 1 and 2 must be typed as
   *notification-only* — they must not gate trading or trigger liquidation.
-- `vn-exchange-rulebook-2020-2026.md:638` — the note that the pre-KRX 80/90/100 ladder is
+- `docs/reference/citable/vn-exchange-rulebook-2020-2026.md:638` — the note that the pre-KRX 80/90/100 ladder is
   "UNVERIFIED, not disproven" because "QĐ 61 Art. 13 and QĐ 12 have never been read"
   **is now discharged**: all three have been read. Raise to `high` and record that the
   rungs were informational.
@@ -455,7 +455,7 @@ against the full grid.
 `Max(30,177,000 + 20,118,000, 250,000) = 50,295,000` ✔.
 
 **Do not lift `3%` or `1%` as parameters.** The live VN30 initial-margin ratio is **0.17**
-(`vn-exchange-rulebook-2020-2026.md` §6.3, VSDC `PHỤ LỤC 4` eff. 2026-08-21). TCBS's page is
+(`docs/reference/citable/vn-exchange-rulebook-2020-2026.md` §6.3, VSDC `PHỤ LỤC 4` eff. 2026-08-21). TCBS's page is
 a teaching example on stale numbers.
 
 ---
@@ -740,7 +740,7 @@ vị thế"*. If `n` is in **days** and the liquidation horizon is 2 days, then
 `VaR₂ × √2` scales a 2-day statistic by another √2 — a 2-day risk charged as 4-day. If `n`
 is in **2-day periods**, `n = 1` returns `VaR` unchanged. The source gives no unit.
 
-**Order-of-magnitude check, OURS and explicitly not a claim.** `vn-exchange-rulebook-2020-2026.md`
+**Order-of-magnitude check, OURS and explicitly not a claim.** `docs/reference/citable/vn-exchange-rulebook-2020-2026.md`
 records that at the 2022-12 recalculation *"the permissible VaR-derived band was 8.4% –
 18.3%"* and the ratio was set to **17%**. `17 / 8.4 = 2.02`, i.e. `√n ≈ 2`, `n ≈ 4`. That is
 suggestive and **must not be shipped as a value.** It is, however, a testable hypothesis —
@@ -976,7 +976,7 @@ merge them into one field.**
 
 ### 4.4 Repo actions
 
-- `docs/reference/vn-exchange-rulebook-2020-2026.md:667` records Pinetree as 75/85/90
+- `docs/reference/citable/vn-exchange-rulebook-2020-2026.md:667` records Pinetree as 75/85/90
   targeting "below 75%", dated 2024-07-11. Pinetree's live page gives 80/90/95 targeting
   ≤80%. **Date the row and mark it superseded; do not overwrite** — no source establishes
   when the change happened.

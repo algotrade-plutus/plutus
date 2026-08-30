@@ -108,7 +108,7 @@ Companion documents, unchanged by this file:
 
 - `docs/superpowers/specs/2026-08-25-exchange-simulator-design.md` — the design
 - `docs/superpowers/specs/2026-08-25-tier1-interface-contract.md` — module contracts
-- `docs/reference/vn-exchange-rulebook-2020-2026.md` — 400 dated rules (**grep it, do not read it whole**)
+- `docs/reference/citable/vn-exchange-rulebook-2020-2026.md` — 400 dated rules (**grep it, do not read it whole**)
 - `docs/reference/margin-model-adjudication.md` — why margin incidence was retracted
 - `docs/reference/equity-margin-spec.md` — the spec for §12, written but not built
 - `docs/reference/post-krx-margin-spec.md` — **new, 2026-08-26.** The post-KRX MR
@@ -824,7 +824,7 @@ The cutover **did** change them, and the value currently in our rulebook is wron
 > so is QĐ 61 never having had one. Nobody has checked. The citation chain broke at its
 > last link; it has not been shown to be false at the others.
 
-Corrections to `docs/reference/vn-exchange-rulebook-2020-2026.md` §6.3 that this
+Corrections to `docs/reference/citable/vn-exchange-rulebook-2020-2026.md` §6.3 that this
 establishes. **The rulebook was updated on 2026-08-26 and its §9.6 logs the same
 corrections**; the grades below are restated against the primary text:
 

@@ -4,7 +4,7 @@
 
 **Companion documents.** `docs/reference/literature-review.md` holds the positioning,
 the cited comparison tables and the **narrowed claim sentences that must be used
-verbatim**. `docs/reference/vn-exchange-rulebook-2020-2026.md` holds the 400 dated rules
+verbatim**. `docs/reference/citable/vn-exchange-rulebook-2020-2026.md` holds the 400 dated rules
 with citations and per-row confidence. `docs/superpowers/specs/2026-08-25-exchange-simulator-design.md`
 holds the design, the tradeoff register (§15.1) and the stated assumptions (§16).
 

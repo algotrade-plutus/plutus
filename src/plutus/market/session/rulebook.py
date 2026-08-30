@@ -38,7 +38,7 @@ both claim 2025-05-05 nor leave it unclaimed. Closing at the bottom and opening
 at the top partitions the timeline exactly once.
 
 **The rulebook document prints CLOSED intervals; this module stores HALF-OPEN
-ones.** ``docs/reference/vn-exchange-rulebook-2020-2026.md`` writes
+ones.** ``docs/reference/citable/vn-exchange-rulebook-2020-2026.md`` writes
 ``effective_to = 2025-05-04`` meaning "in force through 2025-05-04 inclusive",
 and :class:`plutus.market.session.types.RuleCitation` follows that document
 convention (``covers()`` tests ``on > effective_to``). :class:`RuleInterval`

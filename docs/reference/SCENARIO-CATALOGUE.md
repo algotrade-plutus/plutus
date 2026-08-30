@@ -6,7 +6,7 @@ exhibited by no scenario at all; **J27** was written to close that, and is the o
 addition.)
 
 Sources of truth, in precedence order:
-`docs/reference/vn-exchange-rulebook-2020-2026.md` (**434 dated rule rows**, plus 175
+`docs/reference/citable/vn-exchange-rulebook-2020-2026.md` (**434 dated rule rows**, plus 175
 annotation rows — counted 2026-08-26 by script; this replaces the earlier hand count of
 400/133, which the rulebook itself retracts in §1) ·
 `docs/reference/equity-margin-spec.md` · `docs/reference/post-krx-margin-spec.md` ·

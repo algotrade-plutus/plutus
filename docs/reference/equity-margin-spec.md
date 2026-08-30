@@ -15,7 +15,7 @@ only `ký quỹ` in the codebase is **derivatives clearing margin**
 > Vietnamese name.
 
 Companion documents: `docs/reference/FEATURES.md` §12 (the one-screen summary),
-`docs/reference/vn-exchange-rulebook-2020-2026.md` (the exchange rulebook — this document
+`docs/reference/citable/vn-exchange-rulebook-2020-2026.md` (the exchange rulebook — this document
 does **not** modify it).
 
 ---

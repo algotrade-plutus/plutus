@@ -341,7 +341,7 @@ Tier 1 demo turns on.
 > citation to a HOSE / HNX / VSD / MoF decision.
 >
 > A dedicated rulebook research pass covering **2020–2026** is under way; its output
-> lands at `docs/reference/vn-exchange-rulebook-2020-2026.md` and supersedes every
+> lands at `docs/reference/citable/vn-exchange-rulebook-2020-2026.md` and supersedes every
 > number in this spec. Do not pin a value into a test until it appears there with a
 > citation and a confidence level.
 
