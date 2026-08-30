@@ -477,6 +477,7 @@ series currently arrives through the same pipeline we maintain.
 | F1 | The order state machine, with INDETERMINATE shown as an event on the resting arc, not a leaf | §4 |
 | F2 | Indeterminate rate by data resolution and by cause (resolution-limit vs data-ceiling): the bar floor is intrinsic, the tick remainder is a data ceiling | §5 |
 | F3 | Cross-policy divergence for one strategy, plotted against the indeterminate rate | §7 |
+| E1 | Population fill-policy divergence (table): fill rate by order intent × policy, data-proven vs assumption, over 477k HSX orders — the headline fill-sensitivity result; replaces the old strategy taker panel | §7 |
 | T4 | Measured results table, each row carrying its fill policy, resolution and assumption set | §7 |
 | T5 | Tradeoff register: simplification, what it buys, fidelity given up, measured cost, revisit trigger | §8 |
 

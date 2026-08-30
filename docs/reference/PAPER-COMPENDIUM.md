@@ -530,6 +530,7 @@ missing `n`, the scenario/collateral tables, the DSP series).
 | `docs/reference/PAPER-HANDOFF.md` | the 2-page launchpad (read first) |
 | `docs/reference/paper-outline.md` | the section→figure/table map |
 | `docs/reference/tables/t4_measured_results.md` | **the verified numbers** |
+| `docs/reference/tables/e1_fill_divergence.md` | **E1** — population fill-policy divergence tables (fill rate by intent × policy; quantity/abstention) |
 | `docs/reference/tables/{t3,t5}*` | dated rule editions; tradeoff register |
 | `docs/reference/fill-evidence-levels.md` | FEL reference (§5 spine) |
 | `docs/reference/FEATURES.md` | the feature + defect (D-series) inventory |
