@@ -18,7 +18,7 @@ Same 66 HSX instrument-days, same three-order probe, run at each resolution; the
 
 ## Fill policy — population divergence (E1)
 
-The headline fill-sensitivity result, over a **realistic order flow** rather than three hand-written strategies. The old taker panel (the F3 fill axis below) was sign-confounded (the strategies lose money *when* they fill), rested on 4–5 fills, and reported return — the one quantity `DivergenceReport` forbids. E1 fixes all three: 385 HSX-stock tickers × ≥200 sessions in 2022, five on-grid order intents per ticker-day, each evaluated under all three fill policies with `compare_policies` — **477,537 sign-free questions**, reported as fills and executed quantity, never P&L.
+The headline fill-sensitivity result, over a **realistic order flow** rather than three hand-written strategies. The old taker panel (the F3 fill axis below) was sign-confounded (the strategies lose money *when* they fill), rested on 4–5 fills, and reported return — the one quantity `DivergenceReport` forbids. E1 fixes all three: 385 HSX-stock tickers × ≥200 sessions in 2022, five on-grid order intents per ticker-day, each evaluated under all three fill policies with `compare_policies` — **477,537 sign-free questions**, reported as fills and executed quantity, never P&L. **Full by-intent and by-policy tables: `docs/reference/tables/e1_fill_divergence.md`.**
 
 | Result | Fill policy | Resolution | Assumption set | Value | Source |
 |---|---|---|---|---|---|

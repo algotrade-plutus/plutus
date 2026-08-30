@@ -331,88 +331,8 @@ def measure_fill_divergence(data_root: str = DEFAULT_ROOT, *, year: int = YEAR,
 
 
 # --------------------------------------------------------------------------
-# Render + CLI
+# CLI  (no figure -- the table lives in docs/reference/tables/e1_fill_divergence.md)
 # --------------------------------------------------------------------------
-
-#: Order intents collapsed into three reader-facing categories, aggressive ->
-#: passive (buy and sell behave the same, so they are pooled).
-_CATEGORIES = (
-    ("Market order\n(take liquidity)", ("market_buy",)),
-    ("Limit at the\nmarket price", ("limit_buy_at_close", "limit_sell_at_close")),
-    ("Limit far from\nmarket", ("limit_buy_at_floor", "limit_sell_at_ceil")),
-)
-_COLOUR = {"soft": "#c0392b", "hard": "#2c7fb8", "probabilistic": "#7fb800"}
-
-
-def render(result: FillDivergenceResult, out: Path) -> Path:
-    """Two panels, the three fill policies shown explicitly. Left: the share of
-    each order type that FILLS under each policy (solid), with the abstained
-    share stacked on as a hatch so ``INDETERMINATE`` is honest rather than read
-    as a no-fill. Right: the total quantity each policy fills. Same colour per
-    policy across both panels."""
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    import numpy as np
-
-    out.parent.mkdir(parents=True, exist_ok=True)
-    sigs = result.signatures
-    short = {s: s.split("(")[0] for s in sigs}
-
-    def _rate(keys, get) -> Dict[str, float]:
-        tot = sum(result.by_intent[k].n for k in keys) or 1
-        return {s: 100 * sum(get(result.by_intent[k], s) for k in keys) / tot
-                for s in sigs}
-
-    filled = [_rate(ks, lambda a, s: a.filled.get(s, 0)) for _, ks in _CATEGORIES]
-    indet = [_rate(ks, lambda a, s: a.indeterminate.get(s, 0))
-             for _, ks in _CATEGORIES]
-
-    fig, (axL, axR) = plt.subplots(1, 2, figsize=(12.5, 5.0),
-                                   gridspec_kw={"width_ratios": [1.7, 1]})
-    x, w = np.arange(len(_CATEGORIES)), 0.26
-    for i, s in enumerate(sigs):
-        col = _COLOUR.get(short[s], "#888")
-        f = [filled[c][s] for c in range(len(_CATEGORIES))]
-        a = [indet[c][s] for c in range(len(_CATEGORIES))]
-        off = (i - 1) * w
-        axL.bar(x + off, f, w, color=col, label=short[s])
-        axL.bar(x + off, a, w, bottom=f, color=col, alpha=0.30, hatch="////",
-                linewidth=0)
-        for xi, (fv, av) in enumerate(zip(f, a)):
-            if fv > 3:
-                axL.text(xi + off, fv / 2, f"{fv:.0f}", ha="center", va="center",
-                         fontsize=8, color="white", fontweight="bold")
-            if av > 12:
-                axL.text(xi + off, fv + av / 2, "can't\ndecide", ha="center",
-                         va="center", fontsize=6.5, color=col)
-    axL.set_xticks(x)
-    axL.set_xticklabels([c for c, _ in _CATEGORIES], fontsize=9)
-    axL.set_ylabel("orders filled  (%)")
-    axL.set_ylim(0, 105)
-    axL.set_title("Does it fill?", fontsize=12, fontweight="bold")
-    axL.legend(title="fill policy", loc="upper right", fontsize=9)
-
-    qty = [result.by_policy[s].filled_quantity / 1e6 for s in sigs]
-    axR.bar([short[s] for s in sigs], qty,
-            color=[_COLOUR.get(short[s], "#888") for s in sigs])
-    for i, q in enumerate(qty):
-        axR.text(i, q, f"{q:.0f}M", ha="center", va="bottom", fontsize=9)
-    axR.set_ylabel("shares filled  (millions)")
-    axR.set_ylim(0, max(qty) * 1.15 if qty else 1)
-    axR.set_title("How much fills?", fontsize=12, fontweight="bold")
-
-    fig.suptitle("The fill policy changes the outcome", fontsize=13.5,
-                 fontweight="bold")
-    fig.text(0.5, 0.015,
-             f"{result.questions // 1000}k HSX orders (2022)  ·  the three agree "
-             f"on {float(result.agreement_rate):.0%}  ·  hatched = abstained "
-             "(INDETERMINATE)", ha="center", fontsize=8, color="#555")
-    fig.subplots_adjust(left=0.08, right=0.97, top=0.87, bottom=0.16, wspace=0.28)
-    fig.savefig(out, dpi=150)
-    plt.close(fig)
-    return out
-
 
 class _Enc(json.JSONEncoder):
     def default(self, o):
@@ -428,8 +348,6 @@ def main() -> int:
                    help="cap the universe (default: all qualifying tickers)")
     p.add_argument("--json", type=Path,
                    default=_REPO / "figures" / "e1_fill_divergence.json")
-    p.add_argument("--png", type=Path,
-                   default=_REPO / "figures" / "e1_fill_divergence.png")
     args = p.parse_args()
 
     r = measure_fill_divergence(args.data_root, max_tickers=args.max_tickers)
@@ -455,9 +373,7 @@ def main() -> int:
         args.json.parent.mkdir(parents=True, exist_ok=True)
         args.json.write_text(json.dumps(r.to_dict(), indent=2, cls=_Enc))
         print(f"\nwrote {args.json}")
-    if args.png:
-        render(r, args.png)
-        print(f"wrote {args.png}")
+    print("\nTable: docs/reference/tables/e1_fill_divergence.md")
     return 0
 
 
