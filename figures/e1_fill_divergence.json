@@ -1,0 +1,119 @@
+{
+  "population": "HSX stock ticker-days, 2022: 385 tickers x >= 200 sessions, 2022-01-04..2022-12-30; five on-grid intents each, under soft/hard/probabilistic",
+  "tickers": 385,
+  "ticker_days": 95815,
+  "questions": 477537,
+  "signatures": [
+    "soft(max_participation=0.10)",
+    "hard(max_participation=0.10)",
+    "probabilistic(seed=7,p_touch=0.5,max_participation=0.10,p_auction_margin=off)"
+  ],
+  "agreement_rate": 0.6836852432376967,
+  "by_policy": {
+    "soft(max_participation=0.10)": {
+      "outcomes": {
+        "fill": 270768,
+        "no_fill": 193800,
+        "indeterminate": 12969
+      },
+      "indeterminate_rate": 0.0271581050264168,
+      "filled_quantity": 245813800
+    },
+    "hard(max_participation=0.10)": {
+      "outcomes": {
+        "fill": 139057,
+        "no_fill": 178777,
+        "indeterminate": 159703
+      },
+      "indeterminate_rate": 0.3344306305061179,
+      "filled_quantity": 128456700
+    },
+    "probabilistic(seed=7,p_touch=0.5,max_participation=0.10,p_auction_margin=off)": {
+      "outcomes": {
+        "fill": 162192,
+        "no_fill": 215202,
+        "indeterminate": 100143
+      },
+      "indeterminate_rate": 0.20970731063770975,
+      "filled_quantity": 148385400
+    }
+  },
+  "by_intent": {
+    "market_buy": {
+      "n": 95815,
+      "agreement_rate": 0.045118196524552526,
+      "divergence_rate": 0.9548818034754475,
+      "filled_by_policy": {
+        "soft(max_participation=0.10)": 85472,
+        "hard(max_participation=0.10)": 0,
+        "probabilistic(seed=7,p_touch=0.5,max_participation=0.10,p_auction_margin=off)": 0
+      },
+      "indeterminate_by_policy": {
+        "soft(max_participation=0.10)": 4323,
+        "hard(max_participation=0.10)": 95815,
+        "probabilistic(seed=7,p_touch=0.5,max_participation=0.10,p_auction_margin=off)": 95815
+      }
+    },
+    "limit_buy_at_close": {
+      "n": 95815,
+      "agreement_rate": 0.768773156603872,
+      "divergence_rate": 0.23122684339612798,
+      "filled_by_policy": {
+        "soft(max_participation=0.10)": 85471,
+        "hard(max_participation=0.10)": 69297,
+        "probabilistic(seed=7,p_touch=0.5,max_participation=0.10,p_auction_margin=off)": 77355
+      },
+      "indeterminate_by_policy": {
+        "soft(max_participation=0.10)": 4323,
+        "hard(max_participation=0.10)": 24348,
+        "probabilistic(seed=7,p_touch=0.5,max_participation=0.10,p_auction_margin=off)": 2193
+      }
+    },
+    "limit_sell_at_close": {
+      "n": 95815,
+      "agreement_rate": 0.7672389500600115,
+      "divergence_rate": 0.23276104993998847,
+      "filled_by_policy": {
+        "soft(max_participation=0.10)": 85472,
+        "hard(max_participation=0.10)": 69760,
+        "probabilistic(seed=7,p_touch=0.5,max_participation=0.10,p_auction_margin=off)": 77711
+      },
+      "indeterminate_by_policy": {
+        "soft(max_participation=0.10)": 4323,
+        "hard(max_participation=0.10)": 24437,
+        "probabilistic(seed=7,p_touch=0.5,max_participation=0.10,p_auction_margin=off)": 2135
+      }
+    },
+    "limit_buy_at_floor": {
+      "n": 95046,
+      "agreement_rate": 0.9010163499779055,
+      "divergence_rate": 0.09898365002209453,
+      "filled_by_policy": {
+        "soft(max_participation=0.10)": 8997,
+        "hard(max_participation=0.10)": 0,
+        "probabilistic(seed=7,p_touch=0.5,max_participation=0.10,p_auction_margin=off)": 4504
+      },
+      "indeterminate_by_policy": {
+        "soft(max_participation=0.10)": 0,
+        "hard(max_participation=0.10)": 9408,
+        "probabilistic(seed=7,p_touch=0.5,max_participation=0.10,p_auction_margin=off)": 0
+      }
+    },
+    "limit_sell_at_ceil": {
+      "n": 95046,
+      "agreement_rate": 0.9400816446773141,
+      "divergence_rate": 0.05991835532268586,
+      "filled_by_policy": {
+        "soft(max_participation=0.10)": 5356,
+        "hard(max_participation=0.10)": 0,
+        "probabilistic(seed=7,p_touch=0.5,max_participation=0.10,p_auction_margin=off)": 2622
+      },
+      "indeterminate_by_policy": {
+        "soft(max_participation=0.10)": 0,
+        "hard(max_participation=0.10)": 5695,
+        "probabilistic(seed=7,p_touch=0.5,max_participation=0.10,p_auction_margin=off)": 0
+      }
+    }
+  },
+  "finding": "Over a realistic HSX order flow the three shipped fill policies disagree on a material share of decisions, and the disagreement is concentrated in market and marketable-limit orders; deep passive limits are decided by the market, not the assumption. Reported as fills, never P&L (DivergenceReport's contract)."
+}

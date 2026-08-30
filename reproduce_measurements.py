@@ -503,6 +503,22 @@ def measure_exchange_indeterminacy(
     return result.to_dict()
 
 
+def measure_exchange_fill_divergence(data_root: Path) -> Dict[str, Any]:
+    """E1 -- population fill-policy divergence (the taker panel).
+
+    Evaluates five on-grid order intents per HSX-stock ticker-day in 2022 under
+    soft / hard / probabilistic and reports agreement, per-policy outcomes and
+    executed quantity, and the by-intent breakdown -- fills, never P&L. Needs
+    only the daily corpus. The figure is written by the module's own ``main``;
+    here we gather the numbers for T4.
+    """
+    try:
+        from measurements.fill_divergence import measure_fill_divergence
+    except ImportError as exc:  # pragma: no cover
+        return {"error": f"could not import measurements: {exc}"}
+    return measure_fill_divergence(str(data_root)).to_dict()
+
+
 # --------------------------------------------------------------------------
 # entry point
 # --------------------------------------------------------------------------
@@ -549,7 +565,7 @@ def main() -> int:
     print("Plutus measurement reproduction")
     print("=" * 72)
 
-    print("\n[1/10] storage ...")
+    print("\n[1/11] storage ...")
     results["storage"] = measure_storage(args.data_root, args.csv_root, args.raw_root)
     s = results["storage"]
     print(f"      parquet corpus : {s.get('parquet_human')}")
@@ -559,21 +575,21 @@ def main() -> int:
         print(f"      reduction      : {s['reduction_pct']}% "
               f"over {s['comparable_tables']} comparable tables")
 
-    print("\n[2/10] daily coverage ...")
+    print("\n[2/11] daily coverage ...")
     results["coverage"] = measure_coverage(args.data_root)
     cov = results["coverage"].get("ohlc_with_volume")
     if cov:
         print(f"      {cov['first_day']} -> {cov['last_day']}: "
               f"{cov['rows']:,} rows, {cov['tickers']} tickers")
 
-    print("\n[3/10] query speed ...")
+    print("\n[3/11] query speed ...")
     results["speed"] = measure_query_speed(args.data_root, args.csv_root)
     sp = results["speed"]
     for shape in ("full_scan", "filtered", "group_by", "metadata_only"):
         if shape in sp:
             print(f"      {shape:15s} {sp[shape]['speedup']}x")
 
-    print("\n[4/10] field availability ...")
+    print("\n[4/11] field availability ...")
     results["fields"] = measure_field_availability(args.data_root)
     fc = results["fields"].get("counts")
     if fc:
@@ -584,33 +600,33 @@ def main() -> int:
 
     if args.skip_tests:
         results["tests"] = {"skipped": True}
-        print("\n[5/10] test suite ... skipped")
+        print("\n[5/11] test suite ... skipped")
     else:
-        print("\n[5/10] test suite ...")
+        print("\n[5/11] test suite ...")
         results["tests"] = measure_test_suite(repo_root)
         print(f"      collected: {results['tests'].get('collected')}")
 
-    print("\n[6/10] exchange admission (equity headline) ...")
+    print("\n[6/11] exchange admission (equity headline) ...")
     results["exchange_admission"] = measure_exchange_admission(args.data_root)
     for key, value in results["exchange_admission"].items():
         if isinstance(value, dict) and "rate" in value:
             print(f"      {key:<26} {value['blocked']:>7,} / "
                   f"{value['attempts']:>8,} = {value['rate']:.4%}")
 
-    print("\n[7/10] tick-grid conformity ...")
+    print("\n[7/11] tick-grid conformity ...")
     results["exchange_grid"] = measure_exchange_grid(args.data_root)
     for universe, value in results["exchange_grid"].items():
         print(f"      {universe:<22} library {value['library_rate']:.4%}  "
               f"naive {value['naive_rate']:.4%}")
 
-    print("\n[8/10] derivatives margin incidence ...")
+    print("\n[8/11] derivatives margin incidence ...")
     results["exchange_margin"] = measure_exchange_margin(args.data_root)
     for hold in (5, 10, 20):
         value = results["exchange_margin"][f"hold_{hold}"]
         print(f"      hold {hold:>2}  {value['called']:>4,} / "
               f"{value['entries']:>4,} = {value['call_rate']:.2%}")
 
-    print("\n[9/10] bar-vs-tick divergence ...")
+    print("\n[9/11] bar-vs-tick divergence ...")
     results["exchange_bar_vs_tick"] = measure_exchange_bar_vs_tick(
         args.data_root, args.raw_root)
     div = results["exchange_bar_vs_tick"]
@@ -621,7 +637,7 @@ def main() -> int:
               f"tick {div['tick_blocked_at_close']:,}  "
               f"agreement {div['agreement']:.4%}")
 
-    print("\n[10/10] indeterminate rate (F2, resolution x cause) ...")
+    print("\n[10/11] indeterminate rate (F2, resolution x cause) ...")
     results["exchange_indeterminacy"] = measure_exchange_indeterminacy(
         args.data_root, args.tick_root)
     ind = results["exchange_indeterminacy"]
@@ -635,6 +651,18 @@ def main() -> int:
             print(f"      {a['label']:<34} rate {a['rate']:.1%}  "
                   f"res-limit {a['resolution_limit_share']:.0%}  "
                   f"data-ceiling {a['data_ceiling_share']:.0%}")
+
+    print("\n[11/11] fill-policy divergence (E1, population taker panel) ...")
+    results["exchange_fill_divergence"] = measure_exchange_fill_divergence(
+        args.data_root)
+    fd = results["exchange_fill_divergence"]
+    if "error" in fd:
+        print(f"      error: {fd['error']}")
+    else:
+        print(f"      {fd['questions']:,} questions over {fd['ticker_days']:,} "
+              f"ticker-days; agreement {fd['agreement_rate']:.1%}")
+        for intent, a in fd["by_intent"].items():
+            print(f"      {intent:<22} divergence {a['divergence_rate']:.1%}")
 
     if args.json:
         args.json.write_text(json.dumps(results, indent=2, default=str))

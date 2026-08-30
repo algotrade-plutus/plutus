@@ -16,9 +16,24 @@ Same 66 HSX instrument-days, same three-order probe, run at each resolution; the
 | indeterminate rate | `book_walk` | tick | optimistic queue | **85.6%** [83.5, 87.4] — 0% resolution-limit | `indeterminate_rate.py` |
 | indeterminate rate | `book_walk` | tick | conservative queue | **99.7%** [99.3, 99.9] — 0% resolution-limit | `indeterminate_rate.py` |
 
-## Fill policy — strategy divergence (F3, fill axis)
+## Fill policy — population divergence (E1)
 
-S1 (VN30F mean-reversion, 40,000,000đ opening deposit), one strategy under three shipped fill policies. The return and the indeterminate rate move *together and opposite*: `soft` trades on the touch and blows up; the strict two never fill its market orders (0% return) but say out loud that they could not decide half its flow.
+The headline fill-sensitivity result, over a **realistic order flow** rather than three hand-written strategies. The old taker panel (the F3 fill axis below) was sign-confounded (the strategies lose money *when* they fill), rested on 4–5 fills, and reported return — the one quantity `DivergenceReport` forbids. E1 fixes all three: 385 HSX-stock tickers × ≥200 sessions in 2022, five on-grid order intents per ticker-day, each evaluated under all three fill policies with `compare_policies` — **477,537 sign-free questions**, reported as fills and executed quantity, never P&L.
+
+| Result | Fill policy | Resolution | Assumption set | Value | Source |
+|---|---|---|---|---|---|
+| policy **disagreement** | soft/hard/probabilistic | daily bar (OHLC) | realistic flow (5 intents × 95,815 ticker-days) | **31.6% of decisions** (agreement 68.4%) | `fill_divergence.py` |
+| — by intent: market order | — | — | `market_buy` | **95.5%** disagree | `fill_divergence.py` |
+| — by intent: limit @ close | — | — | buy / sell | 23.1% / 23.3% disagree | `fill_divergence.py` |
+| — by intent: deep passive limit | — | — | @ floor / @ ceiling | **9.9% / 6.0%** disagree | `fill_divergence.py` |
+| executed quantity | `soft` vs `hard` | daily bar | filled shares, all intents | **245.8M vs 128.5M (1.91×)** | `fill_divergence.py` |
+| indeterminate share | `hard` | daily bar | the strict floor | **33.4%** (soft 2.7%, prob 21.0%) | `fill_divergence.py` |
+
+The actionable finding: **exposure to the fill assumption is a function of the order mix** — market and marketable-limit orders are decided by the assumption; deep passive limits by the market.
+
+## Fill policy — strategy divergence (F3, fill axis) — *superseded by E1 as the headline*
+
+*(Retained as strategy-level fidelity evidence for §V, not the headline sensitivity measurement — see E1 above and `EXPERIMENT-E1-FILL-DIVERGENCE.md` §1.)* S1 (VN30F mean-reversion, 40,000,000đ opening deposit), one strategy under three shipped fill policies. The return and the indeterminate rate move *together and opposite*: `soft` trades on the touch and blows up; the strict two never fill its market orders (0% return) but say out loud that they could not decide half its flow.
 
 | Result | Fill policy | Resolution | Assumption set | Value | Source |
 |---|---|---|---|---|---|
