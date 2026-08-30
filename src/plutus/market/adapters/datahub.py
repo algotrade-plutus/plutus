@@ -54,17 +54,17 @@ take the last value of an intraday stream without reading the whole tick
 archive per bar, and does not need to: ``quote_dailyvolume`` is the published
 daily figure directly.
 
-**What is still withheld, and it is the larger absence.** ``OPEN``, ``HIGH``
-and ``LOW`` are *also* on disk -- ``quote_open``, and ``quote_max`` /
-``quote_min`` for the daily extremes (``quote_high``/``quote_low`` are
-intraday running streams keyed by timestamp, not daily bars). They are not
-wired here, so an order's price test still falls back to the close alone and
-``hard`` cannot return a definite ``NO_FILL`` for a limit the day's low never
-reached. That is a real remaining gap, it is named in :data:`WITHHELD` and
-counted on every fill through ``interval.missing``, and it is deliberately not
-closed in the same change as volume: wiring the extremes moves decisions in
-*both* directions (unproven becomes filled, and unproven becomes definitely
-not filled) and deserves to be measured on its own.
+**The session extremes, wired 2026-08-30.** ``OPEN``, ``HIGH`` and ``LOW`` are
+served from ``quote_open`` and the daily extremes ``quote_max`` / ``quote_min``
+(the *session* high/low; ``quote_high`` / ``quote_low`` are intraday running
+streams keyed by timestamp, not daily bars, and cover 2021+ only). Each is a
+LEFT JOIN off the close table, so an absent row is named ``missing`` per-bar
+exactly as ``VOLUME`` is. Wiring them lets ``hard`` return a definite ``NO_FILL``
+for a limit the day's low never reached, and a definite fill where the day traded
+through -- moving decisions in *both* directions and taking the bar-resolution
+indeterminate rate off its former 100% floor. Only ``BOOK_SIZE`` remains
+structurally withheld here: a daily bar has no book, and
+``quote_asksize``/``quote_bidsize`` are 0-row in both corpus roots.
 """
 
 import calendar
@@ -181,21 +181,23 @@ class DataHubSource:
         DataField.LAST, DataField.CLOSE, DataField.VOLUME,
         DataField.REFERENCE, DataField.CEILING, DataField.FLOOR,
         DataField.SESSION_PHASE,
+        DataField.OPEN, DataField.HIGH, DataField.LOW,
     })
 
     #: The fields it cannot, named on **every** interval it serves so that a
     #: policy needing one returns ``INDETERMINATE`` naming it and the session
-    #: counts it. ``VOLUME`` is not here: it is served where the corpus has a
-    #: row and added to ``missing`` per-bar where it does not, which is the
-    #: only shape that can tell "this source never has it" from "this bar does
-    #: not". See the module docstring for why ``OPEN``/``HIGH``/``LOW`` are
-    #: still on this list even though the corpus holds them.
+    #: counts it. ``VOLUME``, ``OPEN``, ``HIGH`` and ``LOW`` are not here: each
+    #: is served where the corpus has a row and added to ``missing`` per-bar
+    #: where it does not -- the only shape that can tell "this source never has
+    #: it" from "this bar does not". ``OPEN``/``HIGH``/``LOW`` were wired
+    #: 2026-08-30 from ``quote_open`` and the session extremes
+    #: ``quote_max``/``quote_min`` (see the module docstring).
     #:
-    #: ``BOOK`` and ``BOOK_SIZE`` are permanent for this source: a daily bar
-    #: has no book, and ``quote_asksize``/``quote_bidsize`` are 0-row in both
-    #: corpus roots so even the tick adapter cannot supply sizes.
+    #: ``BOOK_SIZE`` is permanent for this source: a daily bar has no book, and
+    #: ``quote_asksize``/``quote_bidsize`` are 0-row in both corpus roots so even
+    #: the tick adapter cannot supply sizes.
     WITHHELD: ClassVar[FrozenSet[DataField]] = frozenset({
-        DataField.OPEN, DataField.HIGH, DataField.LOW, DataField.BOOK_SIZE,
+        DataField.BOOK_SIZE,
     })
 
     def __init__(self, config: Union[DataHubConfig, str, Path],
@@ -311,6 +313,40 @@ class DataHubSource:
             return state
         return None
 
+    def _ohlc(self, ticker: str, day: date) -> Tuple[
+            Optional[Decimal], Optional[Decimal], Optional[Decimal]]:
+        """``(open, high, low)`` for one ticker-day, each ``None`` where absent.
+
+        ``high``/``low`` are the **session extremes** ``quote_max``/``quote_min``
+        (not ``quote_high``/``quote_low``, which are intraday-tick running streams
+        covering 2021+ only); ``open`` is ``quote_open``. Each rides a LEFT JOIN
+        off the close table, so an absent row yields ``None`` and is named
+        ``missing`` per-bar -- the same shape as ``VOLUME``.
+        """
+        close = self._reader('close_price')
+        if close is None:
+            return None, None, None
+        select, joins = [], []
+        for reader, alias, label in (
+                (self._reader('open_price'), 'op', 'op'),
+                (self._reader('max_price'), 'mx', 'hi'),
+                (self._reader('min_price'), 'mn', 'lo')):
+            if reader:
+                select.append(f'{alias}.price AS {label}')
+                joins.append(
+                    f'LEFT JOIN {reader} {alias} USING (datetime, tickersymbol)')
+            else:
+                select.append(f'NULL AS {label}')
+        sql = (f"SELECT {', '.join(select)} FROM {close} c {' '.join(joins)} "
+               f"WHERE c.tickersymbol = ? AND c.datetime >= ? "
+               f"AND c.datetime < ? ORDER BY c.datetime LIMIT 1")
+        row = self._conn.execute(
+            sql, [ticker, day.isoformat(),
+                  (day + timedelta(days=1)).isoformat()]).fetchone()
+        if row is None:
+            return None, None, None
+        return tuple(None if v is None else Decimal(str(v)) for v in row)
+
     # -- intervals ---------------------------------------------------------
 
     def interval(
@@ -383,10 +419,17 @@ class DataHubSource:
         if not rows:
             return None
         state, volume = rows[0]
+        open_, high, low = self._ohlc(ticker, day)
 
         missing = set(self.WITHHELD)
         if volume is None:
             missing.add(DataField.VOLUME)
+        if open_ is None:
+            missing.add(DataField.OPEN)
+        if high is None:
+            missing.add(DataField.HIGH)
+        if low is None:
+            missing.add(DataField.LOW)
         if state.last is None:
             missing.add(DataField.CLOSE)
             missing.add(DataField.LAST)
@@ -399,8 +442,12 @@ class DataHubSource:
                 datetime(end.year, end.month, end.day)),
             resolution=Resolution.DAILY,
             state=state,
-            # A daily bar's close *is* its last matched price, which is what
-            # ``quote_close`` holds; open/high/low stay unserved and named.
+            # A daily bar's close *is* its last matched price (``quote_close``);
+            # open/high/low come from ``quote_open`` and the session extremes
+            # ``quote_max``/``quote_min``, each named ``missing`` where absent.
+            open=open_,
+            high=high,
+            low=low,
             close=state.last,
             volume=volume,
             book=None,

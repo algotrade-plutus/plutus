@@ -248,14 +248,19 @@ def test_a_ticker_with_no_volume_to_publish_names_the_absence(corpus_root):
 @requires_corpus
 def test_every_withheld_field_is_named_on_every_interval(corpus_root):
     """A field this source cannot serve is named on the bar, so a policy that
-    needs one returns INDETERMINATE naming it and the session counts it.
-    OPEN/HIGH/LOW are in here and the corpus does hold them -- that gap is
-    real, declared, and counted rather than invisible."""
+    needs one returns INDETERMINATE naming it and the session counts it. Since
+    2026-08-30 OPEN/HIGH/LOW are served from quote_open and the session extremes
+    quote_max/quote_min, so the only field structurally withheld on a daily bar
+    is BOOK_SIZE."""
     source = DataHubSource.for_root(str(corpus_root))
     interval = source.interval('HPG', datetime(2022, 10, 24),
                                datetime(2022, 10, 25))
     assert DataHubSource.WITHHELD <= interval.missing
-    assert {DataField.OPEN, DataField.HIGH, DataField.LOW} <= interval.missing
+    assert DataField.BOOK_SIZE in interval.missing
+    # OPEN/HIGH/LOW are served now, not withheld -- and they bracket the close.
+    assert not ({DataField.OPEN, DataField.HIGH, DataField.LOW} & interval.missing)
+    assert interval.open is not None
+    assert interval.low <= interval.close <= interval.high
 
 
 @requires_corpus

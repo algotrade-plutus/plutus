@@ -1,30 +1,32 @@
 """F2 -- the indeterminate rate per (data resolution x cause), as a test.
 
-The paper's third contribution (``measurements/indeterminate_rate.py``), pinned.
-The same population of HSX instrument-days is run under the ``hard`` fill policy
-at BAR resolution and the ``book_walk`` policy at TICK resolution, against one
-identical probe, and each run's ``indeterminate_report()`` is read back. The
-finding this test guards:
+**Superseded by E1** (the population fill-divergence experiment,
+``docs/reference/EXPERIMENT-E1-FILL-DIVERGENCE.md``); kept and reconciled to the
+O/H/L-wired daily adapter (2026-08-30) so it stays green and honest. The same
+population of HSX instrument-days is run under ``hard`` at BAR resolution and the
+``book_walk`` policy at TICK, against one identical probe, and each run's
+``indeterminate_report()`` is read back. What this test now guards is the
+*classification* of the ignorance -- which is robust -- not its magnitude, which
+the OHLC wiring inverted:
 
-* **BAR** is dominated by the resolution-limit cause
-  ``FILL_UNOBSERVABLE_AT_RESOLUTION`` -- the touched-at-limit case a daily bar
-  cannot decide. It is the honest floor; only a finer resolution lowers it.
-* **TICK** carries **zero** of that cause (the book-walk cannot emit it) -- the
-  touch is decidable at tick -- and what remains is entirely the *data ceiling*
-  (``BOOK_SIZE`` / ``VOLUME``: unsized levels, prices outside the displayed
-  ladder, the sized tape this corpus lacks). Under the optimistic queue the tick
-  rate falls below the bar's; under the conservative queue it stays high but is
-  still 100% data-ceiling.
+* **BAR** (now that ``quote_max`` / ``quote_min`` serve the day's high/low) is
+  MOSTLY DECIDABLE. Its residual indeterminacy is entirely the resolution-limit
+  cause ``FILL_UNOBSERVABLE_AT_RESOLUTION`` -- the touched-at-limit case a daily
+  bar cannot decide even with full OHLC -- and the former ``low`` data-ceiling
+  cause is gone (the served low decides it). The close-only 100% was an adapter
+  artifact, since removed; this is the honest floor.
+* **TICK** carries **zero** of that resolution-limit cause (the touch is
+  decidable at tick), and what remains is entirely the *data ceiling*
+  (``BOOK_SIZE`` / ``VOLUME``: the sized tape this corpus lacks). Here it is now
+  *higher* than the bar, because this tick extract is missing the sized prints --
+  so refining bar->tick raises the rate while shifting its cause.
 
-So refining the resolution does not remove the indeterminacy; it trades the
-resolution-limit cause for the data-ceiling one. That is F2.
+So the two resolutions carry different KINDS of ignorance -- bar = resolution
+limit, tick = data ceiling -- and the KIND, not the magnitude, is the finding.
 
-This runs the measurement on a small deterministic slice of the population for
-speed; the full population and the figure come from
-``measurements/indeterminate_rate.py`` (its ``main`` writes ``figures/``). It
-gates on BOTH corpora being present -- the daily Parquet corpus and the
-``local_quote`` tick extract -- and skips cleanly otherwise, the way the S8/S9
-tick tests do.
+This runs the measurement on a small deterministic slice for speed; the full
+population and the figure come from ``measurements/indeterminate_rate.py``. It
+gates on BOTH corpora being present and skips cleanly otherwise.
 
 RUN
     .venv/bin/python -m pytest strategies/test_f2_resolution_indeterminacy.py -v
@@ -89,21 +91,29 @@ def test_f2_resolution_indeterminacy():
     for arm in (bar, tick_opt, tick_con):
         assert arm.evaluations > 0, arm.label
 
-    # (1) The resolution-limit cause DOMINATES at bar -- it is the single largest
-    # cause and a majority of all bar fill evaluations.
-    assert bar.by_cause.get(_FILL_UNOBSERVABLE, 0) == max(bar.by_cause.values())
-    assert bar.resolution_limit_share > 0.5, dict(bar.by_cause)
+    # (1) At BAR, with the day's high/low now served, the bar is MOSTLY DECIDABLE
+    # and its residual indeterminacy is ENTIRELY the resolution-limit touch: the
+    # only cause left is FILL_UNOBSERVABLE, the former `low` data-ceiling cause is
+    # gone (the served low decides it), and the rate has collapsed off its old
+    # close-only 100%. This is the OHLC fix, reconciled.
+    assert float(bar.rate) < 0.5, (float(bar.rate), dict(bar.by_cause))
+    assert set(bar.by_cause) == {_FILL_UNOBSERVABLE}, dict(bar.by_cause)
+    assert bar.data_ceiling_share == 0, dict(bar.by_cause)
+    assert float(bar.resolution_limit_share) == pytest.approx(float(bar.rate))
 
-    # (2) That cause is STRUCTURALLY ABSENT at tick -- both queue arms. A tick
-    # can decide the touch, so the book-walk never names it.
+    # (2) That resolution-limit cause is STRUCTURALLY ABSENT at tick -- both queue
+    # arms. A tick can decide the touch, so the book-walk never names it.
     assert tick_opt.by_cause.get(_FILL_UNOBSERVABLE, 0) == 0
     assert tick_con.by_cause.get(_FILL_UNOBSERVABLE, 0) == 0
     assert tick_opt.resolution_limit_share == 0
     assert tick_con.resolution_limit_share == 0
 
-    # (3) The bar rate EXCEEDS the tick rate (optimistic queue -- the one that
-    # decides the touch rather than assuming the queue away).
-    assert bar.rate > tick_opt.rate, (float(bar.rate), float(tick_opt.rate))
+    # (3) The KIND of ignorance, not its magnitude, separates the resolutions. The
+    # bar is entirely resolution-limit, the tick entirely data-ceiling. With full
+    # OHLC the bar is now MORE decidable than this sized-tape-poor tick extract, so
+    # the bar rate is BELOW the tick's -- the inverse of the close-only era.
+    assert bar.data_ceiling_share == 0 and tick_opt.resolution_limit_share == 0
+    assert float(bar.rate) < float(tick_opt.rate), (float(bar.rate), float(tick_opt.rate))
 
     # (4) Whatever indeterminacy the tick DOES carry is entirely data-ceiling
     # (missing sizes/tape), and it is real (non-empty) -- the causes have shifted,

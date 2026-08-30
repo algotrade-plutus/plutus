@@ -8,11 +8,11 @@ Every headline number the paper reports, with the **fill policy**, **resolution*
 
 ## Fill × resolution — the indeterminate rate (F2)
 
-Same 66 HSX instrument-days, same three-order probe, run at each resolution; the value is the share of fill evaluations the engine could not decide, and the parenthetical is how much of that share is the *resolution-limit* cause (`fill_unobservable_at_resolution`) rather than a data-ceiling one.
+Same 66 HSX instrument-days, same three-order probe, run at each resolution; the value is the share of fill evaluations the engine could not decide, and the parenthetical is how much of that share is the *resolution-limit* cause (`fill_unobservable_at_resolution`) rather than a data-ceiling one. **With the daily bar's own high/low now served (2026-08-30, from `quote_max`/`quote_min`), the bar is mostly decidable and its residual is *entirely* the resolution-limit touch — the `low` data-ceiling cause is resolved.** *(F2 is superseded by E1, the population fill-divergence experiment; kept for the resolution × cause classification, which is robust.)*
 
 | Result | Fill policy | Resolution | Assumption set | Value — 95% CI | Source |
 |---|---|---|---|---|---|
-| indeterminate rate | `hard` | daily bar | touched-at-limit | **100.0%** [99.6, 100.0] — 67.5% resolution-limit | `indeterminate_rate.py` |
+| indeterminate rate | `hard` | daily bar (OHLC) | touched-at-limit | **35.8%** [32.3, 39.4] — all resolution-limit (`low` resolved) | `indeterminate_rate.py` |
 | indeterminate rate | `book_walk` | tick | optimistic queue | **85.6%** [83.5, 87.4] — 0% resolution-limit | `indeterminate_rate.py` |
 | indeterminate rate | `book_walk` | tick | conservative queue | **99.7%** [99.3, 99.9] — 0% resolution-limit | `indeterminate_rate.py` |
 

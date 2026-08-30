@@ -11,25 +11,20 @@
       "label": "BAR / hard",
       "resolution": "bar",
       "policy": "hard",
-      "evaluations": 970,
-      "indeterminate": 970,
-      "rate": 1.0,
-      "ci_low": 0.9960553550211899,
-      "ci_high": 1.0,
+      "evaluations": 698,
+      "indeterminate": 250,
+      "rate": 0.35816618911174786,
+      "ci_low": 0.3234622946217809,
+      "ci_high": 0.39442270987382155,
       "by_cause": {
         "fill_unobservable_at_resolution": {
-          "count": 655,
-          "share": 0.6752577319587629,
+          "count": 250,
+          "share": 0.35816618911174786,
           "class": "resolution-limit"
-        },
-        "low": {
-          "count": 315,
-          "share": 0.3247422680412371,
-          "class": "data-ceiling"
         }
       },
-      "resolution_limit_share": 0.6752577319587629,
-      "data_ceiling_share": 0.3247422680412371
+      "resolution_limit_share": 0.35816618911174786,
+      "data_ceiling_share": 0.0
     },
     {
       "label": "TICK / book-walk (optimistic)",
